@@ -47,7 +47,7 @@
 //! let output = codegen.generate(&module)?;
 //! ```
 
-pub(crate) mod analysis;
+pub mod analysis;
 pub mod backend;
 pub mod builder;
 pub mod c_verify;
@@ -58,6 +58,28 @@ pub mod ir;
 pub mod lower;
 pub mod runtime;
 pub mod superopt;
+
+pub use analysis::cap_effect_audit::{
+    audit_module as audit_mir_effects, compute_manifest_sha256, CapEffect, EffectManifest,
+    EffectViolation, FunctionEffectRecord, EFFECT_MANIFEST_SCHEMA,
+};
+pub use analysis::ct_taint_audit::{
+    audit_mir_constant_time, compute_ct_manifest_sha256, is_ct_function_name, is_secret_identifier,
+    CtManifest, CtViolation, CtViolationKind, FunctionCtRecord, CT_MANIFEST_SCHEMA,
+};
+pub use analysis::det_repro_audit::{
+    audit_mir_determinism, classify_nondeterministic_symbol, compute_det_manifest_sha256,
+    DetManifest, DetViolation, DetViolationKind, FunctionDetRecord, DET_MANIFEST_SCHEMA,
+};
+pub use analysis::sovereign_audit::{
+    compute_sovereign_root_sha256, default_sovereign_denied_effects, run_sovereign_mir_audit,
+    SovereignAuditConfig, SovereignAuditManifest, SovereignPillarStatus,
+    DEFAULT_SOVEREIGN_STACK_BUDGET_BYTES, SOVEREIGN_AUDIT_SCHEMA,
+};
+pub use analysis::wcet_stack_audit::{
+    audit_mir_wcet_stack, compute_wcet_manifest_sha256, FunctionWcetRecord, WcetManifest,
+    WcetViolation, WcetViolationKind, DEFAULT_STATIC_LOOP_BOUND, WCET_MANIFEST_SCHEMA,
+};
 
 pub use backend::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 pub use builder::*;

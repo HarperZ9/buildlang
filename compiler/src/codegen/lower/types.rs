@@ -427,13 +427,48 @@ impl<'ctx> MirLowerer<'ctx> {
                 "Formatter" if self.module.find_type("Formatter").is_none() => {
                     MirType::Struct(Arc::from("BuildFormatter"))
                 }
-                "AtomicUsize" if self.module.find_type("AtomicUsize").is_none() => MirType::usize(),
-                "AtomicIsize" if self.module.find_type("AtomicIsize").is_none() => MirType::isize(),
-                "AtomicU64" if self.module.find_type("AtomicU64").is_none() => MirType::u64(),
-                "AtomicI64" if self.module.find_type("AtomicI64").is_none() => MirType::i64(),
-                "AtomicU32" if self.module.find_type("AtomicU32").is_none() => MirType::u32(),
-                "AtomicI32" if self.module.find_type("AtomicI32").is_none() => MirType::i32(),
-                "AtomicBool" if self.module.find_type("AtomicBool").is_none() => MirType::Bool,
+                "AtomicUsize"
+                    if self.module.find_type("AtomicUsize").is_none()
+                        && !self.defined_type_names.contains("AtomicUsize") =>
+                {
+                    MirType::usize()
+                }
+                "AtomicIsize"
+                    if self.module.find_type("AtomicIsize").is_none()
+                        && !self.defined_type_names.contains("AtomicIsize") =>
+                {
+                    MirType::isize()
+                }
+                "AtomicU64"
+                    if self.module.find_type("AtomicU64").is_none()
+                        && !self.defined_type_names.contains("AtomicU64") =>
+                {
+                    MirType::u64()
+                }
+                "AtomicI64"
+                    if self.module.find_type("AtomicI64").is_none()
+                        && !self.defined_type_names.contains("AtomicI64") =>
+                {
+                    MirType::i64()
+                }
+                "AtomicU32"
+                    if self.module.find_type("AtomicU32").is_none()
+                        && !self.defined_type_names.contains("AtomicU32") =>
+                {
+                    MirType::u32()
+                }
+                "AtomicI32"
+                    if self.module.find_type("AtomicI32").is_none()
+                        && !self.defined_type_names.contains("AtomicI32") =>
+                {
+                    MirType::i32()
+                }
+                "AtomicBool"
+                    if self.module.find_type("AtomicBool").is_none()
+                        && !self.defined_type_names.contains("AtomicBool") =>
+                {
+                    MirType::Bool
+                }
                 "ByteReader" if self.module.find_type("ByteReader").is_none() => {
                     MirType::Struct(Arc::from("BuildByteReader"))
                 }
@@ -449,6 +484,30 @@ impl<'ctx> MirLowerer<'ctx> {
                 "vec2" => MirType::Struct(Arc::from("build_vec2")),
                 "vec3" => MirType::Struct(Arc::from("build_vec3")),
                 "vec4" => MirType::Struct(Arc::from("build_vec4")),
+                "Vec2"
+                    if self.module.find_type("Vec2").is_none()
+                        && !self.defined_type_names.contains("Vec2")
+                        && !self.type_module_map.contains_key("Vec2")
+                        && !self.generic_structs.contains_key("Vec2") =>
+                {
+                    MirType::Struct(Arc::from("build_vec2"))
+                }
+                "Vec3"
+                    if self.module.find_type("Vec3").is_none()
+                        && !self.defined_type_names.contains("Vec3")
+                        && !self.type_module_map.contains_key("Vec3")
+                        && !self.generic_structs.contains_key("Vec3") =>
+                {
+                    MirType::Struct(Arc::from("build_vec3"))
+                }
+                "Vec4"
+                    if self.module.find_type("Vec4").is_none()
+                        && !self.defined_type_names.contains("Vec4")
+                        && !self.type_module_map.contains_key("Vec4")
+                        && !self.generic_structs.contains_key("Vec4") =>
+                {
+                    MirType::Struct(Arc::from("build_vec4"))
+                }
                 "mat4" => MirType::Struct(Arc::from("build_mat4")),
                 // Resolve Self to the current impl's concrete type name
                 "Self" => {

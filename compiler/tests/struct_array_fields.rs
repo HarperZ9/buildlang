@@ -330,10 +330,11 @@ fn the_matrix_programs_print_what_the_python_model_computed() {
     }
 }
 
-/// A tuple with a fixed array inside it used to be refused until the C backend
-/// emitted array fields inside generated `BlTuple_*` structs; it now compiles
-/// and preserves every element cleanly, while genuinely unsupported shapes
-/// (like `Vec<[i64; 2]>`) are still refused with a diagnostic.
+/// A tuple with a fixed array inside it and `Vec<[i64; 2]>` used to be refused
+/// until the C backend emitted array fields inside generated `BlTuple_*` and
+/// array-vec helpers; both now compile and preserve every element cleanly,
+/// while genuinely unsupported shapes (like `Vec<([i64; 2], i64)>`) are still
+/// refused with a diagnostic.
 #[test]
 fn shapes_that_cannot_be_built_are_refused_not_miscompiled() {
     let tuple = "fn main() ~ Console {\n\
@@ -347,12 +348,23 @@ fn shapes_that_cannot_be_built_are_refused_not_miscompiled() {
     let vec_arr = "fn main() ~ Console {\n\
                    let mut v: Vec<[i64; 2]> = Vec::new();\n\
                    v.push([1, 2]);\n\
-                   println!(\"{}\", v.len());\n\
+                   println!(\"{} {}\", v.len(), v[0][1]);\n\
                    }\n";
-    let ran_bad = run("vec_arr", vec_arr);
+    let ran_ok = run("vec_arr", vec_arr);
+    assert_eq!(ran_ok.code, Some(0), "stderr: {}", ran_ok.stderr);
+    assert_eq!(ran_ok.stdout.replace("\r\n", "\n"), "1 2\n");
+
+    let vec_tup_arr = "fn main() ~ Console {\n\
+                       let mut v: Vec<([i64; 2], i64)> = Vec::new();\n\
+                       v.push(([1, 2], 3));\n\
+                       println!(\"{}\", v.len());\n\
+                       }\n";
+    let ran_bad = run("vec_tup_arr", vec_tup_arr);
     assert_ne!(ran_bad.code, Some(0), "stdout: {}", ran_bad.stdout);
     assert!(
-        ran_bad.stderr.contains("a vector of `[i64; 2]` elements"),
+        ran_bad
+            .stderr
+            .contains("a vector of `([i64; 2], i64)` elements"),
         "{}",
         ran_bad.stderr
     );

@@ -1,0 +1,63 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: Rigid-body contact Projected Gauss-Seidel (PGS) LCP solver kernel.
+// Computes Baumgarte-stabilized normal impulse with non-negativity projection, clamps
+// tangential friction impulse to the Coulomb cone, and updates contact velocities.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn rigid_body_lcp_pgs_gpu(
+    baumgarte: f32,
+    inv_dt: f32,
+    slop: f32,
+    mu_fric: f32,
+    vn_buf: &[f32],
+    vt_buf: &[f32],
+    pen_buf: &[f32],
+    eff_n_buf: &[f32],
+    eff_t_buf: &[f32],
+    ln_prev_buf: &[f32],
+    lt_prev_buf: &[f32],
+    ln_out: &mut [f32],
+    lt_out: &mut [f32],
+    vn_out: &mut [f32],
+    vt_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let vn: f32 = vn_buf[i];
+    let vt: f32 = vt_buf[i];
+    let eff_n: f32 = eff_n_buf[i];
+    let eff_t: f32 = eff_t_buf[i];
+
+    let mut pen_err: f32 = pen_buf[i] - slop;
+    if pen_err < 0.0 {
+        pen_err = 0.0;
+    }
+    let bias: f32 = baumgarte * inv_dt * pen_err;
+
+    let ln_old: f32 = ln_prev_buf[i];
+    let d_ln_raw: f32 = -(vn - bias) * eff_n;
+    let mut ln_new: f32 = ln_old + d_ln_raw;
+    if ln_new < 0.0 {
+        ln_new = 0.0;
+    }
+    let d_ln: f32 = ln_new - ln_old;
+
+    let lt_old: f32 = lt_prev_buf[i];
+    let d_lt_raw: f32 = -vt * eff_t;
+    let max_fric: f32 = mu_fric * ln_new;
+    let mut lt_new: f32 = lt_old + d_lt_raw;
+    if lt_new > max_fric {
+        lt_new = max_fric;
+    }
+    if lt_new < -max_fric {
+        lt_new = -max_fric;
+    }
+    let d_lt: f32 = lt_new - lt_old;
+
+    let inv_eff_n: f32 = 1.0 / (eff_n + 0.000001);
+    let inv_eff_t: f32 = 1.0 / (eff_t + 0.000001);
+    ln_out[i] = ln_new;
+    lt_out[i] = lt_new;
+    vn_out[i] = vn + d_ln * inv_eff_n;
+    vt_out[i] = vt + d_lt * inv_eff_t;
+}

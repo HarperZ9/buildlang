@@ -1,0 +1,66 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Finance-Graph-Optics-FFT Heston stochastic-volatility Milstein step + discounted payoff kernel.
+// Advances variance with full-truncation Milstein diffusion, evolves correlated asset spot
+// price, and evaluates discounted European call payoff with strict non-negativity bounds.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn fin_heston_montecarlo_compute(
+    dt: f32,
+    sqrt_dt: f32,
+    r_rate: f32,
+    kappa: f32,
+    theta: f32,
+    xi: f32,
+    rho: f32,
+    rho_perp: f32,
+    strike: f32,
+    disc: f32,
+    s0_buf: &[f32],
+    v0_buf: &[f32],
+    z1_buf: &[f32],
+    z2_buf: &[f32],
+    s_out: &mut [f32],
+    v_out: &mut [f32],
+    payoff_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let s0: f32 = s0_buf[i];
+    let v0: f32 = v0_buf[i];
+    let z1: f32 = z1_buf[i];
+    let z2: f32 = z2_buf[i];
+
+    let mut vp: f32 = v0;
+    if vp < 0.0 {
+        vp = 0.0;
+    }
+    let vp_eps: f32 = vp + 0.000001;
+    let mut sv: f32 = 0.5 * (vp_eps + 1.0);
+    sv = 0.5 * (sv + vp_eps / sv);
+    sv = 0.5 * (sv + vp_eps / sv);
+    sv = 0.5 * (sv + vp_eps / sv);
+    sv = 0.5 * (sv + vp_eps / sv);
+
+    let mil_v: f32 = 0.25 * xi * xi * dt * (z2 * z2 - 1.0);
+    let mut v_next: f32 = v0 + kappa * (theta - vp) * dt + xi * sv * sqrt_dt * z2 + mil_v;
+    if v_next < 0.0 {
+        v_next = 0.0;
+    }
+
+    let dw_s: f32 = rho * z2 + rho_perp * z1;
+    let step_s: f32 = 1.0 + r_rate * dt + sv * sqrt_dt * dw_s + 0.5 * vp * dt * (dw_s * dw_s - 1.0);
+    let mut s_next: f32 = s0 * step_s;
+    if s_next < 0.0001 {
+        s_next = 0.0001;
+    }
+
+    let mut intrinsic: f32 = s_next - strike;
+    if intrinsic < 0.0 {
+        intrinsic = 0.0;
+    }
+    let payoff: f32 = disc * intrinsic;
+
+    s_out[i] = s_next;
+    v_out[i] = v_next;
+    payoff_out[i] = payoff;
+}

@@ -1,0 +1,62 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Astro-Robotics GPU 440-Pack: 3x3 symmetric Jacobi eigensolver sweep kernel.
+// Eliminates the off-diagonal (0, 1) element of a symmetric 3x3 matrix via exact Givens
+// Jacobi rotation (c, s) and reports updated diagonal eigenvalues plus trace invariant.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn svd_jacobi_3x3_gpu(
+    eps: f32,
+    a00_buf: &[f32],
+    a01_buf: &[f32],
+    a02_buf: &[f32],
+    a11_buf: &[f32],
+    a12_buf: &[f32],
+    a22_buf: &[f32],
+    d0_out: &mut [f32],
+    d1_out: &mut [f32],
+    trace_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let a00: f32 = a00_buf[i];
+    let a01: f32 = a01_buf[i];
+    let a02: f32 = a02_buf[i];
+    let a11: f32 = a11_buf[i];
+    let a12: f32 = a12_buf[i];
+    let a22: f32 = a22_buf[i];
+
+    let mut abs_a01: f32 = a01;
+    if abs_a01 < 0.0 {
+        abs_a01 = -abs_a01;
+    }
+
+    let tau: f32 = (a11 - a00) / (2.0 * a01 + eps);
+    let t2p1: f32 = 1.0 + tau * tau;
+    let mut rt: f32 = 0.5 * (t2p1 + 1.0);
+    rt = 0.5 * (rt + t2p1 / rt);
+    rt = 0.5 * (rt + t2p1 / rt);
+
+    let mut t_rot: f32 = 1.0 / (tau + rt + eps);
+    if tau < 0.0 {
+        t_rot = -1.0 / (-tau + rt + eps);
+    }
+    if abs_a01 < eps {
+        t_rot = 0.0;
+    }
+
+    let inv_c2: f32 = 1.0 + t_rot * t_rot;
+    let mut denom_c: f32 = 0.5 * (inv_c2 + 1.0);
+    denom_c = 0.5 * (denom_c + inv_c2 / denom_c);
+    denom_c = 0.5 * (denom_c + inv_c2 / denom_c);
+    let c: f32 = 1.0 / (denom_c + eps);
+    let s: f32 = t_rot * c;
+
+    let d0: f32 = c * c * a00 - 2.0 * s * c * a01 + s * s * a11;
+    let d1: f32 = s * s * a00 + 2.0 * s * c * a01 + c * c * a11;
+    let b02: f32 = c * a02 - s * a12;
+    let b12: f32 = s * a02 + c * a12;
+
+    d0_out[i] = d0;
+    d1_out[i] = d1;
+    trace_out[i] = d0 + d1 + a22 + 0.0 * (b02 + b12);
+}

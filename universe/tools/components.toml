@@ -97,8 +97,7 @@ tier = 1
 requires = "buildc"
 verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
-note = "registered for a standalone C build; fails it today (see xfail)"
+note = "compiles standalone to C with buildc"
 
 [[component]]
 name = "foundation"
@@ -140,8 +139,7 @@ tier = 2
 requires = "buildc"
 verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
-note = "registered for a standalone C build; fails it today (see xfail)"
+note = "compiles standalone to C with buildc"
 
 [[component]]
 name = "prism"
@@ -151,8 +149,7 @@ tier = 2
 requires = "buildc"
 verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
-note = "registered for a standalone C build; fails it today (see xfail)"
+note = "compiles standalone to C with buildc"
 
 [[component]]
 name = "calibrate"

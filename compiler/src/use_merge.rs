@@ -175,10 +175,22 @@ fn find(
 
 /// Every module file the top-level `use` items of `ast` name.
 pub(crate) fn collect(ast: &Module, source_dir: &Path, stdlib: Option<&Path>) -> UseRequests {
+    let mut header_mods: HashSet<Arc<str>> = HashSet::new();
     let local: HashSet<Arc<str>> = ast
         .items
         .iter()
-        .filter_map(|item| item.name().map(|n| n.name.clone()))
+        .filter_map(|item| {
+            // A file-level `module foo::bar` header has `content: None` and
+            // declares the current file's own namespace, not a local inline
+            // item that shadows `use foo::{...}` from a sibling `foo/lib.bld`.
+            if let ItemKind::Mod(m) = &item.kind {
+                if m.content.is_none() {
+                    header_mods.insert(m.name.name.clone());
+                    return None;
+                }
+            }
+            item.name().map(|n| n.name.clone())
+        })
         .collect();
     let mut requests: Vec<UseRequest> = Vec::new();
     let mut satisfied_items = Vec::new();
@@ -189,11 +201,26 @@ pub(crate) fn collect(ast: &Module, source_dir: &Path, stdlib: Option<&Path>) ->
         let mut found_leaves = Vec::new();
         leaves(&use_def.tree, &[], &mut found_leaves);
         let mut all_found = !found_leaves.is_empty();
+        let mut staged: Vec<(Found, Option<Arc<str>>)> = Vec::new();
+        let touches_header_mod = found_leaves.iter().any(|l| {
+            l.segs
+                .first()
+                .is_some_and(|r| header_mods.contains(r.as_ref()))
+        });
         for leaf in &found_leaves {
             let Some(found) = find(leaf, source_dir, stdlib, &local) else {
                 all_found = false;
                 continue;
             };
+            staged.push((found, leaf.rename.clone()));
+        }
+        // Only merge a `use` targeting this file's own `module foo::bar` header
+        // namespace when every requested item actually exists in the sibling
+        // module file; avoid partial merges from unrelated `foo/lib.bld` files.
+        if touches_header_mod && !all_found {
+            continue;
+        }
+        for (found, rename) in staged {
             let position = match requests.iter().position(|r| r.file == found.file) {
                 Some(position) => position,
                 None => {
@@ -214,8 +241,7 @@ pub(crate) fn collect(ast: &Module, source_dir: &Path, stdlib: Option<&Path>) ->
             match found.item {
                 None => requests[position].glob = true,
                 Some(item) => {
-                    let local_name = leaf
-                        .rename
+                    let local_name = rename
                         .as_ref()
                         .map(|r| r.to_string())
                         .unwrap_or_else(|| item.clone());

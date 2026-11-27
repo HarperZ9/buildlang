@@ -1,0 +1,64 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Crypto-Med GPU 360-Pack: RFC 8439 ChaCha20 20-round keystream GPU kernel.
+// Executes ten double-rounds (20 quarter-round stages with rotations 16, 12, 8, 7) on
+// 32-bit state lanes and adds the initial state words to emit keystream words.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn chacha20_block_gpu(
+    counter_base: u32,
+    s0_buf: &[u32],
+    s1_buf: &[u32],
+    s2_buf: &[u32],
+    s3_buf: &[u32],
+    k0_out: &mut [u32],
+    k1_out: &mut [u32],
+    k2_out: &mut [u32],
+    k3_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let init0: u32 = s0_buf[i];
+    let init1: u32 = s1_buf[i];
+    let init2: u32 = s2_buf[i];
+    let init3: u32 = s3_buf[i] + counter_base;
+
+    let mut a: u32 = init0;
+    let mut b: u32 = init1;
+    let mut c: u32 = init2;
+    let mut d: u32 = init3;
+
+    let mut dr: i32 = 0;
+    while dr < 10 {
+        a = a + b;
+        let d1: u32 = d ^ a;
+        d = (d1 << 16) | (d1 >> 16);
+        c = c + d;
+        let b1: u32 = b ^ c;
+        b = (b1 << 12) | (b1 >> 20);
+        a = a + b;
+        let d2: u32 = d ^ a;
+        d = (d2 << 8) | (d2 >> 24);
+        c = c + d;
+        let b2: u32 = b ^ c;
+        b = (b2 << 7) | (b2 >> 25);
+
+        a = a + b;
+        let d3: u32 = d ^ a;
+        d = (d3 << 16) | (d3 >> 16);
+        c = c + d;
+        let b3: u32 = b ^ c;
+        b = (b3 << 12) | (b3 >> 20);
+        a = a + b;
+        let d4: u32 = d ^ a;
+        d = (d4 << 8) | (d4 >> 24);
+        c = c + d;
+        let b4: u32 = b ^ c;
+        b = (b4 << 7) | (b4 >> 25);
+        dr = dr + 1;
+    }
+
+    k0_out[i] = a + init0;
+    k1_out[i] = b + init1;
+    k2_out[i] = c + init2;
+    k3_out[i] = d + init3;
+}

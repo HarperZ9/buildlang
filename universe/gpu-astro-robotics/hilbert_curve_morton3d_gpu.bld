@@ -1,0 +1,49 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Astro-Robotics GPU 440-Pack: 3D Morton spatial Z-order encode and Gray-Hilbert key kernel.
+// Interleaves 10-bit quantized (x, y, z) coordinates into a 30-bit Morton code via magic-bit
+// dilation, applies Gray-code locality transform, and verifies bit-exact x-coordinate decode.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn hilbert_curve_morton3d_gpu(
+    mask10: u32,
+    x_buf: &[u32],
+    y_buf: &[u32],
+    z_buf: &[u32],
+    morton_out: &mut [u32],
+    gray_out: &mut [u32],
+    x_dec_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut x: u32 = x_buf[i] & mask10;
+    let mut y: u32 = y_buf[i] & mask10;
+    let mut z: u32 = z_buf[i] & mask10;
+
+    x = (x | (x << 16)) & 50331903;
+    x = (x | (x << 8)) & 50393103;
+    x = (x | (x << 4)) & 51130563;
+    x = (x | (x << 2)) & 153391689;
+
+    y = (y | (y << 16)) & 50331903;
+    y = (y | (y << 8)) & 50393103;
+    y = (y | (y << 4)) & 51130563;
+    y = (y | (y << 2)) & 153391689;
+
+    z = (z | (z << 16)) & 50331903;
+    z = (z | (z << 8)) & 50393103;
+    z = (z | (z << 4)) & 51130563;
+    z = (z | (z << 2)) & 153391689;
+
+    let code: u32 = x | (y << 1) | (z << 2);
+    let gray: u32 = code ^ (code >> 1);
+
+    let mut dx: u32 = code & 153391689;
+    dx = (dx | (dx >> 2)) & 51130563;
+    dx = (dx | (dx >> 4)) & 50393103;
+    dx = (dx | (dx >> 8)) & 50331903;
+    dx = (dx | (dx >> 16)) & 1023;
+
+    morton_out[i] = code;
+    gray_out[i] = gray;
+    x_dec_out[i] = dx;
+}

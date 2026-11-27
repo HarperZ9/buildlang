@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Titan-AI OPT-069 INT4 group-16 symmetric dequantization + fused 4-lane GEMV kernel.
+// Unpacks signed 4-bit quantized weights from symmetric group-scaled lanes and accumulates
+// fused multiply-add dot products with finite residual clamping.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn titan_int4_dequant_gemv_compute(
+    zero_pt: f32,
+    clamp_lim: f32,
+    q0_buf: &[f32],
+    q1_buf: &[f32],
+    q2_buf: &[f32],
+    q3_buf: &[f32],
+    scale_buf: &[f32],
+    x0_buf: &[f32],
+    x1_buf: &[f32],
+    x2_buf: &[f32],
+    x3_buf: &[f32],
+    bias_buf: &[f32],
+    y_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let sc: f32 = scale_buf[i];
+
+    let w0: f32 = (q0_buf[i] - zero_pt) * sc;
+    let w1: f32 = (q1_buf[i] - zero_pt) * sc;
+    let w2: f32 = (q2_buf[i] - zero_pt) * sc;
+    let w3: f32 = (q3_buf[i] - zero_pt) * sc;
+
+    let mut acc: f32 = bias_buf[i];
+    acc = acc + w0 * x0_buf[i];
+    acc = acc + w1 * x1_buf[i];
+    acc = acc + w2 * x2_buf[i];
+    acc = acc + w3 * x3_buf[i];
+
+    if acc < -clamp_lim {
+        acc = -clamp_lim;
+    }
+    if acc > clamp_lim {
+        acc = clamp_lim;
+    }
+    y_out[i] = acc;
+}

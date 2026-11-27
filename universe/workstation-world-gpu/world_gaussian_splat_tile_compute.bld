@@ -1,0 +1,62 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// World-Physics-3D 3D Gaussian Splatting EWA covariance + front-to-back alpha compositing kernel.
+// Inverts per-splat 2x2 projected covariance into conic precision, evaluates Mahalanobis
+// Gaussian falloff, and updates premultiplied RGB color and remaining transmittance.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn world_gaussian_splat_tile_compute(
+    eps: f32,
+    alpha_cap: f32,
+    sxx_buf: &[f32],
+    sxy_buf: &[f32],
+    syy_buf: &[f32],
+    dx_buf: &[f32],
+    dy_buf: &[f32],
+    opa_buf: &[f32],
+    col_buf: &[f32],
+    acc_in_buf: &[f32],
+    trans_in_buf: &[f32],
+    acc_out: &mut [f32],
+    trans_out: &mut [f32],
+    alpha_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let sxx: f32 = sxx_buf[i] + eps;
+    let sxy: f32 = sxy_buf[i];
+    let syy: f32 = syy_buf[i] + eps;
+    let dx: f32 = dx_buf[i];
+    let dy: f32 = dy_buf[i];
+
+    let mut det: f32 = sxx * syy - sxy * sxy;
+    if det < eps {
+        det = eps;
+    }
+    let inv_det: f32 = 1.0 / det;
+    let cxx: f32 = syy * inv_det;
+    let cxy: f32 = -sxy * inv_det;
+    let cyy: f32 = sxx * inv_det;
+
+    let mut quad: f32 = 0.5 * (cxx * dx * dx + 2.0 * cxy * dx * dy + cyy * dy * dy);
+    if quad < 0.0 {
+        quad = 0.0;
+    }
+    let g: f32 = 1.0 / (1.0 + quad + 0.5 * quad * quad + 0.16666667 * quad * quad * quad);
+
+    let mut alpha: f32 = opa_buf[i] * g;
+    if alpha < 0.0 {
+        alpha = 0.0;
+    }
+    if alpha > alpha_cap {
+        alpha = alpha_cap;
+    }
+
+    let t_in: f32 = trans_in_buf[i];
+    let w: f32 = t_in * alpha;
+    let acc_next: f32 = acc_in_buf[i] + w * col_buf[i];
+    let t_next: f32 = t_in * (1.0 - alpha);
+
+    acc_out[i] = acc_next;
+    trans_out[i] = t_next;
+    alpha_out[i] = alpha;
+}

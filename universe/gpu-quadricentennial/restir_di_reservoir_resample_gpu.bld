@@ -1,0 +1,59 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: ReSTIR DI spatio-temporal weighted reservoir resampling kernel.
+// Combines temporal and spatial candidate reservoirs via Talbot/Bitterli MIS weights,
+// updates total weight sum and sample count M, and outputs unbiased estimator W.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn restir_di_reservoir_resample_gpu(
+    m_cap: f32,
+    eps: f32,
+    w_sum_t_buf: &[f32],
+    m_t_buf: &[f32],
+    p_hat_t_buf: &[f32],
+    y_t_buf: &[f32],
+    w_s_buf: &[f32],
+    m_s_buf: &[f32],
+    p_hat_s_buf: &[f32],
+    y_s_buf: &[f32],
+    u_rand_buf: &[f32],
+    w_sum_out: &mut [f32],
+    m_out: &mut [f32],
+    y_out: &mut [f32],
+    w_est_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut mt: f32 = m_t_buf[i];
+    if mt > m_cap {
+        mt = m_cap;
+    }
+    let ms: f32 = m_s_buf[i];
+    let p_t: f32 = p_hat_t_buf[i];
+    let p_s: f32 = p_hat_s_buf[i];
+
+    let mis_denom: f32 = mt * p_t + ms * p_s + eps;
+    let mis_t: f32 = (mt * p_t) / mis_denom;
+    let mis_s: f32 = (ms * p_s) / mis_denom;
+
+    let wt: f32 = w_sum_t_buf[i] * mis_t;
+    let ws: f32 = p_s * w_s_buf[i] * mis_s;
+    let w_sum: f32 = wt + ws;
+
+    let mut y_sel: f32 = y_t_buf[i];
+    let mut p_sel: f32 = p_t;
+    if u_rand_buf[i] * (w_sum + eps) < ws {
+        y_sel = y_s_buf[i];
+        p_sel = p_s;
+    }
+
+    let mut m_new: f32 = mt + ms;
+    if m_new > m_cap {
+        m_new = m_cap;
+    }
+    let w_est: f32 = w_sum / (p_sel * m_new + eps);
+
+    w_sum_out[i] = w_sum;
+    m_out[i] = m_new;
+    y_out[i] = y_sel;
+    w_est_out[i] = w_est;
+}

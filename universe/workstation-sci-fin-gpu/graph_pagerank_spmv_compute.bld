@@ -1,0 +1,41 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Finance-Graph-Optics-FFT damped PageRank sparse gather power-iteration compute kernel.
+// Accumulates four weighted incoming neighbor ranks, applies damping plus teleportation
+// floor, and outputs updated rank together with per-vertex L1 convergence residual.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn graph_pagerank_spmv_compute(
+    damping: f32,
+    base_tele: f32,
+    r_old_buf: &[f32],
+    r0_buf: &[f32],
+    r1_buf: &[f32],
+    r2_buf: &[f32],
+    r3_buf: &[f32],
+    w0_buf: &[f32],
+    w1_buf: &[f32],
+    w2_buf: &[f32],
+    w3_buf: &[f32],
+    r_out: &mut [f32],
+    res_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut acc: f32 = w0_buf[i] * r0_buf[i];
+    acc = acc + w1_buf[i] * r1_buf[i];
+    acc = acc + w2_buf[i] * r2_buf[i];
+    acc = acc + w3_buf[i] * r3_buf[i];
+
+    let mut r_new: f32 = base_tele + damping * acc;
+    if r_new < base_tele {
+        r_new = base_tele;
+    }
+
+    let mut diff: f32 = r_new - r_old_buf[i];
+    if diff < 0.0 {
+        diff = -diff;
+    }
+
+    r_out[i] = r_new;
+    res_out[i] = diff;
+}

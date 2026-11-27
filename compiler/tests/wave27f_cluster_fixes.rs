@@ -277,8 +277,8 @@ fn main() ~ Console {
 fn planted_negative_controls_still_fail_closed() {
     for (label, src) in [
         (
-            "vec_of_fixed_array",
-            "fn main() ~ Console {\n    let mut v: Vec<[i64; 2]> = Vec::new();\n    v.push([1, 2]);\n    println!(\"{}\", v.len());\n}\n",
+            "vec_of_tuple_of_array",
+            "fn main() ~ Console {\n    let mut v: Vec<([i64; 2], i64)> = Vec::new();\n    v.push(([1, 2], 3));\n    println!(\"{}\", v.len());\n}\n",
         ),
         (
             "binary_format_spec",

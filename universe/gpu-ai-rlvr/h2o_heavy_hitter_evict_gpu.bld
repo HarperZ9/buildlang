@@ -1,0 +1,37 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Titan AI/RLVR 240-Pack: Heavy-Hitter (H2O) KV-cache attention-mass eviction GPU kernel.
+// Updates exponential moving average of per-slot attention mass, protects recent sliding
+// window tokens, and flags low-importance non-recent KV slots for cache eviction.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn h2o_heavy_hitter_evict_gpu(
+    ema_decay: f32,
+    recent_cut: f32,
+    evict_thresh: f32,
+    mass_prev_buf: &[f32],
+    attn_cur_buf: &[f32],
+    tok_age_buf: &[f32],
+    mass_out: &mut [f32],
+    score_out: &mut [f32],
+    evict_flag_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let m_new: f32 = ema_decay * mass_prev_buf[i] + attn_cur_buf[i];
+    let age: f32 = tok_age_buf[i];
+
+    let mut bonus: f32 = 0.0;
+    if age < recent_cut {
+        bonus = 100.0;
+    }
+    let priority: f32 = m_new + bonus;
+
+    let mut evict: f32 = 0.0;
+    if priority < evict_thresh {
+        evict = 1.0;
+    }
+
+    mass_out[i] = m_new;
+    score_out[i] = priority;
+    evict_flag_out[i] = evict;
+}

@@ -1,0 +1,68 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Astro-Robotics GPU 440-Pack: Ideal magnetohydrodynamics (MHD) HLL Riemann flux kernel.
+// Computes fast magnetosonic wave speeds from thermal and magnetic pressures and evaluates
+// Harten-Lax-van Leer interface mass, momentum, and transverse magnetic field fluxes.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn mhd_hll_plasma_flux_gpu(
+    gamma: f32,
+    bx: f32,
+    rho_l_buf: &[f32],
+    vx_l_buf: &[f32],
+    p_l_buf: &[f32],
+    by_l_buf: &[f32],
+    rho_r_buf: &[f32],
+    vx_r_buf: &[f32],
+    p_r_buf: &[f32],
+    by_r_buf: &[f32],
+    flux_rho_out: &mut [f32],
+    flux_mx_out: &mut [f32],
+    flux_by_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let rl: f32 = rho_l_buf[i] + 0.000001;
+    let vl: f32 = vx_l_buf[i];
+    let pl: f32 = p_l_buf[i];
+    let byl: f32 = by_l_buf[i];
+
+    let rr: f32 = rho_r_buf[i] + 0.000001;
+    let vr: f32 = vx_r_buf[i];
+    let pr: f32 = p_r_buf[i];
+    let byr: f32 = by_r_buf[i];
+
+    let b2_l: f32 = bx * bx + byl * byl;
+    let b2_r: f32 = bx * bx + byr * byr;
+    let cf2_l: f32 = (gamma * pl + b2_l) / rl + 0.000001;
+    let cf2_r: f32 = (gamma * pr + b2_r) / rr + 0.000001;
+
+    let mut cf_l: f32 = 0.5 * (cf2_l + 1.0);
+    cf_l = 0.5 * (cf_l + cf2_l / cf_l);
+    cf_l = 0.5 * (cf_l + cf2_l / cf_l);
+
+    let mut cf_r: f32 = 0.5 * (cf2_r + 1.0);
+    cf_r = 0.5 * (cf_r + cf2_r / cf_r);
+    cf_r = 0.5 * (cf_r + cf2_r / cf_r);
+
+    let mut sl: f32 = vl - cf_l;
+    if vr - cf_r < sl {
+        sl = vr - cf_r;
+    }
+    let mut sr: f32 = vl + cf_l;
+    if vr + cf_r > sr {
+        sr = vr + cf_r;
+    }
+
+    let fl_rho: f32 = rl * vl;
+    let fr_rho: f32 = rr * vr;
+    let fl_mx: f32 = rl * vl * vl + pl + 0.5 * b2_l - bx * bx;
+    let fr_mx: f32 = rr * vr * vr + pr + 0.5 * b2_r - bx * bx;
+    let fl_by: f32 = vl * byl;
+    let fr_by: f32 = vr * byr;
+
+    let inv_ds: f32 = 1.0 / (sr - sl + 0.000001);
+    let slsr: f32 = sl * sr;
+    flux_rho_out[i] = (sr * fl_rho - sl * fr_rho + slsr * (rr - rl)) * inv_ds;
+    flux_mx_out[i] = (sr * fl_mx - sl * fr_mx + slsr * (rr * vr - rl * vl)) * inv_ds;
+    flux_by_out[i] = (sr * fl_by - sl * fr_by + slsr * (byr - byl)) * inv_ds;
+}

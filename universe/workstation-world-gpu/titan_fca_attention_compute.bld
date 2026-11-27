@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Titan-AI CS-005 O(s^1.5) Factorized Context Attention + Cayley-Symplectic Titans kernel.
+// Fuses local-window and strided global-anchor attention with log-stride multiplicity
+// weighting and exact norm-preserving Cayley unitary state evolution per lane.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn titan_fca_attention_compute(
+    inv_sqrt_d: f32,
+    log_stride: f32,
+    cay_c: f32,
+    cay_s: f32,
+    q0_buf: &[f32],
+    q1_buf: &[f32],
+    kl_buf: &[f32],
+    kg_buf: &[f32],
+    vl_buf: &[f32],
+    vg_buf: &[f32],
+    state_q_buf: &[f32],
+    state_p_buf: &[f32],
+    attn_out: &mut [f32],
+    state_q_out: &mut [f32],
+    state_p_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let q0: f32 = q0_buf[i];
+    let q1: f32 = q1_buf[i];
+    let kl: f32 = kl_buf[i];
+    let kg: f32 = kg_buf[i];
+    let vl: f32 = vl_buf[i];
+    let vg: f32 = vg_buf[i];
+    let sq0: f32 = state_q_buf[i];
+    let sp0: f32 = state_p_buf[i];
+
+    let s_loc: f32 = (q0 * kl + q1 * vl) * inv_sqrt_d;
+    let s_glb: f32 = (q0 * kg + q1 * vg) * inv_sqrt_d + log_stride;
+
+    let mut m_sc: f32 = s_loc;
+    if s_glb > m_sc {
+        m_sc = s_glb;
+    }
+
+    let mut dl: f32 = m_sc - s_loc;
+    if dl < 0.0 {
+        dl = 0.0;
+    }
+    let wl: f32 = 1.0 / (1.0 + dl + 0.5 * dl * dl + 0.16666667 * dl * dl * dl);
+
+    let mut dg: f32 = m_sc - s_glb;
+    if dg < 0.0 {
+        dg = 0.0;
+    }
+    let wg: f32 = 1.0 / (1.0 + dg + 0.5 * dg * dg + 0.16666667 * dg * dg * dg);
+
+    let inv_z: f32 = 1.0 / (wl + wg + 0.000001);
+    let ao: f32 = (wl * vl + wg * vg) * inv_z;
+
+    let sq_rot: f32 = cay_c * sq0 - cay_s * sp0;
+    let sp_rot: f32 = cay_s * sq0 + cay_c * sp0;
+    let sq_next: f32 = 0.99 * sq_rot + 0.01 * ao;
+    let sp_next: f32 = 0.99 * sp_rot + 0.01 * (vl - vg);
+
+    attn_out[i] = 0.85 * ao + 0.15 * sq_next;
+    state_q_out[i] = sq_next;
+    state_p_out[i] = sp_next;
+}

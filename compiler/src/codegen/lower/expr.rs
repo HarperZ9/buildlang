@@ -62,8 +62,31 @@ impl<'ctx> MirLowerer<'ctx> {
             if let Some(builder) = self.current_fn.as_mut() {
                 builder.set_current_span(stmt.span);
             }
+            let local_option_hint = match &stmt.kind {
+                StmtKind::Local(local) if local.ty.is_none() => {
+                    if let ast::PatternKind::Ident { name, .. } = &local.pattern.kind {
+                        let is_get = local.init.as_ref().is_some_and(|init| {
+                            matches!(
+                                &init.expr.kind,
+                                ExprKind::MethodCall { method, .. }
+                                    if matches!(method.name.as_ref(), "get" | "get_mut")
+                            )
+                        });
+                        is_get
+                            && Self::var_used_as_option_in_stmts(
+                                name.name.as_ref(),
+                                &block.stmts[i + 1..],
+                            )
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
             self.expected_type = if is_last {
                 block_expected.clone()
+            } else if local_option_hint {
+                Some(MirType::Option(Box::new(MirType::i32())))
             } else {
                 None
             };
@@ -89,6 +112,171 @@ impl<'ctx> MirLowerer<'ctx> {
     /// returned aggregate literal (`fn f() -> (i64, i64) { (a, b) }`) so it is
     /// built at the width its callers read, the same way `lower_return` handles
     /// an explicit `return`. Must be called with `self.current_fn` already set.
+    /// Whether local variable `name` is consumed as an `Option` (via Option
+    /// combinators like `.map`/`.unwrap_or`/`.is_some`, or `if let`/`match`
+    /// with `Some`/`None`) in `stmts`. Used by `lower_block` so unannotated
+    /// `let x = map.get(k);` materializes `Option<V>` when used as an Option
+    /// while preserving bare `V` for direct-access code.
+    fn var_used_as_option_in_stmts(name: &str, stmts: &[ast::Stmt]) -> bool {
+        fn expr_names_var(e: &ast::Expr, name: &str) -> bool {
+            match &e.kind {
+                ExprKind::Ident(id) => id.name.as_ref() == name,
+                ExprKind::Paren(inner) | ExprKind::Ref { expr: inner, .. } => {
+                    expr_names_var(inner, name)
+                }
+                ExprKind::Tuple(elems) => elems.iter().any(|el| expr_names_var(el, name)),
+                _ => false,
+            }
+        }
+        fn pat_is_option(p: &ast::Pattern) -> bool {
+            match &p.kind {
+                ast::PatternKind::TupleStruct { path, .. } => path
+                    .segments
+                    .last()
+                    .is_some_and(|s| matches!(s.ident.name.as_ref(), "Some" | "None")),
+                ast::PatternKind::Ident { name, .. } | ast::PatternKind::RefBind { name, .. } => {
+                    name.name.as_ref() == "None"
+                }
+                ast::PatternKind::Tuple(sub) => sub.iter().any(pat_is_option),
+                _ => false,
+            }
+        }
+        fn check_expr(e: &ast::Expr, name: &str) -> bool {
+            match &e.kind {
+                ExprKind::MethodCall {
+                    receiver,
+                    method,
+                    args,
+                    ..
+                } => {
+                    if expr_names_var(receiver, name)
+                        && matches!(
+                            method.name.as_ref(),
+                            "map"
+                                | "and_then"
+                                | "filter"
+                                | "unwrap"
+                                | "unwrap_or"
+                                | "unwrap_or_else"
+                                | "unwrap_or_default"
+                                | "is_some"
+                                | "is_none"
+                                | "copied"
+                                | "cloned"
+                                | "as_ref"
+                                | "as_mut"
+                                | "ok_or"
+                                | "ok_or_else"
+                                | "or_else"
+                                | "expect"
+                        )
+                    {
+                        return true;
+                    }
+                    check_expr(receiver, name) || args.iter().any(|a| check_expr(a, name))
+                }
+                ExprKind::IfLet {
+                    pattern,
+                    expr,
+                    then_branch,
+                    else_branch,
+                } => {
+                    (expr_names_var(expr, name) && pat_is_option(pattern))
+                        || check_expr(expr, name)
+                        || MirLowerer::var_used_as_option_in_stmts(name, &then_branch.stmts)
+                        || else_branch
+                            .as_deref()
+                            .is_some_and(|el| check_expr(el, name))
+                }
+                ExprKind::Match { scrutinee, arms } => {
+                    (expr_names_var(scrutinee, name)
+                        && arms.iter().any(|a| pat_is_option(&a.pattern)))
+                        || check_expr(scrutinee, name)
+                        || arms.iter().any(|a| {
+                            a.guard.as_ref().is_some_and(|g| check_expr(g, name))
+                                || check_expr(&a.body, name)
+                        })
+                }
+                ExprKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    check_expr(condition, name)
+                        || MirLowerer::var_used_as_option_in_stmts(name, &then_branch.stmts)
+                        || else_branch
+                            .as_deref()
+                            .is_some_and(|el| check_expr(el, name))
+                }
+                ExprKind::Block(b) | ExprKind::Unsafe(b) => {
+                    MirLowerer::var_used_as_option_in_stmts(name, &b.stmts)
+                }
+                ExprKind::Binary { left, right, .. } => {
+                    check_expr(left, name) || check_expr(right, name)
+                }
+                ExprKind::Unary { expr, .. }
+                | ExprKind::Paren(expr)
+                | ExprKind::Try(expr)
+                | ExprKind::Cast { expr, .. }
+                | ExprKind::Ref { expr, .. }
+                | ExprKind::Field { expr, .. }
+                | ExprKind::TupleField { expr, .. } => check_expr(expr, name),
+                ExprKind::Call { func, args } => {
+                    check_expr(func, name) || args.iter().any(|a| check_expr(a, name))
+                }
+                ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
+                    elems.iter().any(|el| check_expr(el, name))
+                }
+                ExprKind::Assign { target, value, .. } => {
+                    check_expr(target, name) || check_expr(value, name)
+                }
+                ExprKind::Return(Some(v)) | ExprKind::Break { value: Some(v), .. } => {
+                    check_expr(v, name)
+                }
+                ExprKind::For { iter, body, .. } => {
+                    check_expr(iter, name)
+                        || MirLowerer::var_used_as_option_in_stmts(name, &body.stmts)
+                }
+                ExprKind::While {
+                    condition, body, ..
+                } => {
+                    check_expr(condition, name)
+                        || MirLowerer::var_used_as_option_in_stmts(name, &body.stmts)
+                }
+                ExprKind::Loop { body, .. } => {
+                    MirLowerer::var_used_as_option_in_stmts(name, &body.stmts)
+                }
+                _ => false,
+            }
+        }
+        for stmt in stmts {
+            match &stmt.kind {
+                StmtKind::Local(l) => {
+                    if l.init
+                        .as_ref()
+                        .is_some_and(|init| check_expr(&init.expr, name))
+                    {
+                        return true;
+                    }
+                    // Stop if shadowed by a new binding of the same name.
+                    if matches!(
+                        &l.pattern.kind,
+                        ast::PatternKind::Ident { name: n, .. } if n.name.as_ref() == name
+                    ) {
+                        return false;
+                    }
+                }
+                StmtKind::Expr(e) | StmtKind::Semi(e) => {
+                    if check_expr(e, name) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub(crate) fn lower_fn_body(&mut self, body: &ast::Block) -> CodegenResult<Option<MirValue>> {
         let body_expected = self.current_fn.as_ref().map(|b| b.return_type().clone());
         let prev_expected = self.expected_type.take();
@@ -640,14 +828,81 @@ impl<'ctx> MirLowerer<'ctx> {
                     };
                     Some(MirType::Vec(Box::new(elem_ty)))
                 })
+                .or_else(|| {
+                    let elem_ty = self.ctx.inferred_local_vec_ty(local.pattern.span)?;
+                    fn lower_inferred_ty(
+                        this: &MirLowerer<'_>,
+                        ty: &crate::types::Ty,
+                    ) -> Option<MirType> {
+                        use crate::types::{FloatTy, IntTy, TyKind};
+                        match &ty.kind {
+                            TyKind::Int(IntTy::I8) => Some(MirType::i8()),
+                            TyKind::Int(IntTy::I16) => Some(MirType::i16()),
+                            TyKind::Int(IntTy::I32) => Some(MirType::i32()),
+                            TyKind::Int(IntTy::I64) => Some(MirType::i64()),
+                            TyKind::Int(IntTy::Isize) => Some(MirType::isize()),
+                            TyKind::Int(IntTy::U8) => Some(MirType::u8()),
+                            TyKind::Int(IntTy::U16) => Some(MirType::u16()),
+                            TyKind::Int(IntTy::U32) => Some(MirType::u32()),
+                            TyKind::Int(IntTy::U64) => Some(MirType::u64()),
+                            TyKind::Int(IntTy::Usize) => Some(MirType::usize()),
+                            TyKind::Float(FloatTy::F32) => Some(MirType::f32()),
+                            TyKind::Float(FloatTy::F64) => Some(MirType::f64()),
+                            TyKind::Bool => Some(MirType::Bool),
+                            TyKind::Char => Some(MirType::u32()),
+                            TyKind::Str => Some(MirType::Struct(Arc::from("BuildString"))),
+                            TyKind::Tuple(elems) => {
+                                let lowered: Option<Vec<MirType>> =
+                                    elems.iter().map(|e| lower_inferred_ty(this, e)).collect();
+                                Some(MirType::Tuple(lowered?))
+                            }
+                            TyKind::Adt(def_id, args)
+                                if args.len() == 1
+                                    && (*def_id == crate::types::DefId::DUMMY
+                                        || this
+                                            .ctx
+                                            .lookup_type(*def_id)
+                                            .is_some_and(|td| td.name.as_ref() == "Vec")) =>
+                            {
+                                let inner = lower_inferred_ty(this, &args[0])?;
+                                Some(MirType::Vec(Box::new(inner)))
+                            }
+                            TyKind::Adt(def_id, _) => {
+                                let td = this.ctx.lookup_type(*def_id)?;
+                                if this.module.find_type(td.name.as_ref()).is_some() {
+                                    Some(MirType::Struct(td.name.clone()))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    }
+                    let mir_elem = lower_inferred_ty(self, elem_ty)?;
+                    Some(MirType::Vec(Box::new(mir_elem)))
+                })
         });
 
         // Propagate expected type to init expression lowering so that
         // constructor calls (HashMap::new, Vec::new, etc.) can use the
         // annotation type instead of falling back to i32.
+        // Also propagate `Option` expectation when the type checker inferred
+        // `Option<T>` or `lower_block` detected downstream Option usage on an
+        // unannotated `let` initialized by `.get`/`.get_mut`.
         let prev_expected = self.expected_type.take();
         if let Some(ref ty) = explicit_ty {
             self.expected_type = Some(ty.clone());
+        } else if (matches!(prev_expected, Some(MirType::Option(_)))
+            || self.ctx.inferred_local_is_option(local.pattern.span))
+            && local.init.as_ref().is_some_and(|init| {
+                matches!(
+                    &init.expr.kind,
+                    ExprKind::MethodCall { method, .. }
+                        if matches!(method.name.as_ref(), "get" | "get_mut")
+                )
+            })
+        {
+            self.expected_type = Some(MirType::Option(Box::new(MirType::i32())));
         }
 
         // `let v = vec_new();` with no annotation: the element type is settled
@@ -1550,6 +1805,36 @@ impl<'ctx> MirLowerer<'ctx> {
                     "Greater" => return Ok(MirValue::Const(MirConst::Int(1, MirType::i32()))),
                     _ => {}
                 }
+            }
+        }
+
+        // Handle `std::f64::consts::*` / `std::f32::consts::*` / `core::f64::consts::*`.
+        if path.segments.len() == 4
+            && matches!(path.segments[0].ident.name.as_ref(), "std" | "core")
+            && matches!(path.segments[1].ident.name.as_ref(), "f64" | "f32")
+            && path.segments[2].ident.name.as_ref() == "consts"
+        {
+            let is_f32 = path.segments[1].ident.name.as_ref() == "f32";
+            let cval = match path.segments[3].ident.name.as_ref() {
+                "PI" => Some(std::f64::consts::PI),
+                "TAU" => Some(std::f64::consts::TAU),
+                "E" => Some(std::f64::consts::E),
+                "FRAC_PI_2" => Some(std::f64::consts::FRAC_PI_2),
+                "FRAC_PI_4" => Some(std::f64::consts::FRAC_PI_4),
+                "FRAC_1_PI" => Some(std::f64::consts::FRAC_1_PI),
+                "FRAC_2_PI" => Some(std::f64::consts::FRAC_2_PI),
+                "SQRT_2" => Some(std::f64::consts::SQRT_2),
+                "LN_2" => Some(std::f64::consts::LN_2),
+                "LN_10" => Some(std::f64::consts::LN_10),
+                _ => None,
+            };
+            if let Some(v) = cval {
+                let ty = if is_f32 {
+                    MirType::f32()
+                } else {
+                    MirType::f64()
+                };
+                return Ok(MirValue::Const(MirConst::Float(v, ty)));
             }
         }
 
@@ -3250,6 +3535,31 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             let mut recv_val = self.lower_expr(arr)?;
             let mut recv_ty = self.type_of_value(&recv_val);
+            // Unwrap `Buffer<T>` (`Buffer_* { data: Vec<T> }`) for indexed assignment `buf[i] = val`.
+            let buf_struct = match &recv_ty {
+                MirType::Struct(n) if n.starts_with("Buffer_") => Some(n.clone()),
+                MirType::Ptr(inner) => match inner.as_ref() {
+                    MirType::Struct(n) if n.starts_with("Buffer_") => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(sname) = buf_struct {
+                if let Some(data_ty) = self.lookup_struct_field_type(&sname, "data") {
+                    let b = self.current_fn.as_mut().unwrap();
+                    let dl = b.create_local(data_ty.clone());
+                    b.assign(
+                        dl,
+                        MirRValue::FieldAccess {
+                            base: recv_val,
+                            field_name: Arc::from("data"),
+                            field_ty: data_ty.clone(),
+                        },
+                    );
+                    recv_val = values::local(dl);
+                    recv_ty = data_ty;
+                }
+            }
             // Any other array that is not a plain name was just copied into
             // a temporary; a store into it would vanish without a diagnostic.
             if !super::array_places::is_named(arr) && matches!(recv_ty, MirType::Array(..)) {
@@ -4610,6 +4920,71 @@ impl<'ctx> MirLowerer<'ctx> {
             {
                 return Ok(MirValue::Const(MirConst::Int(0, MirType::i64())));
             }
+            // `random::standard_normal()` -> `build_random_gaussian(0.0, 1.0)`.
+            if matches!(
+                segs.as_slice(),
+                ["random", "standard_normal"] | ["std", "random", "standard_normal"]
+            ) && args.is_empty()
+            {
+                let b = self.current_fn.as_mut().unwrap();
+                let out = b.create_local(MirType::f64());
+                let cont = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from("build_random_gaussian")),
+                    vec![
+                        MirValue::Const(MirConst::Float(0.0, MirType::f64())),
+                        MirValue::Const(MirConst::Float(1.0, MirType::f64())),
+                    ],
+                    Some(out),
+                    cont,
+                );
+                b.switch_to_block(cont);
+                return Ok(values::local(out));
+            }
+            // `random::uniform()` / `random::uniform(lo, hi)` -> `build_random_f64()`.
+            if matches!(
+                segs.as_slice(),
+                ["random", "uniform"] | ["std", "random", "uniform"]
+            ) && (args.is_empty() || args.len() == 2)
+            {
+                if args.is_empty() {
+                    let b = self.current_fn.as_mut().unwrap();
+                    let out = b.create_local(MirType::f64());
+                    let cont = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_random_f64")),
+                        vec![],
+                        Some(out),
+                        cont,
+                    );
+                    b.switch_to_block(cont);
+                    return Ok(values::local(out));
+                } else {
+                    let lo_raw = self.lower_expr(&args[0])?;
+                    let hi_raw = self.lower_expr(&args[1])?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let lo = b.create_local(MirType::f64());
+                    b.cast(lo, CastKind::FloatToFloat, lo_raw, MirType::f64());
+                    let hi = b.create_local(MirType::f64());
+                    b.cast(hi, CastKind::FloatToFloat, hi_raw, MirType::f64());
+                    let u = b.create_local(MirType::f64());
+                    let cont = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_random_f64")),
+                        vec![],
+                        Some(u),
+                        cont,
+                    );
+                    b.switch_to_block(cont);
+                    let diff = b.create_local(MirType::f64());
+                    b.binary_op(diff, BinOp::Sub, values::local(hi), values::local(lo));
+                    let scaled = b.create_local(MirType::f64());
+                    b.binary_op(scaled, BinOp::Mul, values::local(diff), values::local(u));
+                    let out = b.create_local(MirType::f64());
+                    b.binary_op(out, BinOp::Add, values::local(lo), values::local(scaled));
+                    return Ok(values::local(out));
+                }
+            }
             // Foundation time intrinsics (`intrinsic::monotonic_now`, etc.) lowered to
             // real BuildLang C runtime clock functions (`clock_ns`, `time_unix`).
             if segs.len() == 2 && segs[0] == "intrinsic" {
@@ -5498,6 +5873,70 @@ impl<'ctx> MirLowerer<'ctx> {
                     return self.lower_vec_constructor(want_len as u32, args);
                 }
             }
+            // `Mat3::new([f32; 9])` -> `build_mat3_from_f32_array9(&arr)` when no 1-arg `Mat3_new` exists.
+            if matches!(segs.as_slice(), ["Mat3", "new"] | ["Mat3x3", "new"])
+                && args.len() == 1
+                && self.module.find_function("Mat3_new").is_none()
+            {
+                let arr_val = self.lower_expr(&args[0])?;
+                let arr_ty = self.type_of_value(&arr_val);
+                let b = self.current_fn.as_mut().unwrap();
+                let arr_loc = match arr_val {
+                    MirValue::Local(id) => id,
+                    other => {
+                        let tmp = b.create_local(arr_ty);
+                        b.assign(tmp, MirRValue::Use(other));
+                        tmp
+                    }
+                };
+                let ptr = b.create_local(MirType::Ptr(Box::new(MirType::f32())));
+                b.assign(
+                    ptr,
+                    MirRValue::AddressOf {
+                        is_mut: false,
+                        place: MirPlace::local(arr_loc),
+                    },
+                );
+                let res = b.create_local(MirType::Struct(Arc::from("build_mat3")));
+                let cont = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from("build_mat3_from_f32_array9")),
+                    vec![values::local(ptr)],
+                    Some(res),
+                    cont,
+                );
+                b.switch_to_block(cont);
+                return Ok(values::local(res));
+            }
+            if matches!(
+                segs.as_slice(),
+                ["Vec2", "splat"] | ["Vec3", "splat"] | ["Vec4", "splat"]
+            ) && args.len() == 1
+                && self
+                    .module
+                    .find_function(&format!("{}_splat", segs[0]))
+                    .is_none()
+            {
+                let (vname, count): (&str, usize) = match segs[0] {
+                    "Vec2" => ("build_vec2", 2),
+                    "Vec3" => ("build_vec3", 3),
+                    _ => ("build_vec4", 4),
+                };
+                let v = self.lower_expr(&args[0])?;
+                let vty = MirType::Struct(Arc::from(vname));
+                let b = self.current_fn.as_mut().unwrap();
+                let vf = b.create_local(MirType::f32());
+                b.cast(vf, CastKind::FloatToFloat, v, MirType::f32());
+                let res = b.create_local(vty);
+                b.assign(
+                    res,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Struct(Arc::from(vname)),
+                        operands: vec![values::local(vf); count],
+                    },
+                );
+                return Ok(values::local(res));
+            }
             if matches!(
                 segs.as_slice(),
                 ["Vec2", "lerp"] | ["Vec3", "lerp"] | ["Vec4", "lerp"]
@@ -6036,9 +6475,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 b.switch_to_block(cont);
                 return Ok(values::local(dest));
             }
-            // `HashSet::new()` / `BTreeSet::new()` lower to typed Vec handles.
-            if matches!(segs.as_slice(), ["HashSet", "new"] | ["BTreeSet", "new"])
-                && args.is_empty()
+            // `HashSet::new()` / `BTreeSet::new()` (and std/core::collections forms)
+            // lower to typed Vec handles.
+            if matches!(
+                segs.as_slice(),
+                ["HashSet", "new"]
+                    | ["BTreeSet", "new"]
+                    | ["std", "collections", "HashSet", "new"]
+                    | ["std", "collections", "BTreeSet", "new"]
+                    | ["core", "collections", "HashSet", "new"]
+                    | ["core", "collections", "BTreeSet", "new"]
+            ) && args.is_empty()
             {
                 if let Some(done) = self.try_typed_vec_new() {
                     return done;
@@ -6090,14 +6537,37 @@ impl<'ctx> MirLowerer<'ctx> {
             // `let v = Vec::new();` with no annotation: a vector whose element
             // type the first push settles, as for `vec_new()`. Before, the
             // local had no vector type and the first `v.push(x)` was refused.
-            if segs.as_slice() == ["Vec", "new"]
-                && args.is_empty()
-                && self.untyped_vec_new_binding
-                && self.expected_type.is_none()
-            {
+            if segs.as_slice() == ["Vec", "new"] && args.is_empty() {
+                if self.untyped_vec_new_binding && self.expected_type.is_none() {
+                    if let Some(done) = self.try_typed_vec_new() {
+                        return done;
+                    }
+                }
                 if let Some(done) = self.try_typed_vec_new() {
                     return done;
                 }
+                let elem_ty = match &self.expected_type {
+                    Some(MirType::Vec(inner)) => (**inner).clone(),
+                    _ => MirType::i32(),
+                };
+                let (new_fn, _) = Self::vec_fn_names_for_type(&elem_ty)?;
+                let b = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let dest = b.create_local(MirType::Vec(Box::new(elem_ty)));
+                let cont = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(new_fn)),
+                    vec![],
+                    Some(dest),
+                    cont,
+                );
+                b.switch_to_block(cont);
+                if self.untyped_vec_new_binding && self.expected_type.is_none() {
+                    self.untyped_vec_new_dest = Some(dest);
+                }
+                return Ok(values::local(dest));
             }
             // f64::from_bits(u) / f32::from_bits(u): a bit cast (DETMATH's pow2).
             let from_bits = match segs.as_slice() {
@@ -6167,7 +6637,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.switch_to_block(cont);
                 return Ok(values::local(result));
             }
-            if segs == ["Box", "new"] && args.len() == 1 && self.module.find_type("Box").is_none() {
+            if matches!(
+                segs.as_slice(),
+                ["Box", "new"] | ["Arc", "new"] | ["Rc", "new"]
+            ) && args.len() == 1
+                && self.module.find_type(segs[0]).is_none()
+            {
                 let value = self.lower_expr(&args[0])?;
                 let pointee = self.type_of_value(&value);
                 let builder = self
@@ -6184,16 +6659,88 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     return Ok(values::local(result));
                 }
+                let ctor_name = format!("{}_new", segs[0]);
                 let result = builder.create_local(MirType::Ptr(Box::new(pointee)));
                 let cont = builder.create_block();
                 builder.call(
-                    MirValue::Function(Arc::from("Box_new")),
+                    MirValue::Function(Arc::from(ctor_name)),
                     vec![value],
                     Some(result),
                     cont,
                 );
                 builder.switch_to_block(cont);
                 return Ok(values::local(result));
+            }
+            if matches!(segs.as_slice(), ["Arc", "clone"] | ["Rc", "clone"])
+                && args.len() == 1
+                && self.module.find_type(segs[0]).is_none()
+            {
+                let raw = self.lower_expr(&args[0])?;
+                let raw_ty = self.type_of_value(&raw);
+                // Unwrap `&Arc<T>` (`**T`) to `Arc<T>` (`*T`) when passed by reference.
+                let (ptr_val, ptr_ty) = match &raw_ty {
+                    MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Ptr(_)) => {
+                        let d = self.deref_if_pointer(raw)?;
+                        let dt = self.type_of_value(&d);
+                        (d, dt)
+                    }
+                    _ => (raw, raw_ty),
+                };
+                let helper = if segs[0] == "Arc" {
+                    "build_arc_clone"
+                } else {
+                    "build_rc_clone"
+                };
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let void_ptr = builder.create_local(MirType::Ptr(Box::new(MirType::Void)));
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from(helper)),
+                    vec![ptr_val],
+                    Some(void_ptr),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                let typed = builder.create_local(ptr_ty.clone());
+                builder.cast(typed, CastKind::PtrToPtr, values::local(void_ptr), ptr_ty);
+                return Ok(values::local(typed));
+            }
+            if matches!(
+                segs.as_slice(),
+                ["Arc", "strong_count"] | ["Rc", "strong_count"]
+            ) && args.len() == 1
+                && self.module.find_type(segs[0]).is_none()
+            {
+                let raw = self.lower_expr(&args[0])?;
+                let raw_ty = self.type_of_value(&raw);
+                let ptr_val = match &raw_ty {
+                    MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Ptr(_)) => {
+                        self.deref_if_pointer(raw)?
+                    }
+                    _ => raw,
+                };
+                let helper = if segs[0] == "Arc" {
+                    "build_arc_strong_count"
+                } else {
+                    "build_rc_strong_count"
+                };
+                let builder = self
+                    .current_fn
+                    .as_mut()
+                    .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                let count = builder.create_local(MirType::usize());
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from(helper)),
+                    vec![ptr_val],
+                    Some(count),
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                return Ok(values::local(count));
             }
         }
 
@@ -7730,6 +8277,11 @@ impl<'ctx> MirLowerer<'ctx> {
             {
                 MirType::tuple_type_name(elems).to_string()
             }
+            MirType::Array(inner, len)
+                if crate::codegen::backend::c::CBackend::is_supported_vec_array(inner, *len) =>
+            {
+                crate::codegen::backend::c::CBackend::hvec_array_suffix(inner, *len)
+            }
             _ => {
                 return Err(CodegenError::Unsupported(format!(
                     "a vector of `{elem_ty}` elements is not supported yet: the Vec \
@@ -7892,7 +8444,7 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             ExprKind::Field { expr: base, field } => {
                 let mut bt = self.infer_expr_type(base);
-                if let MirType::Ptr(inner) = bt {
+                while let MirType::Ptr(inner) = bt {
                     bt = *inner;
                 }
                 if let MirType::Struct(sname) = bt {
@@ -8596,6 +9148,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 | "max_by"
                 | "max_by_key"
                 | "position"
+                | "find"
+                | "for_each"
         ) {
             if let Some(chain) = Self::try_parse_iter_chain(receiver, method_name, args) {
                 return self.lower_iter_chain(&chain);
@@ -11564,6 +12118,45 @@ impl<'ctx> MirLowerer<'ctx> {
                     return Ok(values::local(result));
                 }
 
+                // --- splitn(n, sep) -> Vec<String> ---
+                if method_name == "splitn" && args.len() == 2 {
+                    let n_raw = self.lower_expr(&args[0])?;
+                    let sep_raw = self.lower_expr(&args[1])?;
+                    let sep_ty = self.type_of_value(&sep_raw);
+                    let sep_val = if matches!(sep_ty, MirType::Int(..)) {
+                        let b = self.current_fn.as_mut().unwrap();
+                        let ch = b.create_local(MirType::u32());
+                        b.cast(ch, CastKind::IntToInt, sep_raw, MirType::u32());
+                        let s = b.create_local(MirType::Struct(Arc::from("BuildString")));
+                        let c = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from("build_char_to_string")),
+                            vec![values::local(ch)],
+                            Some(s),
+                            c,
+                        );
+                        b.switch_to_block(c);
+                        values::local(s)
+                    } else {
+                        sep_raw
+                    };
+                    let builder = self.current_fn.as_mut().unwrap();
+                    let n_i64 = builder.create_local(MirType::i64());
+                    builder.cast(n_i64, CastKind::IntToInt, n_raw, MirType::i64());
+                    let result = builder.create_local(MirType::Vec(Box::new(MirType::Struct(
+                        Arc::from("BuildString"),
+                    ))));
+                    let cont = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from("build_string_splitn_h")),
+                        vec![receiver_val, values::local(n_i64), sep_val],
+                        Some(result),
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                    return Ok(values::local(result));
+                }
+
                 // --- split_whitespace() → Vec<String> ---
                 if method_name == "split_whitespace" {
                     let builder = self
@@ -11813,8 +12406,17 @@ impl<'ctx> MirLowerer<'ctx> {
         // =====================================================================
         // Primitive float method calls: val.abs(), val.sqrt(), etc.
         // Rewrite to the equivalent C math function call.
+        // Auto-deref `&f32`/`&f64` receivers (e.g. from `.iter().zip().map(|(&v, &t)| t.is_finite())`).
         // =====================================================================
-        if matches!(&receiver_ty, MirType::Float(_)) {
+        let (float_recv_val, float_recv_ty) = match &receiver_ty {
+            MirType::Float(_) => (Some(receiver_val.clone()), Some(receiver_ty.clone())),
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Float(_)) => {
+                let d = self.deref_if_pointer(receiver_val.clone())?;
+                (Some(d), Some(inner.as_ref().clone()))
+            }
+            _ => (None, None),
+        };
+        if let (Some(receiver_val), Some(receiver_ty)) = (float_recv_val, float_recv_ty) {
             let method_name = method.name.as_ref();
             // Map method name → C function name (single-arg, receiver is the argument)
             let simple_c_fn: Option<&str> = match method_name {
@@ -12571,11 +13173,16 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             if matches!(
                 method_name,
-                "is_ascii_digit" | "is_alphanumeric" | "to_ascii_lowercase" | "len_utf8"
+                "is_ascii_digit"
+                    | "is_ascii_hexdigit"
+                    | "is_alphanumeric"
+                    | "to_ascii_lowercase"
+                    | "len_utf8"
             ) && args.is_empty()
             {
                 let (c_fn, ret_ty) = match method_name {
                     "is_ascii_digit" => ("build_char_is_ascii_digit", MirType::Bool),
+                    "is_ascii_hexdigit" => ("build_char_is_ascii_hexdigit", MirType::Bool),
                     "is_alphanumeric" => ("build_char_is_alphanumeric", MirType::Bool),
                     "to_ascii_lowercase" => ("build_char_to_ascii_lowercase", MirType::u32()),
                     _ => ("build_char_len_utf8", MirType::usize()),
@@ -12598,6 +13205,25 @@ impl<'ctx> MirLowerer<'ctx> {
                 if method_name == "to_ascii_lowercase" {
                     self.char_locals.insert(out);
                 }
+                return Ok(values::local(out));
+            }
+            if method_name == "gaussian" && args.len() == 2 {
+                let mean_raw = self.lower_expr(&args[0])?;
+                let std_raw = self.lower_expr(&args[1])?;
+                let b = self.current_fn.as_mut().unwrap();
+                let mean_f = b.create_local(MirType::f64());
+                b.cast(mean_f, CastKind::FloatToFloat, mean_raw, MirType::f64());
+                let std_f = b.create_local(MirType::f64());
+                b.cast(std_f, CastKind::FloatToFloat, std_raw, MirType::f64());
+                let out = b.create_local(MirType::f64());
+                let cont = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from("build_random_gaussian")),
+                    vec![values::local(mean_f), values::local(std_f)],
+                    Some(out),
+                    cont,
+                );
+                b.switch_to_block(cont);
                 return Ok(values::local(out));
             }
             if method_name == "is_ascii" && args.is_empty() {
@@ -13259,6 +13885,66 @@ impl<'ctx> MirLowerer<'ctx> {
 
                 builder.switch_to_block(merge);
                 return Ok(values::local(result));
+            }
+        }
+
+        // `Vec2`/`Vec3`/`Vec4::clamp(lo: f32, hi: f32) -> VecN` scalar clamp
+        // overload: splat scalar bounds into VecN before inherent `VecN_clamp`
+        // dispatch (which takes `(VecN, VecN, VecN)`).
+        if method.name.as_ref() == "clamp"
+            && args.len() == 2
+            && matches!(&receiver_ty, MirType::Struct(n) if matches!(n.as_ref(), "Vec2" | "Vec3" | "Vec4"))
+        {
+            let sname = match &receiver_ty {
+                MirType::Struct(n) => n.clone(),
+                _ => unreachable!(),
+            };
+            let clamp_fn = format!("{}_clamp", sname);
+            let lo_ty_hint = self.infer_expr_type(&args[0]);
+            let hi_ty_hint = self.infer_expr_type(&args[1]);
+            if matches!(lo_ty_hint, MirType::Float(_))
+                && matches!(hi_ty_hint, MirType::Float(_))
+                && (self.known_fn_sig(&clamp_fn).is_some()
+                    || self.module.find_function(&clamp_fn).is_some())
+            {
+                let lo_val = self.lower_expr(&args[0])?;
+                let hi_val = self.lower_expr(&args[1])?;
+                let count = match sname.as_ref() {
+                    "Vec2" => 2usize,
+                    "Vec3" => 3usize,
+                    _ => 4usize,
+                };
+                let b = self.current_fn.as_mut().unwrap();
+                let lo_f = b.create_local(MirType::f32());
+                b.cast(lo_f, CastKind::FloatToFloat, lo_val, MirType::f32());
+                let hi_f = b.create_local(MirType::f32());
+                b.cast(hi_f, CastKind::FloatToFloat, hi_val, MirType::f32());
+                let lo_v = b.create_local(receiver_ty.clone());
+                b.assign(
+                    lo_v,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Struct(sname.clone()),
+                        operands: vec![values::local(lo_f); count],
+                    },
+                );
+                let hi_v = b.create_local(receiver_ty.clone());
+                b.assign(
+                    hi_v,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Struct(sname),
+                        operands: vec![values::local(hi_f); count],
+                    },
+                );
+                let out = b.create_local(receiver_ty.clone());
+                let cont = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from(clamp_fn.as_str())),
+                    vec![receiver_val, values::local(lo_v), values::local(hi_v)],
+                    Some(out),
+                    cont,
+                );
+                b.switch_to_block(cont);
+                return Ok(values::local(out));
             }
         }
 
@@ -14870,6 +15556,75 @@ impl<'ctx> MirLowerer<'ctx> {
                 return Ok(values::local(is_zero));
             }
         }
+        // Slice `&mut [T]` `.swap(a, b)` -> swap elements in place.
+        if is_slice_recv && method.name.as_ref() == "swap" && args.len() == 2 {
+            let slice_elem = match &peeled_slice_ty {
+                MirType::Slice(e) => Some((**e).clone()),
+                MirType::Ptr(inner) => match inner.as_ref() {
+                    MirType::Slice(e) => Some((**e).clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(elem_c) = slice_elem {
+                let ia_raw = self.lower_expr(&args[0])?;
+                let ib_raw = self.lower_expr(&args[1])?;
+                let dst_val = self.deref_if_pointer(peeled_slice_val)?;
+                let b = self.current_fn.as_mut().unwrap();
+                let ia = b.create_local(MirType::usize());
+                b.cast(ia, CastKind::IntToInt, ia_raw, MirType::usize());
+                let ib = b.create_local(MirType::usize());
+                b.cast(ib, CastKind::IntToInt, ib_raw, MirType::usize());
+                let d_loc = b.create_local(MirType::Slice(Box::new(elem_c.clone())));
+                b.assign(d_loc, MirRValue::Use(dst_val));
+                let d_ptr = b.create_local(MirType::Ptr(Box::new(elem_c.clone())));
+                b.assign(
+                    d_ptr,
+                    MirRValue::FieldAccess {
+                        base: values::local(d_loc),
+                        field_name: Arc::from("ptr"),
+                        field_ty: MirType::Ptr(Box::new(elem_c.clone())),
+                    },
+                );
+                let va = b.create_local(elem_c.clone());
+                b.assign(
+                    va,
+                    MirRValue::IndexAccess {
+                        base: values::local(d_ptr),
+                        index: values::local(ia),
+                        elem_ty: elem_c.clone(),
+                    },
+                );
+                let vb = b.create_local(elem_c.clone());
+                b.assign(
+                    vb,
+                    MirRValue::IndexAccess {
+                        base: values::local(d_ptr),
+                        index: values::local(ib),
+                        elem_ty: elem_c.clone(),
+                    },
+                );
+                let slot_a = b.create_local(MirType::Ptr(Box::new(elem_c.clone())));
+                b.assign(
+                    slot_a,
+                    MirRValue::AddressOf {
+                        is_mut: true,
+                        place: MirPlace::local(d_ptr).index(ia),
+                    },
+                );
+                b.push_deref_assign(slot_a, MirRValue::Use(values::local(vb)));
+                let slot_b = b.create_local(MirType::Ptr(Box::new(elem_c)));
+                b.assign(
+                    slot_b,
+                    MirRValue::AddressOf {
+                        is_mut: true,
+                        place: MirPlace::local(d_ptr).index(ib),
+                    },
+                );
+                b.push_deref_assign(slot_b, MirRValue::Use(values::local(va)));
+                return Ok(values::unit());
+            }
+        }
         // Slice `&mut [T]` `.fill(val)` and `.copy_from_slice(src)`.
         if is_slice_recv
             && matches!(method.name.as_ref(), "fill" | "copy_from_slice")
@@ -15464,6 +16219,79 @@ impl<'ctx> MirLowerer<'ctx> {
                 return Ok(values::local(out));
             }
         }
+        // Fixed array `[T; N]` / `&mut [T; N]`: `.fill(val)` writes `val` into every slot.
+        if method.name.as_ref() == "fill" && args.len() == 1 {
+            let arr_info = match &receiver_ty {
+                MirType::Array(elem, n) => Some(((**elem).clone(), *n)),
+                MirType::Ptr(inner) => match inner.as_ref() {
+                    MirType::Array(elem, n) => Some(((**elem).clone(), *n)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((elem, n)) = arr_info {
+                if let Some((arr_place, _)) = self.lower_place(receiver)? {
+                    let fill_val = self.lower_expr(&args[0])?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let arr_ptr = b.create_local(MirType::Ptr(Box::new(MirType::Array(
+                        Box::new(elem.clone()),
+                        n,
+                    ))));
+                    b.assign(
+                        arr_ptr,
+                        MirRValue::AddressOf {
+                            is_mut: true,
+                            place: arr_place,
+                        },
+                    );
+                    let elem_ptr = b.create_local(MirType::Ptr(Box::new(elem.clone())));
+                    b.cast(
+                        elem_ptr,
+                        CastKind::PtrToPtr,
+                        values::local(arr_ptr),
+                        MirType::Ptr(Box::new(elem.clone())),
+                    );
+                    let fv = b.create_local(elem.clone());
+                    b.assign(fv, MirRValue::Use(fill_val));
+                    let idx = b.create_local(MirType::usize());
+                    b.assign_const(idx, MirConst::Uint(0, MirType::usize()));
+                    let cond_bb = b.create_block();
+                    let body_bb = b.create_block();
+                    let exit_bb = b.create_block();
+                    b.goto(cond_bb);
+                    b.switch_to_block(cond_bb);
+                    let cmp = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        cmp,
+                        BinOp::Lt,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Uint(n as u128, MirType::usize())),
+                    );
+                    b.branch(values::local(cmp), body_bb, exit_bb);
+                    b.switch_to_block(body_bb);
+                    let slot = b.create_local(MirType::Ptr(Box::new(elem)));
+                    b.assign(
+                        slot,
+                        MirRValue::AddressOf {
+                            is_mut: true,
+                            place: MirPlace::local(elem_ptr).index(idx),
+                        },
+                    );
+                    b.push_deref_assign(slot, MirRValue::Use(values::local(fv)));
+                    let ni = b.create_local(MirType::usize());
+                    b.binary_op(
+                        ni,
+                        BinOp::Add,
+                        values::local(idx),
+                        MirValue::Const(MirConst::Uint(1, MirType::usize())),
+                    );
+                    b.assign(idx, MirRValue::Use(values::local(ni)));
+                    b.goto(cond_bb);
+                    b.switch_to_block(exit_bb);
+                    return Ok(values::unit());
+                }
+            }
+        }
         // Fixed array `[T; N]` / `&[T; N]`: `.as_slice()` builds a `&[T]` slice view.
         if method.name.as_ref() == "as_slice" && args.is_empty() {
             let arr_info = match &receiver_ty {
@@ -15671,6 +16499,87 @@ impl<'ctx> MirLowerer<'ctx> {
                 builder.switch_to_block(cont);
                 return Ok(values::local(data));
             }
+            if method_name == "split_at_mut" && args.len() == 1 {
+                let elem = elem_ty.as_ref().clone();
+                let mid_raw = self.lower_expr(&args[0])?;
+                let (data_loc, mid_loc, right_ptr_loc, right_len_loc) = {
+                    let b = self.current_fn.as_mut().unwrap();
+                    let size = b.create_local(MirType::usize());
+                    b.assign(
+                        size,
+                        MirRValue::NullaryOp(crate::codegen::ir::NullaryOp::SizeOf, elem.clone()),
+                    );
+                    let data = b.create_local(MirType::Ptr(Box::new(elem.clone())));
+                    let c1 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_data")),
+                        vec![receiver_val.clone(), values::local(size)],
+                        Some(data),
+                        c1,
+                    );
+                    b.switch_to_block(c1);
+                    let len64 = b.create_local(MirType::i64());
+                    let c2 = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![receiver_val],
+                        Some(len64),
+                        c2,
+                    );
+                    b.switch_to_block(c2);
+                    let len_u = b.create_local(MirType::usize());
+                    b.cast(
+                        len_u,
+                        CastKind::IntToInt,
+                        values::local(len64),
+                        MirType::usize(),
+                    );
+                    let mid_u = b.create_local(MirType::usize());
+                    b.cast(mid_u, CastKind::IntToInt, mid_raw, MirType::usize());
+                    let right_len = b.create_local(MirType::usize());
+                    b.binary_op(
+                        right_len,
+                        BinOp::Sub,
+                        values::local(len_u),
+                        values::local(mid_u),
+                    );
+                    let right_ptr = b.create_local(MirType::Ptr(Box::new(elem.clone())));
+                    b.assign(
+                        right_ptr,
+                        MirRValue::AddressOf {
+                            is_mut: true,
+                            place: MirPlace::local(data).index(mid_u),
+                        },
+                    );
+                    (data, mid_u, right_ptr, right_len)
+                };
+                let slice_ty = MirType::Slice(Box::new(elem.clone()));
+                let slice_name = MirType::slice_type_name(&elem);
+                let pair_elems = vec![slice_ty.clone(), slice_ty.clone()];
+                self.ensure_tuple_type_def(&pair_elems);
+                let b = self.current_fn.as_mut().unwrap();
+                let left_slice = b.create_local(slice_ty.clone());
+                b.aggregate(
+                    left_slice,
+                    AggregateKind::Struct(slice_name.clone()),
+                    vec![values::local(data_loc), values::local(mid_loc)],
+                );
+                let right_slice = b.create_local(slice_ty);
+                b.aggregate(
+                    right_slice,
+                    AggregateKind::Struct(slice_name),
+                    vec![values::local(right_ptr_loc), values::local(right_len_loc)],
+                );
+                let tup = b.create_local(MirType::Tuple(pair_elems));
+                b.assign(
+                    tup,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Tuple,
+                        operands: vec![values::local(left_slice), values::local(right_slice)],
+                    },
+                );
+                return Ok(values::local(tup));
+            }
 
             // `v.remove(i)` / `v.swap_remove(i)` return the element at `i` and
             // shrink the vector; `v.insert(i, x)` pushes `x` and moves it to
@@ -15709,7 +16618,10 @@ impl<'ctx> MirLowerer<'ctx> {
                     builder.switch_to_block(cont);
                     return Ok(values::local(elem));
                 }
-                let val = self.lower_expr(&args[1])?;
+                let prev_expected = self.expected_type.replace(elem_ty.as_ref().clone());
+                let val_res = self.lower_expr(&args[1]);
+                self.expected_type = prev_expected;
+                let val = val_res?;
                 let val = self.deref_if_pointer(val)?;
                 let value_ty = self.type_of_value(&val);
                 if !Self::vec_elem_accepts(elem_ty, &value_ty) {
@@ -16036,6 +16948,79 @@ impl<'ctx> MirLowerer<'ctx> {
                         c4,
                     );
                     b.switch_to_block(c4);
+                    return Ok(values::unit());
+                }
+                "resize" if args.len() == 2 => {
+                    let new_len_raw = self.lower_expr(&args[0])?;
+                    let prev_expected = self.expected_type.replace(elem_ty.as_ref().clone());
+                    let fill_res = self.lower_expr(&args[1]);
+                    self.expected_type = prev_expected;
+                    let fill_val = self.deref_if_pointer(fill_res?)?;
+                    let push_fn: Arc<str> =
+                        Arc::from(format!("build_hvec_push_{}", type_suffix).as_str());
+                    let b = self.current_fn.as_mut().unwrap();
+                    let new_len = b.create_local(MirType::i64());
+                    b.cast(new_len, CastKind::IntToInt, new_len_raw, MirType::i64());
+                    let cur_len = b.create_local(MirType::i64());
+                    let c_len = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![receiver_val.clone()],
+                        Some(cur_len),
+                        c_len,
+                    );
+                    b.switch_to_block(c_len);
+                    let shrink = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        shrink,
+                        BinOp::Lt,
+                        values::local(new_len),
+                        values::local(cur_len),
+                    );
+                    let trunc_bb = b.create_block();
+                    let grow_cond = b.create_block();
+                    let grow_body = b.create_block();
+                    let exit_bb = b.create_block();
+                    b.branch(values::local(shrink), trunc_bb, grow_cond);
+                    b.switch_to_block(trunc_bb);
+                    let after_trunc = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_truncate")),
+                        vec![receiver_val.clone(), values::local(new_len)],
+                        None,
+                        after_trunc,
+                    );
+                    b.switch_to_block(after_trunc);
+                    b.goto(exit_bb);
+                    b.switch_to_block(grow_cond);
+                    let len_now = b.create_local(MirType::i64());
+                    let c_now = b.create_block();
+                    b.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![receiver_val.clone()],
+                        Some(len_now),
+                        c_now,
+                    );
+                    b.switch_to_block(c_now);
+                    let need_more = b.create_local(MirType::Bool);
+                    b.binary_op(
+                        need_more,
+                        BinOp::Lt,
+                        values::local(len_now),
+                        values::local(new_len),
+                    );
+                    b.branch(values::local(need_more), grow_body, exit_bb);
+                    b.switch_to_block(grow_body);
+                    let after_push = b.create_block();
+                    b.call(
+                        MirValue::Function(push_fn),
+                        vec![receiver_val, fill_val],
+                        None,
+                        after_push,
+                    );
+                    b.switch_to_block(after_push);
+                    b.goto(grow_cond);
+                    b.switch_to_block(exit_bb);
                     return Ok(values::unit());
                 }
                 "nth" if args.len() == 1 => {
@@ -16505,9 +17490,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 ),
                 // sort() in place (ascending); string element sort is a
                 // follow-up - only the numeric families have comparators.
-                "sort" if matches!(type_suffix.as_str(), "i32" | "u32" | "i64" | "u64" | "f64") => {
+                "sort"
+                    if matches!(
+                        type_suffix.as_str(),
+                        "i32" | "u32" | "i64" | "u64" | "isize" | "usize" | "f64"
+                    ) =>
+                {
                     let sort_suf = match type_suffix.as_str() {
-                        "u64" => "i64",
+                        "u64" | "isize" | "usize" => "i64",
                         "u32" => "i32",
                         other => other,
                     };
@@ -17375,7 +18365,90 @@ impl<'ctx> MirLowerer<'ctx> {
                             self.expected_type = prev_expected;
                         }
                         let val = lowered?;
-                        arg_vals.push(self.deref_if_pointer(val)?);
+                        if is_push {
+                            if let MirType::Ptr(elem_inner) = elem_ty.as_ref() {
+                                if let MirType::TraitObject(trait_name) = elem_inner.as_ref() {
+                                    let vty = self.type_of_value(&val);
+                                    let concrete_name = match &vty {
+                                        MirType::Ptr(inner) => match inner.as_ref() {
+                                            MirType::Struct(n) => Some(n.clone()),
+                                            _ => None,
+                                        },
+                                        MirType::Struct(n) => Some(n.clone()),
+                                        _ => None,
+                                    };
+                                    if let Some(type_name) = concrete_name {
+                                        let builder =
+                                            self.current_fn.as_mut().ok_or_else(|| {
+                                                CodegenError::Internal(
+                                                    "No current function".to_string(),
+                                                )
+                                            })?;
+                                        let data_ptr = builder
+                                            .create_local(MirType::Ptr(Box::new(MirType::Void)));
+                                        if matches!(vty, MirType::Ptr(_)) {
+                                            builder.cast(
+                                                data_ptr,
+                                                CastKind::PtrToPtr,
+                                                val,
+                                                MirType::Ptr(Box::new(MirType::Void)),
+                                            );
+                                        } else {
+                                            let tmp = builder.create_local(vty.clone());
+                                            builder.assign(tmp, MirRValue::Use(val));
+                                            builder.make_ref(data_ptr, false, MirPlace::local(tmp));
+                                        }
+                                        let vtable_name: Arc<str> = Arc::from(format!(
+                                            "{}_{}_vtable_instance",
+                                            type_name, trait_name
+                                        ));
+                                        let vtable_ty = MirType::Struct(Arc::from(format!(
+                                            "{}_vtable",
+                                            trait_name
+                                        )));
+                                        let vtable_ptr = builder.create_local(vtable_ty);
+                                        builder.assign(
+                                            vtable_ptr,
+                                            MirRValue::Use(MirValue::Global(vtable_name)),
+                                        );
+                                        let fat_local =
+                                            builder.create_local((**elem_inner).clone());
+                                        builder.assign(
+                                            fat_local,
+                                            MirRValue::Aggregate {
+                                                kind: AggregateKind::Struct(Arc::from(format!(
+                                                    "dyn_{}",
+                                                    trait_name
+                                                ))),
+                                                operands: vec![
+                                                    values::local(data_ptr),
+                                                    values::local(vtable_ptr),
+                                                ],
+                                            },
+                                        );
+                                        let boxed_fat =
+                                            builder.create_local(elem_ty.as_ref().clone());
+                                        let cont = builder.create_block();
+                                        builder.call(
+                                            MirValue::Function(Arc::from("Box_new")),
+                                            vec![values::local(fat_local)],
+                                            Some(boxed_fat),
+                                            cont,
+                                        );
+                                        builder.switch_to_block(cont);
+                                        arg_vals.push(values::local(boxed_fat));
+                                    } else {
+                                        arg_vals.push(val);
+                                    }
+                                } else {
+                                    arg_vals.push(val);
+                                }
+                            } else {
+                                arg_vals.push(self.deref_if_pointer(val)?);
+                            }
+                        } else {
+                            arg_vals.push(self.deref_if_pointer(val)?);
+                        }
                     }
                 }
                 // `v.push(x)` with an `x` the vector cannot hold: the same check
@@ -17891,6 +18964,81 @@ impl<'ctx> MirLowerer<'ctx> {
         // are NOT safe because their typed return cascades through i32-typed consumers.
         {
             let method_name = method.name.as_ref();
+            // `build_mat3::transform(build_vec3) -> build_vec3`
+            if method_name == "transform"
+                && args.len() == 1
+                && matches!(&receiver_ty, MirType::Struct(n) if n.as_ref() == "build_mat3")
+            {
+                let v = self.lower_expr(&args[0])?;
+                let b = self.current_fn.as_mut().unwrap();
+                let res = b.create_local(MirType::Struct(Arc::from("build_vec3")));
+                let cont = b.create_block();
+                b.call(
+                    MirValue::Function(Arc::from("build_mat3_transform")),
+                    vec![receiver_val, v],
+                    Some(res),
+                    cont,
+                );
+                b.switch_to_block(cont);
+                return Ok(values::local(res));
+            }
+            // `Vec2`/`Vec3`/`Vec4::clamp(lo: f32, hi: f32) -> VecN` scalar clamp
+            if method_name == "clamp"
+                && args.len() == 2
+                && matches!(&receiver_ty, MirType::Struct(n) if matches!(n.as_ref(), "Vec2" | "Vec3" | "Vec4"))
+            {
+                let lo_val = self.lower_expr(&args[0])?;
+                let hi_val = self.lower_expr(&args[1])?;
+                let lo_ty = self.type_of_value(&lo_val);
+                let hi_ty = self.type_of_value(&hi_val);
+                if matches!(lo_ty, MirType::Float(_)) && matches!(hi_ty, MirType::Float(_)) {
+                    let sname = match &receiver_ty {
+                        MirType::Struct(n) => n.clone(),
+                        _ => unreachable!(),
+                    };
+                    let clamp_fn = format!("{}_clamp", sname);
+                    if self.known_fn_sig(&clamp_fn).is_some()
+                        || self.module.find_function(&clamp_fn).is_some()
+                    {
+                        let count = match sname.as_ref() {
+                            "Vec2" => 2usize,
+                            "Vec3" => 3usize,
+                            _ => 4usize,
+                        };
+                        let b = self.current_fn.as_mut().unwrap();
+                        let lo_f = b.create_local(MirType::f32());
+                        b.cast(lo_f, CastKind::FloatToFloat, lo_val, MirType::f32());
+                        let hi_f = b.create_local(MirType::f32());
+                        b.cast(hi_f, CastKind::FloatToFloat, hi_val, MirType::f32());
+                        let lo_v = b.create_local(receiver_ty.clone());
+                        b.assign(
+                            lo_v,
+                            MirRValue::Aggregate {
+                                kind: AggregateKind::Struct(sname.clone()),
+                                operands: vec![values::local(lo_f); count],
+                            },
+                        );
+                        let hi_v = b.create_local(receiver_ty.clone());
+                        b.assign(
+                            hi_v,
+                            MirRValue::Aggregate {
+                                kind: AggregateKind::Struct(sname),
+                                operands: vec![values::local(hi_f); count],
+                            },
+                        );
+                        let out = b.create_local(receiver_ty.clone());
+                        let cont = b.create_block();
+                        b.call(
+                            MirValue::Function(Arc::from(clamp_fn.as_str())),
+                            vec![receiver_val, values::local(lo_v), values::local(hi_v)],
+                            Some(out),
+                            cont,
+                        );
+                        b.switch_to_block(cont);
+                        return Ok(values::local(out));
+                    }
+                }
+            }
             if method_name == "clone"
                 && args.is_empty()
                 && (matches!(&receiver_ty, MirType::Array(..))
@@ -18045,6 +19193,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 && matches!(&receiver_ty, MirType::Option(_))
                 && args.is_empty()
             {
+                return Ok(receiver_val);
+            }
+            if method_name == "as_ref" && args.is_empty() && receiver_ty.is_pointer() {
+                if let MirType::Ptr(inner) = &receiver_ty {
+                    if inner.is_pointer() {
+                        return self.deref_if_pointer(receiver_val);
+                    }
+                }
                 return Ok(receiver_val);
             }
             if method_name == "clone" || method_name == "to_owned" {
@@ -19326,18 +20482,15 @@ impl<'ctx> MirLowerer<'ctx> {
             ExprKind::MethodCall {
                 receiver, method, ..
             } => {
-                let recv_ty = self.infer_expr_type(receiver);
-                let type_name = match &recv_ty {
-                    MirType::Struct(n) => Some(n.clone()),
-                    MirType::Ptr(inner) => match &**inner {
-                        MirType::Struct(n) => Some(n.clone()),
-                        _ => None,
-                    },
+                let mut recv_ty = self.infer_expr_type(receiver);
+                while let MirType::Ptr(inner) = recv_ty {
+                    recv_ty = *inner;
+                }
+                match recv_ty {
+                    MirType::Struct(n) => self.impl_methods.get(&(n, method.name.clone())).cloned(),
+                    MirType::TraitObject(t) => Some(Arc::from(format!("{}_{}", t, method.name))),
                     _ => None,
-                }?;
-                self.impl_methods
-                    .get(&(type_name, method.name.clone()))
-                    .cloned()
+                }
             }
             _ => None,
         }
@@ -21229,17 +22382,50 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                 }
             }
-            // `for i in (a..b).rev()` or `for x in v.iter().rev()`: last to first.
+            // `for i in (a..b).rev()` or `for x in v.iter().rev()` or
+            // `for (i, x) in v.iter().enumerate().rev()`: last to first.
             if method.name.as_ref() == "rev" && args.is_empty() {
-                if pending_index.is_none() {
-                    if let Some((Some(start), Some(end), inclusive)) =
-                        Self::extract_range_parts(receiver)
+                let (rev_pattern, rev_receiver, rev_enum_pat): (
+                    &ast::Pattern,
+                    &ast::Expr,
+                    Option<&ast::Pattern>,
+                ) = match &receiver.kind {
+                    ExprKind::MethodCall {
+                        receiver: enum_recv,
+                        method: enum_m,
+                        args: enum_a,
+                        ..
+                    } if enum_m.name.as_ref() == "enumerate"
+                        && enum_a.is_empty()
+                        && pending_index.is_none() =>
                     {
-                        return self
-                            .lower_for_range_rev(pattern, start, end, inclusive, body, label);
+                        if let ast::PatternKind::Tuple(parts) = &pattern.kind {
+                            if parts.len() == 2 {
+                                (&parts[1], enum_recv.as_ref(), Some(&parts[0]))
+                            } else {
+                                (pattern, receiver.as_ref(), None)
+                            }
+                        } else {
+                            (pattern, receiver.as_ref(), None)
+                        }
+                    }
+                    _ => (pattern, receiver.as_ref(), None),
+                };
+                if pending_index.is_none() && rev_enum_pat.is_none() {
+                    if let Some((Some(start), Some(end), inclusive)) =
+                        Self::extract_range_parts(rev_receiver)
+                    {
+                        return self.lower_for_range_rev(
+                            rev_pattern,
+                            start,
+                            end,
+                            inclusive,
+                            body,
+                            label,
+                        );
                     }
                 }
-                let inner_src = match &receiver.kind {
+                let inner_src = match &rev_receiver.kind {
                     ExprKind::MethodCall {
                         receiver: r,
                         method: m,
@@ -21250,7 +22436,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     {
                         r.as_ref()
                     }
-                    _ => receiver.as_ref(),
+                    _ => rev_receiver,
                 };
                 let raw_val = self.lower_expr(inner_src)?;
                 let coll_val = match self.type_of_value(&raw_val) {
@@ -21262,11 +22448,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 if let MirType::Vec(elem_ty) = self.type_of_value(&coll_val) {
                     self.pending_enumerate = pending_index;
                     return self.lower_for_vec_bounded(
-                        pattern,
+                        rev_pattern,
                         coll_val,
                         (*elem_ty).clone(),
                         None,
                         true,
+                        rev_enum_pat,
                         body,
                         label,
                     );
@@ -21303,9 +22490,182 @@ impl<'ctx> MirLowerer<'ctx> {
                         (*elem_ty).clone(),
                         Some(take_n),
                         false,
+                        None,
                         body,
                         label,
                     );
+                }
+            }
+            // `for x in a.iter().chain(b.iter())`: iterate all elements of `a`,
+            // then all elements of `b` in a single unified loop so `break`,
+            // `continue`, and `.enumerate()` work cleanly across both halves.
+            if method.name.as_ref() == "chain" && args.len() == 1 {
+                fn peel_iter(e: &ast::Expr) -> &ast::Expr {
+                    match &e.kind {
+                        ExprKind::MethodCall {
+                            receiver: r,
+                            method: m,
+                            args: a,
+                            ..
+                        } if a.is_empty()
+                            && matches!(m.name.as_ref(), "iter" | "iter_mut" | "into_iter") =>
+                        {
+                            r.as_ref()
+                        }
+                        _ => e,
+                    }
+                }
+                let first_src = peel_iter(receiver.as_ref());
+                let second_src = peel_iter(&args[0]);
+                let raw_a = self.lower_expr(first_src)?;
+                let raw_b = self.lower_expr(second_src)?;
+                let coll_a = match self.type_of_value(&raw_a) {
+                    MirType::Ptr(inner) if matches!(*inner, MirType::Vec(_)) => {
+                        self.deref_if_pointer(raw_a)?
+                    }
+                    _ => raw_a,
+                };
+                let coll_b = match self.type_of_value(&raw_b) {
+                    MirType::Ptr(inner) if matches!(*inner, MirType::Vec(_)) => {
+                        self.deref_if_pointer(raw_b)?
+                    }
+                    _ => raw_b,
+                };
+                if let (MirType::Vec(elem_a), MirType::Vec(_)) =
+                    (self.type_of_value(&coll_a), self.type_of_value(&coll_b))
+                {
+                    let elem_ty = (*elem_a).clone();
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let vec_a = builder.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    builder.assign(vec_a, MirRValue::Use(coll_a));
+                    let vec_b = builder.create_local(MirType::Vec(Box::new(elem_ty.clone())));
+                    builder.assign(vec_b, MirRValue::Use(coll_b));
+
+                    let len_a = builder.create_local(MirType::i64());
+                    let after_a = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(vec_a)],
+                        Some(len_a),
+                        after_a,
+                    );
+                    builder.switch_to_block(after_a);
+
+                    let len_b = builder.create_local(MirType::i64());
+                    let after_b = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from("build_hvec_len")),
+                        vec![values::local(vec_b)],
+                        Some(len_b),
+                        after_b,
+                    );
+                    builder.switch_to_block(after_b);
+
+                    let total_len = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        total_len,
+                        BinOp::Add,
+                        values::local(len_a),
+                        values::local(len_b),
+                    );
+                    let idx_local = builder.create_local(MirType::i64());
+                    builder.assign(
+                        idx_local,
+                        MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::i64()))),
+                    );
+
+                    let cond_block = builder.create_block();
+                    let pick_block = builder.create_block();
+                    let from_a_block = builder.create_block();
+                    let from_b_block = builder.create_block();
+                    let body_block = builder.create_block();
+                    let incr_block = builder.create_block();
+                    let exit_block = builder.create_block();
+
+                    self.loop_drop_depths.push(self.drop_scopes.len());
+                    self.loop_stack
+                        .push((incr_block, exit_block, label_name(label)));
+
+                    let builder = self.current_fn.as_mut().unwrap();
+                    builder.goto(cond_block);
+                    builder.switch_to_block(cond_block);
+                    let cmp = builder.create_local(MirType::Bool);
+                    builder.binary_op(
+                        cmp,
+                        BinOp::Lt,
+                        values::local(idx_local),
+                        values::local(total_len),
+                    );
+                    builder.branch(values::local(cmp), pick_block, exit_block);
+
+                    builder.switch_to_block(pick_block);
+                    let elem_local = builder.create_local(elem_ty.clone());
+                    let in_a = builder.create_local(MirType::Bool);
+                    builder.binary_op(
+                        in_a,
+                        BinOp::Lt,
+                        values::local(idx_local),
+                        values::local(len_a),
+                    );
+                    builder.branch(values::local(in_a), from_a_block, from_b_block);
+
+                    builder.switch_to_block(from_a_block);
+                    builder.assign(
+                        elem_local,
+                        MirRValue::IndexAccess {
+                            base: values::local(vec_a),
+                            index: values::local(idx_local),
+                            elem_ty: elem_ty.clone(),
+                        },
+                    );
+                    builder.goto(body_block);
+
+                    builder.switch_to_block(from_b_block);
+                    let b_idx = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        b_idx,
+                        BinOp::Sub,
+                        values::local(idx_local),
+                        values::local(len_a),
+                    );
+                    builder.assign(
+                        elem_local,
+                        MirRValue::IndexAccess {
+                            base: values::local(vec_b),
+                            index: values::local(b_idx),
+                            elem_ty: elem_ty.clone(),
+                        },
+                    );
+                    builder.goto(body_block);
+
+                    builder.switch_to_block(body_block);
+                    self.pending_enumerate = pending_index;
+                    let saved_vars = self.var_map.clone();
+                    self.bind_for_element(pattern, elem_local, &elem_ty)?;
+                    self.lower_block(body)?;
+                    self.var_map = saved_vars;
+
+                    let builder = self.current_fn.as_mut().unwrap();
+                    builder.goto(incr_block);
+                    builder.switch_to_block(incr_block);
+                    let next_idx = builder.create_local(MirType::i64());
+                    builder.binary_op(
+                        next_idx,
+                        BinOp::Add,
+                        values::local(idx_local),
+                        MirValue::Const(MirConst::Int(1, MirType::i64())),
+                    );
+                    builder.assign(idx_local, MirRValue::Use(values::local(next_idx)));
+                    builder.goto(cond_block);
+
+                    self.loop_stack.pop();
+                    self.loop_drop_depths.pop();
+                    let builder = self.current_fn.as_mut().unwrap();
+                    builder.switch_to_block(exit_block);
+                    return Ok(values::unit());
                 }
             }
         }
@@ -22264,7 +23624,7 @@ impl<'ctx> MirLowerer<'ctx> {
         body: &ast::Block,
         label: Option<&ast::Ident>,
     ) -> CodegenResult<MirValue> {
-        self.lower_for_vec_bounded(pattern, iter_val, elem_ty, None, false, body, label)
+        self.lower_for_vec_bounded(pattern, iter_val, elem_ty, None, false, None, body, label)
     }
 
     fn lower_for_vec_bounded(
@@ -22274,6 +23634,7 @@ impl<'ctx> MirLowerer<'ctx> {
         elem_ty: MirType,
         take_limit: Option<MirValue>,
         reverse: bool,
+        rev_enum_pat: Option<&ast::Pattern>,
         body: &ast::Block,
         label: Option<&ast::Ident>,
     ) -> CodegenResult<MirValue> {
@@ -22406,6 +23767,17 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         let saved_vars = self.var_map.clone();
+        if let Some(ep) = rev_enum_pat {
+            let b = self.current_fn.as_mut().unwrap();
+            let idx_u = b.create_local(MirType::usize());
+            b.cast(
+                idx_u,
+                CastKind::IntToInt,
+                values::local(read_idx),
+                MirType::usize(),
+            );
+            self.bind_for_element(ep, idx_u, &MirType::usize())?;
+        }
         self.bind_for_element(pattern, elem_local, &elem_ty)?;
         self.lower_block(body)?;
         self.var_map = saved_vars;
@@ -23819,6 +25191,38 @@ impl<'ctx> MirLowerer<'ctx> {
         let elem_is_char =
             matches!(&arr_val, MirValue::Local(id) if self.char_vec_locals.contains(id));
 
+        // Unwrap `Buffer<T>` (`Buffer_* { data: Vec<T> }`) when indexed directly (`buf[i]`).
+        let arr_val = {
+            let cur_ty = self.type_of_value(&arr_val);
+            let buf_struct = match &cur_ty {
+                MirType::Struct(n) if n.starts_with("Buffer_") => Some(n.clone()),
+                MirType::Ptr(inner) => match inner.as_ref() {
+                    MirType::Struct(n) if n.starts_with("Buffer_") => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(sname) = buf_struct {
+                if let Some(data_ty) = self.lookup_struct_field_type(&sname, "data") {
+                    let b = self.current_fn.as_mut().unwrap();
+                    let dl = b.create_local(data_ty.clone());
+                    b.assign(
+                        dl,
+                        MirRValue::FieldAccess {
+                            base: arr_val,
+                            field_name: Arc::from("data"),
+                            field_ty: data_ty,
+                        },
+                    );
+                    values::local(dl)
+                } else {
+                    arr_val
+                }
+            } else {
+                arr_val
+            }
+        };
+
         // A borrowed vector (`v: &Vec<T>` or `&mut Vec<T>`) lowers to a
         // pointer to the handle. Index the handle itself: without the deref
         // the element type below fell through to `Vec<T>` and the load
@@ -23956,6 +25360,72 @@ impl<'ctx> MirLowerer<'ctx> {
             other => (other.clone(), false),
         };
         let _ = is_ptr_deref; // used implicitly by FieldAccess on pointer-typed base
+
+        // Virtual `.m` 2D array projection for `Mat4` (`[[f32; 4]; 4]`) and `Mat3` (`[[f32; 3]; 3]`),
+        // built from `x_axis..w_axis` without altering the underlying struct layout.
+        if let MirType::Struct(ref struct_name) = effective_ty {
+            if field_name.as_ref() == "m" && matches!(struct_name.as_ref(), "Mat4" | "Mat3") {
+                let is_m4 = struct_name.as_ref() == "Mat4";
+                let n = if is_m4 { 4usize } else { 3usize };
+                let axes: &[&str] = if is_m4 {
+                    &["x_axis", "y_axis", "z_axis", "w_axis"]
+                } else {
+                    &["x_axis", "y_axis", "z_axis"]
+                };
+                let comps: &[&str] = if is_m4 {
+                    &["x", "y", "z", "w"]
+                } else {
+                    &["x", "y", "z"]
+                };
+                let vec_name = if is_m4 { "Vec4" } else { "Vec3" };
+                let row_ty = MirType::Array(Box::new(MirType::f32()), n as u64);
+                let mat_arr_ty = MirType::Array(Box::new(row_ty.clone()), n as u64);
+                let b = self.current_fn.as_mut().unwrap();
+                let mut row_vals = Vec::with_capacity(n);
+                for &axis in axes {
+                    let col = b.create_local(MirType::Struct(Arc::from(vec_name)));
+                    b.assign(
+                        col,
+                        MirRValue::FieldAccess {
+                            base: obj_val.clone(),
+                            field_name: Arc::from(axis),
+                            field_ty: MirType::Struct(Arc::from(vec_name)),
+                        },
+                    );
+                    let mut elems = Vec::with_capacity(n);
+                    for &comp in comps {
+                        let f = b.create_local(MirType::f32());
+                        b.assign(
+                            f,
+                            MirRValue::FieldAccess {
+                                base: values::local(col),
+                                field_name: Arc::from(comp),
+                                field_ty: MirType::f32(),
+                            },
+                        );
+                        elems.push(values::local(f));
+                    }
+                    let row = b.create_local(row_ty.clone());
+                    b.assign(
+                        row,
+                        MirRValue::Aggregate {
+                            kind: AggregateKind::Array(MirType::f32()),
+                            operands: elems,
+                        },
+                    );
+                    row_vals.push(values::local(row));
+                }
+                let out = b.create_local(mat_arr_ty);
+                b.assign(
+                    out,
+                    MirRValue::Aggregate {
+                        kind: AggregateKind::Array(row_ty),
+                        operands: row_vals,
+                    },
+                );
+                return Ok(values::local(out));
+            }
+        }
 
         // Swizzle support: multi-character field access on vector types
         // e.g. color.xyz → build_vec3_new(color.x, color.y, color.z)

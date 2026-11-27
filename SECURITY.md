@@ -2,17 +2,17 @@
 
 BuildLang is a compiler and toolchain. A defect here can turn source a user
 trusts into a binary that behaves differently than the source says, so security
-reports are treated as first-class.
+reports take top priority.
 
 ## Supported versions
 
-Fixes land on the latest published `1.2.x` line on crates.io. Older lines do not
+Fixes land on the latest published `1.15.x` line on crates.io. Older lines do not
 receive backports. Upgrade to the current release before reporting, and name the
 `buildc version` output in your report.
 
 | Version | Supported |
 |---|---|
-| latest `1.2.x` | yes |
+| latest `1.15.x` | yes |
 | earlier | no |
 
 ## Reporting a vulnerability
@@ -60,9 +60,9 @@ faster, because reproduction is most of the work.
   not security reports, until their status changes.
 - Bugs in your system C compiler, linker, or a third-party library linked through
   `extern "C"`. Report those to their own projects.
-- A program that does exactly what its declared capabilities allow. Effects are a
-  policy surface, not a sandbox; a function that declares `~ FileSystem` may touch
-  the file system.
+- A program that does exactly what its declared capabilities allow. Effects define
+  a policy surface and do not act as a sandbox; a function that declares
+  `~ FileSystem` may touch the file system.
 
 ## Disclosure
 
