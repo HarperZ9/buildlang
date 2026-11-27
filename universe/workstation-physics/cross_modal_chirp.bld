@@ -1,0 +1,335 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// Wave 52I - Author Idea B5: Bidirectional Cross-Modal 2D STFT <-> Chirp Audio Round-Trip
+// Computes forward 2D STFT spectrogram (W=64 FFT, hop=16, periodic Hann COLA) of a 1024-sample
+// linear-FM chirp (200..2200 Hz at 8 kHz) and reconstructs time-domain audio via overlap-add
+// inverse STFT proving SNR > 45 dB.
+// Planted Control: phase-scrambled spectrogram destroys time-domain SNR fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn wrap_pi(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut y: f64 = x;
+    while y > pi {
+        y = y - two_pi;
+    }
+    while y < -pi {
+        y = y + two_pi;
+    }
+    y
+}
+
+fn det_sin_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 1.6059043836821613e-10 - y2 * 7.647163731819816e-13;
+    let t6: f64 = 2.505210838544172e-8 - y2 * t7;
+    let t5: f64 = 2.7557319223985893e-6 - y2 * t6;
+    let t4: f64 = 1.984126984126984e-4 - y2 * t5;
+    let t3: f64 = 8.333333333333333e-3 - y2 * t4;
+    let t2: f64 = 1.6666666666666666e-1 - y2 * t3;
+    y * (1.0 - y2 * t2)
+}
+
+fn det_cos_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 2.08767569878681e-9 - y2 * 1.1470745597729725e-11;
+    let t6: f64 = 2.7557319223985893e-7 - y2 * t7;
+    let t5: f64 = 2.48015873015873e-5 - y2 * t6;
+    let t4: f64 = 1.388888888888889e-3 - y2 * t5;
+    let t3: f64 = 4.1666666666666664e-2 - y2 * t4;
+    let t2: f64 = 0.5 - y2 * t3;
+    1.0 - y2 * t2
+}
+
+fn det_sin(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = wrap_pi(x);
+    let mut sign: f64 = 1.0;
+    if y < 0.0 {
+        y = -y;
+        sign = -1.0;
+    }
+    if y > half_pi {
+        y = pi - y;
+    }
+    if y <= q_pi { sign * det_sin_poly(y) } else { sign * det_cos_poly(half_pi - y) }
+}
+
+fn det_cos(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = abs_f64(wrap_pi(x));
+    let mut sign: f64 = 1.0;
+    if y > half_pi {
+        y = pi - y;
+        sign = -1.0;
+    }
+    if y <= q_pi { sign * det_cos_poly(y) } else { sign * det_sin_poly(half_pi - y) }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn det_ln(x: f64) -> f64 {
+    if x <= 1.0e-30 {
+        return -69.0;
+    }
+    let mut v: f64 = x;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.69314718055994530942;
+    while v > 1.4142135623730951 {
+        v = v * 0.5;
+        k = k + 1;
+    }
+    while v < 0.7071067811865476 {
+        v = v * 2.0;
+        k = k - 1;
+    }
+    let y: f64 = (v - 1.0) / (v + 1.0);
+    let y2: f64 = y * y;
+    let mut term: f64 = y;
+    let mut sum: f64 = y;
+    let mut n: i32 = 1;
+    while n < 12 {
+        term = term * y2;
+        sum = sum + term / ((2 * n + 1) as f64);
+        n = n + 1;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+fn det_log10(x: f64) -> f64 {
+    det_ln(x) / 2.30258509299404568402
+}
+
+// Radix-2 64-point FFT (6 bits)
+fn fft64(re: &mut Vec<f64>, im: &mut Vec<f64>, inv: bool) {
+    let n: usize = 64;
+    let mut i: usize = 0;
+    while i < n {
+        let mut rev: usize = 0;
+        let mut b: usize = 0;
+        let mut tmp: usize = i;
+        while b < 6 {
+            rev = (rev << 1) | (tmp & 1);
+            tmp = tmp >> 1;
+            b = b + 1;
+        }
+        if i < rev {
+            let tr: f64 = re[i];
+            let ti: f64 = im[i];
+            re[i] = re[rev];
+            im[i] = im[rev];
+            re[rev] = tr;
+            im[rev] = ti;
+        }
+        i = i + 1;
+    }
+    let two_pi: f64 = 6.28318530717958647692;
+    let sign: f64 = if inv { 1.0 } else { -1.0 };
+    let mut len: usize = 2;
+    while len <= n {
+        let half: usize = len / 2;
+        let ang_step: f64 = sign * two_pi / (len as f64);
+        let mut start: usize = 0;
+        while start < n {
+            let mut k: usize = 0;
+            while k < half {
+                let ang: f64 = ang_step * (k as f64);
+                let wr: f64 = det_cos(ang);
+                let wi: f64 = det_sin(ang);
+                let u: usize = start + k;
+                let v: usize = start + k + half;
+                let ur: f64 = re[u];
+                let ui: f64 = im[u];
+                let vr: f64 = re[v] * wr - im[v] * wi;
+                let vi: f64 = re[v] * wi + im[v] * wr;
+                re[u] = ur + vr;
+                im[u] = ui + vi;
+                re[v] = ur - vr;
+                im[v] = ui - vi;
+                k = k + 1;
+            }
+            start = start + len;
+        }
+        len = len * 2;
+    }
+    if inv {
+        let inv_n: f64 = 1.0 / (n as f64);
+        let mut k: usize = 0;
+        while k < n {
+            re[k] = re[k] * inv_n;
+            im[k] = im[k] * inv_n;
+            k = k + 1;
+        }
+    }
+}
+
+fn lcg_next(state: i64) -> i64 {
+    let m: i64 = 2147483647;
+    let nxt: i64 = (state * 48271) % m;
+    if nxt <= 0 { nxt + m } else { nxt }
+}
+
+struct StftRoundTrip {
+    snr_db: f64,
+    max_abs_err: f64,
+    checksum: f64,
+}
+
+fn eval_stft_roundtrip(scramble_phase: bool) -> StftRoundTrip {
+    let n_sig: usize = 1024;
+    let w_len: usize = 64;
+    let hop: usize = 16;
+    let fs: f64 = 8000.0;
+    let f0: f64 = 200.0;
+    let f1: f64 = 2200.0;
+    let dur: f64 = (n_sig as f64) / fs;
+    let two_pi: f64 = 6.28318530717958647692;
+
+    // 1. Synthesize tapered linear-FM chirp x[0..1023]
+    let mut x: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n_sig {
+        let t: f64 = (i as f64) / fs;
+        let ph: f64 = two_pi * (f0 * t + 0.5 * ((f1 - f0) / dur) * t * t);
+        // Smooth raised-cosine fade at ends (64 samples) for clean interior COLA
+        let mut env: f64 = 1.0;
+        if i < 64 {
+            env = 0.5 - 0.5 * det_cos(3.14159265358979323846 * (i as f64) / 64.0);
+        } else if i >= n_sig - 64 {
+            env = 0.5 - 0.5 * det_cos(3.14159265358979323846 * ((n_sig - 1 - i) as f64) / 64.0);
+        }
+        x.push(env * det_sin(ph));
+        i = i + 1;
+    }
+
+    // Periodic Hann window (COLA with hop=W/4 -> sum of w(n - k*hop) == 2.0 identically!)
+    let mut win: Vec<f64> = Vec::new();
+    let mut w_i: usize = 0;
+    while w_i < w_len {
+        win.push(0.5 - 0.5 * det_cos(two_pi * (w_i as f64) / (w_len as f64)));
+        w_i = w_i + 1;
+    }
+
+    let n_frames: usize = (n_sig - w_len) / hop + 1; // 61 frames
+    let mut y_rec: Vec<f64> = vec![0.0; n_sig];
+    let mut w_acc: Vec<f64> = vec![0.0; n_sig];
+    let mut rng: i64 = 246813579;
+    let mut chk: f64 = 0.0;
+
+    let mut f_idx: usize = 0;
+    while f_idx < n_frames {
+        let off: usize = f_idx * hop;
+        let mut re: Vec<f64> = vec![0.0; w_len];
+        let mut im: Vec<f64> = vec![0.0; w_len];
+        let mut k: usize = 0;
+        while k < w_len {
+            re[k] = x[off + k] * win[k];
+            k = k + 1;
+        }
+        // Forward 2D STFT frame
+        fft64(&mut re, &mut im, false);
+        chk = chk + det_sqrt(re[4] * re[4] + im[4] * im[4]);
+
+        if scramble_phase {
+            // Preserve exact spectrogram magnitude while scrambling phase (Hermitian-symmetric)
+            let mut b: usize = 1;
+            while b < w_len / 2 {
+                rng = lcg_next(rng);
+                let rand_ph: f64 = two_pi * ((rng as f64) / 2147483647.0);
+                let mag: f64 = det_sqrt(re[b] * re[b] + im[b] * im[b]);
+                let nr: f64 = mag * det_cos(rand_ph);
+                let ni: f64 = mag * det_sin(rand_ph);
+                re[b] = nr;
+                im[b] = ni;
+                re[w_len - b] = nr;
+                im[w_len - b] = -ni;
+                b = b + 1;
+            }
+        }
+
+        // Inverse STFT + COLA overlap-add
+        fft64(&mut re, &mut im, true);
+        k = 0;
+        while k < w_len {
+            y_rec[off + k] = y_rec[off + k] + re[k];
+            w_acc[off + k] = w_acc[off + k] + win[k];
+            k = k + 1;
+        }
+        f_idx = f_idx + 1;
+    }
+
+    // Evaluate SNR on interior steady COLA region [64 .. n_sig - 64)
+    let mut sig_p: f64 = 0.0;
+    let mut err_p: f64 = 0.0;
+    let mut max_err: f64 = 0.0;
+    i = 64;
+    while i < n_sig - 64 {
+        let yr: f64 = y_rec[i] / w_acc[i];
+        let e: f64 = abs_f64(yr - x[i]);
+        if e > max_err {
+            max_err = e;
+        }
+        sig_p = sig_p + x[i] * x[i];
+        err_p = err_p + e * e;
+        i = i + 1;
+    }
+    let snr: f64 = 10.0 * det_log10(sig_p / (err_p + 1.0e-30));
+
+    StftRoundTrip { snr_db: snr, max_abs_err: max_err, checksum: chk }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    let clean: StftRoundTrip = eval_stft_roundtrip(false);
+    if clean.snr_db > 45.0 && clean.max_abs_err < 1.0e-10 {
+        println!(
+            "[PASS] stft_chirp_roundtrip snr_db={:.4} max_abs_err={:.3e}",
+            clean.snr_db, clean.max_abs_err
+        );
+    } else {
+        println!("[FAIL] stft_chirp_roundtrip snr_db={:.4} err={:.3e}", clean.snr_db, clean.max_abs_err);
+        failures = failures + 1;
+    }
+
+    let scrambled: StftRoundTrip = eval_stft_roundtrip(true);
+    if scrambled.snr_db < 3.0 {
+        println!(
+            "[PASS] planted_ctrl_phase_scramble caught snr_db={:.4} max_abs_err={:.4}",
+            scrambled.snr_db, scrambled.max_abs_err
+        );
+    } else {
+        println!("[FAIL] planted_ctrl_phase_scramble missed snr_db={:.4}", scrambled.snr_db);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_B5] elapsed_ms={:.4} clean_snr_db={:.6} checksum={:.9} failures={}",
+        elapsed_ms, clean.snr_db, clean.checksum, failures
+    );
+}
