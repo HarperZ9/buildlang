@@ -1,0 +1,160 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 57E Author Idea N22 (STA-066): Distant-Idea Combination & Structural Isomorphism Bridge Engine
+// Native BuildLang (buildc 1.15.0 --release --superopt --emit-cert, safe String ops only):
+//   Scores cross-domain concept bridges across 8 concepts spanning 5 domains and 200+ years:
+//     score(i, j) = struct_iso_cos(i, j) * domain_distance(i, j) * era_span_factor(i, j)
+//   Fail-closed guards:
+//     - Rejects same-domain duplicate pairs (domain_i == domain_j -> rc = -1)
+//     - Rejects shallow keyword collisions (keyword_tag match with struct_iso_cos < 0.35 -> rc = -2)
+//   Proves top bridge pairs distant domains sharing genuine Laplacian/diffusion isomorphism
+//   (1822 Fourier Heat Diffusion <-> 1997 Mycorrhizal Carbon Flux) while rejecting both planted
+//   traps fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+// Cosine similarity of two 4D structural operator signatures
+fn struct_cos(sigs: &Vec<f64>, i: usize, j: usize) -> f64 {
+    let mut dot: f64 = 0.0;
+    let mut ni: f64 = 0.0;
+    let mut nj: f64 = 0.0;
+    let mut k: usize = 0;
+    while k < 4 {
+        let a: f64 = sigs[i * 4 + k];
+        let b: f64 = sigs[j * 4 + k];
+        dot = dot + a * b;
+        ni = ni + a * a;
+        nj = nj + b * b;
+        k = k + 1;
+    }
+    let den: f64 = sqrt(ni * nj);
+    if den <= 1.0e-15 { return 0.0; }
+    dot / den
+}
+
+// Evaluate bridge (i, j): returns 0 on valid cross-domain bridge (score in score_out[0]),
+// -1 fail-closed on same-domain duplicate, -2 fail-closed on shallow keyword collision.
+fn score_bridge(
+    sigs: &Vec<f64>,
+    domains: &Vec<i32>,
+    eras: &Vec<f64>,
+    kw_tags: &Vec<i32>,
+    i: usize,
+    j: usize,
+    score_out: &mut Vec<f64>,
+) -> i32 {
+    score_out[0] = 0.0;
+    if domains[i] == domains[j] {
+        return -1;
+    }
+    let iso: f64 = struct_cos(sigs, i, j);
+    if kw_tags[i] == kw_tags[j] && iso < 0.35 {
+        return -2;
+    }
+    if iso < 0.35 {
+        return -3;
+    }
+    let d_dist: f64 = 0.5 + 0.25 * abs_f64((domains[i] - domains[j]) as f64);
+    let era_span: f64 = 1.0 + abs_f64(eras[i] - eras[j]) / 200.0;
+    score_out[0] = iso * d_dist * era_span;
+    0
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let t0: i64 = clock_ns();
+
+    // 8 concepts with 4D structural signatures [diffusion/Laplacian, spectral/SVD, tree/DAG, conservation]:
+    //   0: 1822 Fourier Heat Diffusion         (domain 0=Physics,   kw 10)
+    //   1: 1997 Mycorrhizal Carbon Flux        (domain 4=Biology,   kw 20) -> high iso w/ 0 + max distance!
+    //   2: 1973 Spectral Graph Laplacian       (domain 2=CS,        kw 10)
+    //   3: 2007 Roy-Vetterli Effective Rank    (domain 1=Signals,   kw 30)
+    //   4: 1948 Shannon Channel Entropy        (domain 3=Info,      kw 30)
+    //   5: 2020 E-Graph Equality Saturation    (domain 2=CS,        kw 40)
+    //   6: 2015 Shallow "Diffusion" Marketing  (domain 3=Info,      kw 10) -> shallow kw=10 collision w/ 0!
+    //   7: 1828 Heat Conduction Duplicate      (domain 0=Physics,   kw 10) -> same-domain duplicate w/ 0!
+    let mut sigs: Vec<f64> = Vec::new();
+    // 0: Fourier Heat
+    sigs.push(0.95); sigs.push(0.20); sigs.push(0.05); sigs.push(0.85);
+    // 1: Mycorrhizal Flux (isomorphic diffusion + conservation across distant Biology domain!)
+    sigs.push(0.92); sigs.push(0.18); sigs.push(0.12); sigs.push(0.88);
+    // 2: Spectral Graph Laplacian
+    sigs.push(0.75); sigs.push(0.82); sigs.push(0.20); sigs.push(0.30);
+    // 3: Roy-Vetterli Effective Rank
+    sigs.push(0.10); sigs.push(0.96); sigs.push(0.05); sigs.push(0.25);
+    // 4: Shannon Entropy
+    sigs.push(0.12); sigs.push(0.90); sigs.push(0.10); sigs.push(0.40);
+    // 5: E-Graph Saturation
+    sigs.push(0.15); sigs.push(0.20); sigs.push(0.98); sigs.push(0.35);
+    // 6: Shallow Keyword Collision (kw=10 like 0, orthogonal structure!)
+    sigs.push(0.02); sigs.push(0.05); sigs.push(0.95); sigs.push(0.02);
+    // 7: Same-Domain Duplicate (domain 0 like 0!)
+    sigs.push(0.94); sigs.push(0.21); sigs.push(0.05); sigs.push(0.84);
+
+    let mut domains: Vec<i32> = Vec::new();
+    domains.push(0); domains.push(4); domains.push(2); domains.push(1);
+    domains.push(3); domains.push(2); domains.push(3); domains.push(0);
+
+    let mut eras: Vec<f64> = Vec::new();
+    eras.push(1822.0); eras.push(1997.0); eras.push(1973.0); eras.push(2007.0);
+    eras.push(1948.0); eras.push(2020.0); eras.push(2015.0); eras.push(1828.0);
+
+    let mut kw_tags: Vec<i32> = Vec::new();
+    kw_tags.push(10); kw_tags.push(20); kw_tags.push(10); kw_tags.push(30);
+    kw_tags.push(30); kw_tags.push(40); kw_tags.push(10); kw_tags.push(10);
+
+    let mut sc_box: Vec<f64> = Vec::new();
+    sc_box.push(0.0);
+
+    let mut best_i: usize = 0;
+    let mut best_j: usize = 0;
+    let mut best_score: f64 = -1.0;
+    let mut valid_bridges: i32 = 0;
+    let mut i: usize = 0;
+    while i < 8 {
+        let mut j: usize = i + 1;
+        while j < 8 {
+            let rc: i32 = score_bridge(&sigs, &domains, &eras, &kw_tags, i, j, &mut sc_box);
+            if rc == 0 {
+                valid_bridges = valid_bridges + 1;
+                if sc_box[0] > best_score {
+                    best_score = sc_box[0];
+                    best_i = i;
+                    best_j = j;
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // Planted Controls:
+    //   Control 1: Same-domain duplicate pair (0, 7) MUST reject fail-closed (-1)
+    let rc_dup: i32 = score_bridge(&sigs, &domains, &eras, &kw_tags, 0, 7, &mut sc_box);
+    let ctrl_dup_caught: bool = rc_dup == -1;
+    //   Control 2: Shallow keyword collision pair (0, 6) MUST reject fail-closed (-2)
+    let rc_kw: i32 = score_bridge(&sigs, &domains, &eras, &kw_tags, 0, 6, &mut sc_box);
+    let ctrl_kw_caught: bool = rc_kw == -2;
+
+    if best_i != 0 || best_j != 1 || best_score < 2.5 || !ctrl_dup_caught || !ctrl_kw_caught {
+        failures = failures + 1;
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ns: i64 = t1 - t0;
+
+    println!(
+        "METRIC best_i={} best_j={} best_score={:.12} valid_bridges={}",
+        best_i, best_j, best_score, valid_bridges
+    );
+    println!(
+        "METRIC ctrl_dup_caught={} ctrl_kw_caught={} elapsed_ns={}",
+        ctrl_dup_caught, ctrl_kw_caught, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}

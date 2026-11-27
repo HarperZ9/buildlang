@@ -1,0 +1,189 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 57E Author Idea J7 (STA-063): Interpretability-as-Instrument Neuron-Lens & Causal Probe
+// Native BuildLang (buildc 1.15.0 --release --superopt --emit-cert, safe String ops only):
+//   Evaluates linear concept-direction probes inside an 8-neuron representation over 120 samples:
+//     - Computes directional activation projection R^2 AND causal ablation delta_loss when
+//       projecting out candidate direction v: h_abl = h - (h . v) v.
+//     - Enforces behavioral-readout discrepancy guard: high linear correlation WITHOUT causal
+//       ablation impact (delta_loss < 0.15) is rejected fail-closed (-1, never mind-reading!).
+//     - Proves causal direction v_causal passes both R^2 (>0.90) and ablation (>10x random dir),
+//       while planted spurious-correlation direction v_spurious fails causal ablation fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn det_val(seed: i64, idx: i64) -> f64 {
+    let a: f64 = ((seed * 131 + idx * 37 + 11) as f64) * 0.6173;
+    let b: f64 = ((seed * 97 + idx * 53 + 19) as f64) * 1.1317;
+    (sin(a) + cos(b)) * 0.65
+}
+
+// Evaluate probe direction v[0..8] on activations H[N*8], true targets y[N], and linear readout w_out[8].
+// Writes [probe_r2, base_mse, abl_mse, delta_loss] into out4.
+// Returns 0 if causally verified, -1 fail-closed if high linear probe_r2 lacks causal ablation impact!
+fn audit_concept_probe(
+    h_act: &Vec<f64>,
+    y_true: &Vec<f64>,
+    w_out: &Vec<f64>,
+    v_dir: &Vec<f64>,
+    n: usize,
+    out4: &mut Vec<f64>,
+) -> i32 {
+    let d: usize = 8;
+    let mut base_rss: f64 = 0.0;
+    let mut abl_rss: f64 = 0.0;
+    let mut sum_p: f64 = 0.0;
+    let mut sum_y: f64 = 0.0;
+    let mut projs: Vec<f64> = Vec::new();
+
+    let mut i: usize = 0;
+    while i < n {
+        let mut proj: f64 = 0.0;
+        let mut pred_base: f64 = 0.0;
+        let mut j: usize = 0;
+        while j < d {
+            let hj: f64 = h_act[i * d + j];
+            proj = proj + hj * v_dir[j];
+            pred_base = pred_base + hj * w_out[j];
+            j = j + 1;
+        }
+        // Causal ablation: remove component along unit direction v_dir -> h_abl = h - proj * v_dir
+        let mut pred_abl: f64 = 0.0;
+        j = 0;
+        while j < d {
+            let h_abl_j: f64 = h_act[i * d + j] - proj * v_dir[j];
+            pred_abl = pred_abl + h_abl_j * w_out[j];
+            j = j + 1;
+        }
+        let db: f64 = pred_base - y_true[i];
+        let da: f64 = pred_abl - y_true[i];
+        base_rss = base_rss + db * db;
+        abl_rss = abl_rss + da * da;
+        projs.push(proj);
+        sum_p = sum_p + proj;
+        sum_y = sum_y + y_true[i];
+        i = i + 1;
+    }
+
+    let nf: f64 = n as f64;
+    let mp: f64 = sum_p / nf;
+    let my: f64 = sum_y / nf;
+    let mut sp: f64 = 0.0;
+    let mut sy: f64 = 0.0;
+    let mut spy: f64 = 0.0;
+    i = 0;
+    while i < n {
+        let dp: f64 = projs[i] - mp;
+        let dy: f64 = y_true[i] - my;
+        sp = sp + dp * dp;
+        sy = sy + dy * dy;
+        spy = spy + dp * dy;
+        i = i + 1;
+    }
+    let denom: f64 = sp * sy;
+    let r2: f64 = if denom > 1.0e-18 { (spy * spy) / denom } else { 0.0 };
+    let base_mse: f64 = base_rss / nf;
+    let abl_mse: f64 = abl_rss / nf;
+    let delta_loss: f64 = abl_mse - base_mse;
+
+    out4[0] = r2;
+    out4[1] = base_mse;
+    out4[2] = abl_mse;
+    out4[3] = delta_loss;
+
+    // Discrepancy gate: reject spurious probes with strong correlation but negligible causal effect!
+    if r2 >= 0.65 && delta_loss < 0.15 {
+        return -1;
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let t0: i64 = clock_ns();
+
+    let n: usize = 120;
+    let d: usize = 8;
+    // Unit orthogonal basis directions:
+    //   v_causal   = [1, 0, 0, 0, 0, 0, 0, 0] (drives output w_out[0] = 1.5)
+    //   v_spurious = [0, 1, 0, 0, 0, 0, 0, 0] (correlates with y, but w_out[1] = 0.0 -> non-causal!)
+    //   v_rand     = [0, 0, 1, 0, 0, 0, 0, 0] (orthogonal independent noise, w_out[2] = 0.05)
+    let mut w_out: Vec<f64> = Vec::new();
+    let mut v_causal: Vec<f64> = Vec::new();
+    let mut v_spurious: Vec<f64> = Vec::new();
+    let mut v_rand: Vec<f64> = Vec::new();
+    let mut j: usize = 0;
+    while j < d {
+        w_out.push(0.0);
+        v_causal.push(0.0);
+        v_spurious.push(0.0);
+        v_rand.push(0.0);
+        j = j + 1;
+    }
+    w_out[0] = 1.50;
+    w_out[2] = 0.05;
+    w_out[3] = 0.20;
+    v_causal[0] = 1.0;
+    v_spurious[1] = 1.0;
+    v_rand[2] = 1.0;
+
+    let mut h_act: Vec<f64> = Vec::new();
+    let mut y_true: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        let z_c: f64 = 1.4 * det_val(701, (i * 8) as i64);
+        let z_s: f64 = 0.92 * z_c + 0.18 * det_val(702, (i * 8 + 1) as i64);
+        let z_r: f64 = 0.9 * sin(((i * 19 + 5) as f64) * 1.371) + 0.4 * cos(((i * 23 + 3) as f64) * 2.117);
+        let z_3: f64 = det_val(704, (i * 8 + 3) as i64);
+        h_act.push(z_c);
+        h_act.push(z_s);
+        h_act.push(z_r);
+        h_act.push(z_3);
+        h_act.push(det_val(705, (i * 8 + 4) as i64));
+        h_act.push(det_val(706, (i * 8 + 5) as i64));
+        h_act.push(det_val(707, (i * 8 + 6) as i64));
+        h_act.push(det_val(708, (i * 8 + 7) as i64));
+        y_true.push(1.50 * z_c + 0.05 * z_r + 0.20 * z_3);
+        i = i + 1;
+    }
+
+    let mut out_c: Vec<f64> = Vec::new();
+    let mut out_s: Vec<f64> = Vec::new();
+    let mut out_r: Vec<f64> = Vec::new();
+    j = 0;
+    while j < 4 { out_c.push(0.0); out_s.push(0.0); out_r.push(0.0); j = j + 1; }
+
+    let rc_causal: i32 = audit_concept_probe(&h_act, &y_true, &w_out, &v_causal, n, &mut out_c);
+    let rc_spurious: i32 = audit_concept_probe(&h_act, &y_true, &w_out, &v_spurious, n, &mut out_s);
+    let rc_rand: i32 = audit_concept_probe(&h_act, &y_true, &w_out, &v_rand, n, &mut out_r);
+
+    let causal_r2: f64 = out_c[0];
+    let causal_delta: f64 = out_c[3];
+    let spurious_r2: f64 = out_s[0];
+    let spurious_delta: f64 = out_s[3];
+    let rand_delta: f64 = out_r[3];
+    let ablation_ratio: f64 = causal_delta / (if rand_delta > 1.0e-12 { rand_delta } else { 1.0e-12 });
+
+    let ctrl_spurious_caught: bool = rc_spurious == -1 && spurious_r2 >= 0.80 && abs_f64(spurious_delta) < 1.0e-12;
+    if rc_causal != 0 || rc_rand != 0 || causal_r2 < 0.90 || ablation_ratio < 50.0 || !ctrl_spurious_caught {
+        failures = failures + 1;
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ns: i64 = t1 - t0;
+
+    println!(
+        "METRIC causal_r2={:.12} causal_delta={:.12} rand_delta={:.12} ablation_ratio={:.12}",
+        causal_r2, causal_delta, rand_delta, ablation_ratio
+    );
+    println!(
+        "METRIC spurious_r2={:.12} spurious_delta={:.12e} ctrl_spurious_caught={} elapsed_ns={}",
+        spurious_r2, spurious_delta, ctrl_spurious_caught, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}
