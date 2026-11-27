@@ -304,16 +304,24 @@ impl Unifier {
             (TyKind::Adt(def_id, args), TyKind::Slice(elem2))
                 if (*def_id == DefId::DUMMY
                     || super::ty::def_name(*def_id).as_deref() == Some("Vec"))
-                    && args.len() == 1 =>
+                    && (args.len() == 1 || args.is_empty()) =>
             {
-                self.unify_mode(&args[0], elem2, invariant)
+                if args.len() == 1 {
+                    self.unify_mode(&args[0], elem2, invariant)
+                } else {
+                    Ok(())
+                }
             }
             (TyKind::Slice(elem1), TyKind::Adt(def_id, args))
                 if (*def_id == DefId::DUMMY
                     || super::ty::def_name(*def_id).as_deref() == Some("Vec"))
-                    && args.len() == 1 =>
+                    && (args.len() == 1 || args.is_empty()) =>
             {
-                self.unify_mode(elem1, &args[0], invariant)
+                if args.len() == 1 {
+                    self.unify_mode(elem1, &args[0], invariant)
+                } else {
+                    Ok(())
+                }
             }
 
             // References: same mutability and unified pointee
@@ -424,10 +432,11 @@ impl Unifier {
                     // Allow elided unconstrained inference parameters on the SAME ADT
                     // (e.g. `StrategyContext` vs `StrategyContext<?T>` where lifetime/generic
                     // parameters were elided on one side), while rejecting concrete arity mismatches.
-                    let only_elided_vars = (args1.is_empty()
-                        && args2
-                            .iter()
-                            .all(|a| matches!(self.apply(a).kind, TyKind::Var(_))))
+                    let only_elided_vars = (both_vec && (args1.is_empty() || args2.is_empty()))
+                        || (args1.is_empty()
+                            && args2
+                                .iter()
+                                .all(|a| matches!(self.apply(a).kind, TyKind::Var(_))))
                         || (args2.is_empty()
                             && args1
                                 .iter()

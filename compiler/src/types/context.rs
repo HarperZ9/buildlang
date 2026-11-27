@@ -85,6 +85,10 @@ pub struct TypeContext {
     /// multiple types in different modules share the same name.
     inherent_methods: HashMap<(DefId, Arc<str>), TraitMethod>,
 
+    /// Specialized inherent methods for concrete generic instantiations
+    /// (e.g. `impl AnimationChannel<Vec3>` vs `impl AnimationChannel<Quaternion>`).
+    specialized_inherent_methods: HashMap<(DefId, Arc<str>), Vec<(Vec<Ty>, TraitMethod)>>,
+
     /// Associated constants: (type_def_id, const_name) → constant type.
     assoc_consts: HashMap<(DefId, Arc<str>), Ty>,
 
@@ -131,6 +135,10 @@ pub struct TypeContext {
     /// C type matches the checked type (issue #159). `None` marks a span that
     /// two checks resolved differently; lowering then keeps its own typing.
     inferred_local_ints: HashMap<crate::lexer::Span, Option<IntTy>>,
+    inferred_local_vec_elems: HashMap<crate::lexer::Span, Option<Arc<str>>>,
+    /// Inferred integer inner type of `Option<IntTy>` unannotated `let` bindings
+    /// (used only as a `parse` target hint when `.parse().ok()` has no turbofish).
+    inferred_local_option_ints: HashMap<crate::lexer::Span, Option<IntTy>>,
 
     /// Float type the checker inferred for an unannotated `let` whose
     /// initializer is an unsuffixed integer literal, as in `let mut c = 0;`
@@ -397,6 +405,7 @@ impl TypeContext {
             linear_defs: HashSet::new(),
             current_self_ty: None,
             inherent_methods: HashMap::new(),
+            specialized_inherent_methods: HashMap::new(),
             assoc_consts: HashMap::new(),
             operator_methods: HashMap::new(),
             param_trait_bounds: HashMap::new(),
@@ -407,6 +416,8 @@ impl TypeContext {
             foreign_statics: HashSet::new(),
             multi_methods: HashMap::new(),
             inferred_local_ints: HashMap::new(),
+            inferred_local_vec_elems: HashMap::new(),
+            inferred_local_option_ints: HashMap::new(),
             inferred_local_floats: HashMap::new(),
         };
         ctx.init_builtins();
@@ -634,6 +645,41 @@ impl TypeContext {
         self.inferred_local_ints.get(&span).copied().flatten()
     }
 
+    pub fn record_inferred_local_vec_elem(&mut self, span: crate::lexer::Span, elem: Arc<str>) {
+        self.inferred_local_vec_elems
+            .entry(span)
+            .and_modify(|slot| {
+                if slot.as_ref() != Some(&elem) {
+                    *slot = None;
+                }
+            })
+            .or_insert(Some(elem));
+    }
+
+    pub fn inferred_local_vec_elem(&self, span: crate::lexer::Span) -> Option<Arc<str>> {
+        self.inferred_local_vec_elems
+            .get(&span)
+            .and_then(|o| o.clone())
+    }
+
+    pub fn record_inferred_local_option_int(&mut self, span: crate::lexer::Span, ty: IntTy) {
+        self.inferred_local_option_ints
+            .entry(span)
+            .and_modify(|slot| {
+                if *slot != Some(ty) {
+                    *slot = None;
+                }
+            })
+            .or_insert(Some(ty));
+    }
+
+    pub fn inferred_local_option_int(&self, span: crate::lexer::Span) -> Option<IntTy> {
+        self.inferred_local_option_ints
+            .get(&span)
+            .copied()
+            .flatten()
+    }
+
     /// Mark whether the binding `name` in the current scope may be assigned.
     pub fn set_var_immutable(&mut self, name: &str, immutable: bool) {
         if let Some(scope) = self.scopes.last_mut() {
@@ -855,6 +901,13 @@ impl TypeContext {
         for impl_ in &self.impls {
             let matches = match (&impl_.self_ty.kind, &lookup_ty.kind) {
                 (TyKind::Adt(d1, _), TyKind::Adt(d2, _)) => d1 == d2,
+                (TyKind::Str, TyKind::Str)
+                | (TyKind::Bool, TyKind::Bool)
+                | (TyKind::Char, TyKind::Char)
+                | (TyKind::Slice(_), TyKind::Slice(_)) => true,
+                (TyKind::Int(a), TyKind::Int(b)) => a == b,
+                (TyKind::Float(a), TyKind::Float(b)) => a == b,
+                (TyKind::Array(_, n1), TyKind::Array(_, n2)) => n1 == n2,
                 _ => false,
             };
             if !matches {
@@ -902,6 +955,52 @@ impl TypeContext {
                 has_default: false,
             },
         );
+    }
+
+    /// Register a specialized inherent method on a concrete generic instantiation
+    /// (e.g. `impl AnimationChannel<Vec3> { fn sample(...) -> Vec3 }`).
+    pub fn register_specialized_inherent_method(
+        &mut self,
+        type_def_id: DefId,
+        type_args: Vec<Ty>,
+        method_name: Arc<str>,
+        sig: FnSig,
+    ) {
+        let entry = self
+            .specialized_inherent_methods
+            .entry((type_def_id, method_name.clone()))
+            .or_default();
+        let tm = TraitMethod {
+            name: method_name,
+            sig,
+            has_default: false,
+        };
+        if let Some(existing) = entry.iter_mut().find(|(args, _)| *args == type_args) {
+            existing.1 = tm;
+        } else {
+            entry.push((type_args, tm));
+        }
+    }
+
+    /// Look up an inherent method on a type by DefId, preferring a specialized
+    /// impl whose concrete type arguments match `type_args`.
+    pub fn lookup_inherent_method_for_args(
+        &self,
+        type_def_id: DefId,
+        type_args: &[Ty],
+        method_name: &str,
+    ) -> Option<&TraitMethod> {
+        if !type_args.is_empty() {
+            if let Some(specs) = self
+                .specialized_inherent_methods
+                .get(&(type_def_id, Arc::from(method_name)))
+            {
+                if let Some((_, tm)) = specs.iter().find(|(args, _)| args.as_slice() == type_args) {
+                    return Some(tm);
+                }
+            }
+        }
+        self.lookup_inherent_method(type_def_id, method_name)
     }
 
     /// Look up an inherent method on a type by DefId.
@@ -1138,6 +1237,39 @@ impl TypeContext {
             .iter()
             .any(|c| c.param_tys == candidate.param_tys || shape(&c.param_tys) == new_shape)
         {
+            return;
+        }
+        // If an earlier pass registered the same inline-module function with an
+        // elided-arg `Vec` (e.g. `&mut Vec`) and this pass supplies the concrete
+        // `Vec<T>` (e.g. `&mut Vec<u8>`), upgrade the existing slot in place rather
+        // than leaving an ambiguous duplicate candidate.
+        let strip_vec_args = |s: &str| -> String {
+            if let Some(pos) = s.find("Vec<") {
+                if let Some(end) = s[pos..].find('>') {
+                    let mut out = String::with_capacity(s.len());
+                    out.push_str(&s[..pos + 3]);
+                    out.push_str(&s[pos + end + 1..]);
+                    return out;
+                }
+            }
+            s.to_string()
+        };
+        let new_elided: Vec<String> = new_shape.iter().map(|s| strip_vec_args(s)).collect();
+        if let Some(existing) = candidates.iter_mut().find(|c| {
+            let es = shape(&c.param_tys);
+            es.len() == new_elided.len()
+                && es
+                    .iter()
+                    .zip(new_elided.iter())
+                    .all(|(a, b)| strip_vec_args(a) == *b)
+        }) {
+            let new_has_args = new_shape.iter().any(|s| s.contains("Vec<"));
+            let old_has_args = shape(&existing.param_tys)
+                .iter()
+                .any(|s| s.contains("Vec<"));
+            if new_has_args && !old_has_args {
+                *existing = candidate;
+            }
             return;
         }
         candidates.push(candidate);

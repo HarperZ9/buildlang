@@ -2530,9 +2530,7 @@ impl<'ctx> TypeInfer<'ctx> {
         for (span, ty) in std::mem::take(&mut self.unannotated_lets) {
             match self.apply(&ty).kind {
                 TyKind::Int(int_ty) => {
-                    if matches!(int_ty, IntTy::I64 | IntTy::I128 | IntTy::Isize) {
-                        self.ctx.record_inferred_local_int(span, int_ty);
-                    }
+                    self.ctx.record_inferred_local_int(span, int_ty);
                 }
                 // An unsuffixed integer literal unifies with a float (issue
                 // #167): `let mut c = 0;` divided into an f64 checks as f64.
@@ -2544,6 +2542,58 @@ impl<'ctx> TypeInfer<'ctx> {
                 // Still a float literal's variable: it defaults to f64.
                 TyKind::Infer(ref infer) if infer.kind == InferKind::Float => {
                     self.ctx.record_inferred_local_float(span, FloatTy::F64);
+                }
+                TyKind::Adt(def_id, ref args)
+                    if args.len() == 1
+                        && self
+                            .ctx
+                            .lookup_type(def_id)
+                            .is_some_and(|td| td.name.as_ref() == "Option") =>
+                {
+                    if let TyKind::Int(int_ty) = self.apply(&args[0]).kind {
+                        self.ctx.record_inferred_local_option_int(span, int_ty);
+                    }
+                }
+                TyKind::Adt(def_id, ref args)
+                    if args.len() == 1
+                        && (def_id == DefId::DUMMY
+                            || self
+                                .ctx
+                                .lookup_type(def_id)
+                                .is_some_and(|td| td.name.as_ref() == "Vec")) =>
+                {
+                    let elem = self.apply(&args[0]);
+                    let elem_name: Option<Arc<str>> = match &elem.kind {
+                        TyKind::Adt(edef, _) => self.ctx.lookup_type(*edef).and_then(|td| {
+                            if matches!(
+                                td.name.as_ref(),
+                                "Vec" | "Option" | "Result" | "HashMap" | "HashSet" | "Box"
+                            ) {
+                                None
+                            } else {
+                                Some(td.name.clone())
+                            }
+                        }),
+                        TyKind::Int(IntTy::U8) => Some(Arc::from("u8")),
+                        TyKind::Int(IntTy::U16) => Some(Arc::from("u16")),
+                        TyKind::Int(IntTy::U32) => Some(Arc::from("u32")),
+                        TyKind::Int(IntTy::U64) => Some(Arc::from("u64")),
+                        TyKind::Int(IntTy::Usize) => Some(Arc::from("usize")),
+                        TyKind::Int(IntTy::I8) => Some(Arc::from("i8")),
+                        TyKind::Int(IntTy::I16) => Some(Arc::from("i16")),
+                        TyKind::Int(IntTy::I32) => Some(Arc::from("i32")),
+                        TyKind::Int(IntTy::I64) => Some(Arc::from("i64")),
+                        TyKind::Int(IntTy::Isize) => Some(Arc::from("isize")),
+                        TyKind::Float(FloatTy::F32) => Some(Arc::from("f32")),
+                        TyKind::Float(FloatTy::F64) => Some(Arc::from("f64")),
+                        TyKind::Bool => Some(Arc::from("bool")),
+                        TyKind::Char => Some(Arc::from("char")),
+                        TyKind::Str => Some(Arc::from("String")),
+                        _ => None,
+                    };
+                    if let Some(name) = elem_name {
+                        self.ctx.record_inferred_local_vec_elem(span, name);
+                    }
                 }
                 _ => {}
             }
@@ -2923,7 +2973,11 @@ impl<'ctx> TypeInfer<'ctx> {
             _ => (None, vec![]),
         };
         if let Some(def_id) = type_def_id {
-            if let Some(method) = self.ctx.lookup_inherent_method(def_id, method_name) {
+            let applied_substs: Vec<Ty> = adt_substs.iter().map(|t| self.apply(t)).collect();
+            if let Some(method) =
+                self.ctx
+                    .lookup_inherent_method_for_args(def_id, &applied_substs, method_name)
+            {
                 // Substitute receiver ADT type params (if any), then freshen any
                 // remaining method-level generic params with ONE shared cache so
                 // multiple calls to a generic method (e.g. `set_constant_buffer<T>`)
@@ -3317,6 +3371,8 @@ impl<'ctx> TypeInfer<'ctx> {
                     Ty::str()
                 } else if macro_name == "matches" {
                     Ty::bool()
+                } else if macro_name == "vec" {
+                    Ty::vec(Ty::fresh_var())
                 } else {
                     Ty::fresh_var()
                 }
@@ -5471,15 +5527,41 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             _ => {}
         }
-        // `&mut T` argument satisfying a `&T` parameter (outermost reborrow),
-        // mirroring `coerce_arg`.
-        if let (
-            TyKind::Ref(_, Mutability::Immutable, p_inner),
-            TyKind::Ref(_, Mutability::Mutable, a_inner),
-        ) = (&p.kind, &a.kind)
+        // Reference parameter matching: ignore lifetime differences, allow
+        // `&mut T` -> `&T` reborrow, and match inner types recursively so
+        // `&?T` / `&mut Vec<u8>` resolve cleanly against `&HuffmanTree` / `&mut Vec<u8>`.
+        if let (TyKind::Ref(_, p_mut, p_inner), TyKind::Ref(_, a_mut, a_inner)) = (&p.kind, &a.kind)
         {
-            if self.apply(p_inner) == self.apply(a_inner) {
-                return Some(PositionMatch::Coercion);
+            if *p_mut == *a_mut
+                || (*p_mut == Mutability::Immutable && *a_mut == Mutability::Mutable)
+            {
+                if let Some(inner_match) = self.dispatch_position_match(p_inner, a_inner) {
+                    return Some(if *p_mut == *a_mut {
+                        inner_match
+                    } else {
+                        PositionMatch::Coercion
+                    });
+                }
+            }
+        }
+        // Same-name ADT with compatible type arguments (e.g. `Vec<u8>` vs `Vec<u8>`
+        // across different `DefId`s or elided `Vec` args).
+        if let (TyKind::Adt(p_def, p_args), TyKind::Adt(a_def, a_args)) = (&p.kind, &a.kind) {
+            let same_name = self.ctx.lookup_type(*p_def).map(|t| t.name.as_ref())
+                == self.ctx.lookup_type(*a_def).map(|t| t.name.as_ref())
+                && self.ctx.lookup_type(*p_def).is_some();
+            if same_name || (*p_def == *a_def) {
+                if p_args.is_empty() || a_args.is_empty() {
+                    return Some(PositionMatch::Coercion);
+                }
+                if p_args.len() == a_args.len()
+                    && p_args
+                        .iter()
+                        .zip(a_args.iter())
+                        .all(|(pa, aa)| self.dispatch_position_match(pa, aa).is_some())
+                {
+                    return Some(PositionMatch::Exact);
+                }
             }
         }
         None
@@ -6617,8 +6699,8 @@ impl<'ctx> TypeInfer<'ctx> {
             // =================================================================
             // ITERATOR METHODS
             // =================================================================
-            "iter" | "iter_mut" | "into_iter" | "values" | "keys" | "chars" | "bytes"
-            | "as_bytes" => {
+            "iter" | "iter_mut" | "into_iter" | "values" | "values_mut" | "keys" | "into_keys"
+            | "into_values" | "chars" | "bytes" | "as_bytes" => {
                 return Ty::fresh_var();
             }
             "map" | "filter" | "filter_map" | "flat_map" | "and_then" | "or_else" | "map_err"
@@ -6846,6 +6928,66 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             "index_of" => return Ty::int(IntTy::I64),
             "repeat" => return Ty::str(),
+            "eq_ignore_ascii_case" => {
+                let inner = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                if matches!(&inner.kind, TyKind::Str)
+                    || matches!(
+                        &inner.kind,
+                        TyKind::Adt(def, _)
+                            if self.ctx.lookup_type(*def).is_some_and(|td| td.name.as_ref() == "String")
+                    )
+                {
+                    return Ty::bool();
+                }
+            }
+            "matches" => {
+                let inner = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                if matches!(&inner.kind, TyKind::Str)
+                    || matches!(
+                        &inner.kind,
+                        TyKind::Adt(def, _)
+                            if self.ctx.lookup_type(*def).is_some_and(|td| td.name.as_ref() == "String")
+                    )
+                {
+                    return Ty::vec(Ty::str());
+                }
+            }
+            "as_slice" => {
+                let inner = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                match &inner.kind {
+                    TyKind::Array(elem, _) | TyKind::Slice(elem) => {
+                        return Ty::new(TyKind::Ref(
+                            None,
+                            Mutability::Immutable,
+                            Box::new(Ty::slice(elem.as_ref().clone())),
+                        ));
+                    }
+                    TyKind::Adt(def, args)
+                        if args.len() == 1
+                            && (*def == DefId::DUMMY
+                                || self
+                                    .ctx
+                                    .lookup_type(*def)
+                                    .is_some_and(|td| td.name.as_ref() == "Vec")) =>
+                    {
+                        return Ty::new(TyKind::Ref(
+                            None,
+                            Mutability::Immutable,
+                            Box::new(Ty::slice(args[0].clone())),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             "parse" => return Ty::fresh_var(),
             "rfind" if matches!(&receiver_ty.kind, TyKind::Str | TyKind::Ref(_, _, _)) => {
                 return Ty::fresh_var();
@@ -7032,6 +7174,50 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    /// Infer the type of a `match` / `if let` / `while let` scrutinee.
+    /// In BuildLang (SPECIFICATION.md 7.7), `HashMap::get(k)` stays polymorphic
+    /// for direct value reads (`let t = m.get(k); t.field`), while inside a
+    /// pattern-matching scrutinee (`if let Some(v) = m.get(k)` or
+    /// `match m.get(k) { Some(...) => ... }`) it is unambiguously `Option<&V>`.
+    fn infer_scrutinee(&mut self, scrutinee: &ast::Expr) -> Ty {
+        if let ExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = &scrutinee.kind
+        {
+            if method.name.as_ref() == "get" && args.len() == 1 {
+                let recv_ty = self.infer_expr(receiver);
+                let _ = self.infer_expr(&args[0]);
+                let applied_recv = self.apply(&recv_ty);
+                let inner_recv = match &applied_recv.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => applied_recv,
+                };
+                if let TyKind::Adt(def_id, substs) = &inner_recv.kind {
+                    let is_map = (*def_id == DefId::DUMMY && substs.len() == 2)
+                        || matches!(
+                            super::ty::def_name(*def_id).as_deref(),
+                            Some("HashMap" | "BTreeMap")
+                        )
+                        || self
+                            .ctx
+                            .lookup_type(*def_id)
+                            .is_some_and(|td| matches!(td.name.as_ref(), "HashMap" | "BTreeMap"));
+                    if is_map && substs.len() >= 2 {
+                        let val_ref = Ty::reference(None, Mutability::Immutable, substs[1].clone());
+                        if let Some(opt) = self.option_ty(val_ref) {
+                            return opt;
+                        }
+                    }
+                }
+                return Ty::fresh_var();
+            }
+        }
+        self.infer_expr(scrutinee)
+    }
+
     fn infer_if_let(
         &mut self,
         pattern: &ast::Pattern,
@@ -7040,7 +7226,7 @@ impl<'ctx> TypeInfer<'ctx> {
         else_branch: Option<&ast::Expr>,
         span: Span,
     ) -> Ty {
-        let scrutinee_ty = self.infer_expr(scrutinee);
+        let scrutinee_ty = self.infer_scrutinee(scrutinee);
         let pre_branch_sources = self.source_bindings.clone();
 
         let pre_branch_linear = self.linear_slots.clone();
@@ -7076,7 +7262,7 @@ impl<'ctx> TypeInfer<'ctx> {
     }
 
     fn infer_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], span: Span) -> Ty {
-        let scrutinee_ty = self.infer_expr(scrutinee);
+        let scrutinee_ty = self.infer_scrutinee(scrutinee);
         let pre_match_sources = self.source_bindings.clone();
         let pre_match_linear = self.linear_slots.clone();
         let mut arm_source_snapshots = Vec::new();
@@ -7414,7 +7600,7 @@ impl<'ctx> TypeInfer<'ctx> {
         // The scrutinee is re-evaluated every iteration, so consuming an outer
         // linear value there is a potential repeat-consume: treat it as in-loop.
         self.loop_depth += 1;
-        let expr_ty = self.infer_expr(expr);
+        let expr_ty = self.infer_scrutinee(expr);
         self.loop_depth = self.loop_depth.saturating_sub(1);
         let pre_loop_sources = self.source_bindings.clone();
 
@@ -8294,11 +8480,48 @@ impl<'ctx> TypeInfer<'ctx> {
         // Look up struct definition by path
         let struct_name = path.last_ident().map(|i| i.name.as_ref()).unwrap_or("");
 
-        // Extract struct info before mutable borrows to avoid borrow conflicts
-        let struct_info = self
-            .ctx
-            .lookup_type_by_name(struct_name)
-            .and_then(|type_def| {
+        // Extract struct (or enum struct-variant) info before mutable borrows to avoid borrow conflicts
+        let struct_info = if path.segments.len() >= 2 {
+            let enum_seg = path.segments[path.segments.len() - 2].ident.name.as_ref();
+            let parent_td = if enum_seg == "Self" {
+                self.ctx.get_self_ty().and_then(|st| match &st.kind {
+                    TyKind::Adt(def_id, _) => self.ctx.lookup_type(*def_id),
+                    _ => None,
+                })
+            } else {
+                self.ctx.lookup_type_by_name(enum_seg)
+            };
+            parent_td.and_then(|type_def| {
+                if let TypeDefKind::Enum(enum_def) = &type_def.kind {
+                    enum_def
+                        .variants
+                        .iter()
+                        .find(|v| v.name.as_ref() == struct_name)
+                        .map(|v| {
+                            let named: Vec<(Arc<str>, Ty)> = v
+                                .fields
+                                .iter()
+                                .filter_map(|(n, ty)| n.as_ref().map(|k| (k.clone(), ty.clone())))
+                                .collect();
+                            (type_def.def_id, type_def.generics.len(), named)
+                        })
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+        .or_else(|| {
+            let td = if struct_name == "Self" {
+                self.ctx.get_self_ty().and_then(|st| match &st.kind {
+                    TyKind::Adt(def_id, _) => self.ctx.lookup_type(*def_id),
+                    _ => None,
+                })
+            } else {
+                self.ctx.lookup_type_by_name(struct_name)
+            };
+            td.and_then(|type_def| {
                 if let TypeDefKind::Struct(struct_def) = &type_def.kind {
                     Some((
                         type_def.def_id,
@@ -8308,7 +8531,8 @@ impl<'ctx> TypeInfer<'ctx> {
                 } else {
                     None
                 }
-            });
+            })
+        });
 
         if let Some((def_id, generics_len, struct_fields)) = struct_info {
             // Create fresh type parameters for generics

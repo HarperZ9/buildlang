@@ -798,6 +798,22 @@ impl<'ctx> TypeChecker<'ctx> {
         }
 
         let self_ty = self.lower_type(&impl_.self_ty);
+        let specialized_args: Option<Vec<Ty>> = if let TyKind::Adt(_, args) = &self_ty.kind {
+            if !args.is_empty()
+                && args.iter().any(|a| {
+                    !matches!(
+                        a.kind,
+                        TyKind::Param(_, _) | TyKind::Var(_) | TyKind::Infer(_)
+                    )
+                })
+            {
+                Some(args.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let prev_self = self.ctx.get_self_ty().cloned();
         self.ctx.set_self_ty(Some(self_ty));
         let type_name = Self::extract_type_name_from_ast(&impl_.self_ty);
@@ -820,6 +836,14 @@ impl<'ctx> TypeChecker<'ctx> {
                             continue;
                         }
                         let sig = self.build_fn_sig_from_ast(f);
+                        if let Some(ref sargs) = specialized_args {
+                            self.ctx.register_specialized_inherent_method(
+                                def_id,
+                                sargs.clone(),
+                                f.name.name.clone(),
+                                sig.clone(),
+                            );
+                        }
                         self.ctx
                             .register_inherent_method(def_id, f.name.name.clone(), sig);
                     }
@@ -1524,7 +1548,39 @@ impl<'ctx> TypeChecker<'ctx> {
                     } else {
                         false
                     };
-                    if !name_match {
+                    // Deref coercion on return: `&Vec<T>` -> `&[T]` and
+                    // `&mut Vec<T>` -> `&mut [T]` (and `&[T; N]` -> `&[T]`).
+                    let slice_deref_ok = match (&body_ty.kind, &expected_ret.kind) {
+                        (TyKind::Ref(_, m_src, src), TyKind::Ref(_, m_dst, dst))
+                            if *m_dst == Mutability::Immutable || *m_src == Mutability::Mutable =>
+                        {
+                            if let TyKind::Slice(exp_elem) = &dst.kind {
+                                match &src.kind {
+                                    TyKind::Adt(def_id, args)
+                                        if *def_id == DefId::DUMMY
+                                            || super::ty::def_name(*def_id).as_deref()
+                                                == Some("Vec")
+                                            || self
+                                                .ctx
+                                                .lookup_type(*def_id)
+                                                .is_some_and(|td| td.name.as_ref() == "Vec") =>
+                                    {
+                                        args.is_empty()
+                                            || (args.len() == 1
+                                                && super::unify::unify(&args[0], exp_elem).is_ok())
+                                    }
+                                    TyKind::Array(arr_elem, _) => {
+                                        super::unify::unify(arr_elem, exp_elem).is_ok()
+                                    }
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+                    if !name_match && !slice_deref_ok {
                         self.error(
                             TypeError::ReturnTypeMismatch {
                                 expected: expected_ret,
@@ -1811,6 +1867,22 @@ impl<'ctx> TypeChecker<'ctx> {
         // PASS 1: Pre-register ALL method signatures and constants before
         // checking any bodies. This fixes forward references: method A can
         // call method B even if B is defined after A in the source.
+        let specialized_args: Option<Vec<Ty>> = if let TyKind::Adt(_, args) = &self_ty.kind {
+            if !args.is_empty()
+                && args.iter().any(|a| {
+                    !matches!(
+                        a.kind,
+                        TyKind::Param(_, _) | TyKind::Var(_) | TyKind::Infer(_)
+                    )
+                })
+            {
+                Some(args.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         for item in &impl_.items {
             match &item.kind {
                 ImplItemKind::Const { name, ty, .. } => {
@@ -1820,6 +1892,14 @@ impl<'ctx> TypeChecker<'ctx> {
                 ImplItemKind::Function(f) => {
                     if let Some(def_id) = type_def_id {
                         let sig = self.build_fn_sig_from_ast(f);
+                        if let Some(ref sargs) = specialized_args {
+                            self.ctx.register_specialized_inherent_method(
+                                def_id,
+                                sargs.clone(),
+                                f.name.name.clone(),
+                                sig.clone(),
+                            );
+                        }
                         self.ctx
                             .register_inherent_method(def_id, f.name.name.clone(), sig);
                     }

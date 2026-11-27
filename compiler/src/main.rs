@@ -10603,6 +10603,26 @@ fn merge_module_file(
     // This matches how lower_path joins path segments with `_`:
     // `math_helpers::add(...)` emits a call to `math_helpers_add`.
     for mut item in mod_ast.items {
+        // Dependency test suites (`#[cfg(test)]`) are not part of a module's
+        // public API when imported into another file.
+        let is_cfg_test = item.attrs.iter().any(|attr| {
+            attr.path
+                .last_ident()
+                .is_some_and(|id| id.name.as_ref() == "cfg")
+                && matches!(
+                    &attr.args,
+                    buildlang::ast::AttrArgs::Delimited(tokens)
+                        if tokens.iter().any(|tt| matches!(
+                            tt,
+                            buildlang::ast::TokenTree::Token(t)
+                                if mod_source_file.source().get(t.span.start.0 as usize..t.span.end.0 as usize)
+                                    == Some("test")
+                        ))
+                )
+        });
+        if is_cfg_test {
+            continue;
+        }
         // A method that calls a function of its own module by bare name
         // reaches the prefixed function, as a function of the module does.
         if let ItemKind::Impl(imp) = &mut item.kind {

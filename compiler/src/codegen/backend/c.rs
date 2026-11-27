@@ -142,6 +142,8 @@ pub struct CBackend {
     /// Field names and types of each struct, for building a struct with an
     /// array member one member at a time (see `c/aggregates.rs`).
     struct_fields: aggregates::StructFields,
+    /// Named fields of enum struct-variants keyed by `(enum_name, variant_name, field_index)`.
+    enum_variant_fields: std::collections::HashMap<(String, String, u32), String>,
 }
 
 impl CBackend {
@@ -172,6 +174,7 @@ impl CBackend {
             global_int_types: std::collections::HashMap::new(),
             global_types: std::collections::HashMap::new(),
             user_globals: std::collections::HashSet::new(),
+            enum_variant_fields: std::collections::HashMap::new(),
         }
     }
 
@@ -277,11 +280,10 @@ impl CBackend {
             MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
                 Self::type_name_of_slice_ref(inner)
             }
-            // A raw pointer / concrete reference element: keyed by a sanitized
-            // identifier so `Vec<&str>` / `Vec<*mut T>` each get a typed
-            // element-sized wrapper. Trait-object pointers (`dyn Trait`) remain
-            // unsupported until vtable dispatch is lowered in the C backend.
-            MirType::Ptr(inner) if !Self::is_dyn_trait_type(inner) => Self::hvec_ptr_suffix(inner),
+            // A raw pointer / reference / trait-object pointer element: keyed
+            // by a sanitized identifier so `Vec<&str>`, `Vec<*mut T>`, and
+            // `Vec<*dyn Trait>` each get a typed element-sized wrapper.
+            MirType::Ptr(inner) => Self::hvec_ptr_suffix(inner),
             MirType::Tuple(elems) if Self::is_supported_vec_tuple(elems) => {
                 MirType::tuple_type_name(elems).to_string()
             }
@@ -294,17 +296,14 @@ impl CBackend {
     /// runtime can store by value.
     pub(crate) fn is_supported_vec_tuple(elems: &[MirType]) -> bool {
         fn supported_elem(e: &MirType) -> bool {
-            if CBackend::is_dyn_trait_type(e) {
-                return false;
-            }
             match e {
                 MirType::Bool
                 | MirType::Int(..)
                 | MirType::Float(..)
-                | MirType::Struct(_)
                 | MirType::Ptr(_)
                 | MirType::Vec(_)
                 | MirType::Map(..) => true,
+                MirType::Struct(n) => !n.starts_with("dyn ") && !n.starts_with("dyn_"),
                 MirType::Option(inner) => supported_elem(inner),
                 MirType::Tuple(nested) => !nested.is_empty() && nested.iter().all(supported_elem),
                 _ => false,
@@ -321,6 +320,23 @@ impl CBackend {
             MirType::Ptr(inner) => Self::is_dyn_trait_type(inner),
             MirType::Tuple(elems) => elems.iter().any(Self::is_dyn_trait_type),
             _ => false,
+        }
+    }
+
+    /// Sanitized C-identifier for a trait object name (e.g. `PostEffect`, `Fn`).
+    pub(crate) fn sanitize_dyn_trait_name(raw: &str) -> String {
+        let mut out = String::new();
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        if out.is_empty() {
+            "Trait".to_string()
+        } else {
+            out
         }
     }
 
@@ -349,7 +365,7 @@ impl CBackend {
 
     fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
         Self::is_slice_ref(elem)
-            || matches!(elem, MirType::Ptr(inner) if !Self::is_dyn_trait_type(inner))
+            || matches!(elem, MirType::Ptr(_))
             || matches!(elem, MirType::Tuple(elems) if Self::is_supported_vec_tuple(elems))
             || matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
             || matches!(
@@ -1192,13 +1208,133 @@ impl CBackend {
             self.output.push('\n');
         }
 
+        // Forward-declare every referenced `dyn_<Trait>` type before struct/tuple
+        // definitions so structs and tuples holding `dyn_<Trait>*` fields compile
+        // in C99 without ordering issues.
+        let mut referenced_dyn_traits = std::collections::BTreeSet::<String>::new();
+        {
+            fn collect_dyn(ty: &MirType, out: &mut std::collections::BTreeSet<String>) {
+                match ty {
+                    MirType::TraitObject(name) => {
+                        out.insert(CBackend::sanitize_dyn_trait_name(name));
+                    }
+                    MirType::Ptr(inner)
+                    | MirType::Array(inner, _)
+                    | MirType::Slice(inner)
+                    | MirType::Vec(inner)
+                    | MirType::Option(inner) => collect_dyn(inner, out),
+                    MirType::Map(k, v) => {
+                        collect_dyn(k, out);
+                        collect_dyn(v, out);
+                    }
+                    MirType::Tuple(elems) => elems.iter().for_each(|e| collect_dyn(e, out)),
+                    _ => {}
+                }
+            }
+            for def in &module.types {
+                if let TypeDefKind::Struct { fields, .. } = &def.kind {
+                    for (_, fty) in fields {
+                        collect_dyn(fty, &mut referenced_dyn_traits);
+                    }
+                }
+            }
+            for func in &module.functions {
+                for local in &func.locals {
+                    collect_dyn(&local.ty, &mut referenced_dyn_traits);
+                }
+                collect_dyn(&func.sig.ret, &mut referenced_dyn_traits);
+            }
+            for k in module.trait_methods.keys() {
+                referenced_dyn_traits.insert(Self::sanitize_dyn_trait_name(k));
+            }
+            for name in &referenced_dyn_traits {
+                writeln!(self.output, "typedef struct dyn_{name} dyn_{name};").unwrap();
+            }
+            if !referenced_dyn_traits.is_empty() {
+                self.output.push('\n');
+            }
+        }
+
         // Type definitions
         let mut all_types = module.types.clone();
+        self.enum_variant_fields.clear();
+        for td in &all_types {
+            if let TypeDefKind::Enum { variants, .. } = &td.kind {
+                for v in variants {
+                    for (idx, (fname, _)) in v.fields.iter().enumerate() {
+                        if let Some(name) = fname {
+                            self.enum_variant_fields.insert(
+                                (td.name.to_string(), v.name.to_string(), idx as u32),
+                                name.to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if !all_types.iter().any(|t| t.name.as_ref() == "BuildRange") {
+            fn uses_build_range(ty: &MirType) -> bool {
+                match ty {
+                    MirType::Struct(n) => n.as_ref() == "BuildRange",
+                    MirType::Ptr(t)
+                    | MirType::Vec(t)
+                    | MirType::Option(t)
+                    | MirType::Slice(t)
+                    | MirType::Array(t, _) => uses_build_range(t),
+                    MirType::Map(k, v) => uses_build_range(k) || uses_build_range(v),
+                    MirType::Tuple(ts) => ts.iter().any(uses_build_range),
+                    MirType::FnPtr(sig) => {
+                        sig.params.iter().any(uses_build_range) || uses_build_range(&sig.ret)
+                    }
+                    _ => false,
+                }
+            }
+            let needs_range = all_types.iter().any(|td| match &td.kind {
+                TypeDefKind::Struct { fields, .. } => {
+                    fields.iter().any(|(_, t)| uses_build_range(t))
+                }
+                TypeDefKind::Enum { variants, .. } => variants
+                    .iter()
+                    .any(|v| v.fields.iter().any(|(_, t)| uses_build_range(t))),
+                _ => false,
+            }) || module.functions.iter().any(|f| {
+                f.sig.params.iter().any(uses_build_range)
+                    || uses_build_range(&f.sig.ret)
+                    || f.locals.iter().any(|l| uses_build_range(&l.ty))
+            });
+            if needs_range {
+                all_types.push(MirTypeDef {
+                    name: Arc::from("BuildRange"),
+                    kind: TypeDefKind::Struct {
+                        fields: vec![
+                            (Some(Arc::from("start")), MirType::usize()),
+                            (Some(Arc::from("end")), MirType::usize()),
+                        ],
+                        packed: false,
+                    },
+                });
+            }
+        }
         all_types.extend(Self::synthesize_tuple_typedefs(module));
         self.generate_type_definitions(&all_types)?;
 
         // Vtable TYPE declarations (before forward declarations so dyn_* types are available)
         self.generate_vtable_types(module)?;
+        // Define opaque fat-pointer structs for any `dyn_<Trait>` referenced in
+        // types/locals that had no registered vtable methods (e.g. `dyn Fn`).
+        for name in &referenced_dyn_traits {
+            if !module
+                .trait_methods
+                .keys()
+                .any(|k| Self::sanitize_dyn_trait_name(k) == *name)
+            {
+                writeln!(
+                    self.output,
+                    "struct dyn_{name} {{ void* data; void* vtable; }};\n"
+                )
+                .unwrap();
+            }
+        }
 
         // String table
         self.generate_string_table(&module.strings)?;
@@ -1888,10 +2024,11 @@ impl CBackend {
             }
             write!(self.output, "}} {}_vtable;\n\n", trait_name).unwrap();
 
-            write!(self.output, "typedef struct dyn_{} {{\n", trait_name).unwrap();
+            let safe_trait = Self::sanitize_dyn_trait_name(trait_name);
+            write!(self.output, "struct dyn_{} {{\n", safe_trait).unwrap();
             write!(self.output, "    void* data;\n").unwrap();
             write!(self.output, "    {}_vtable* vtable;\n", trait_name).unwrap();
-            write!(self.output, "}} dyn_{};\n\n", trait_name).unwrap();
+            write!(self.output, "}};\n\n").unwrap();
         }
 
         Ok(())
@@ -4256,7 +4393,9 @@ impl CBackend {
             MirType::Texture2D(_) => "void*".to_string(), // Opaque GPU handle
             MirType::Sampler => "void*".to_string(),      // Opaque GPU handle
             MirType::SampledImage(_) => "void*".to_string(), // Opaque GPU handle
-            MirType::TraitObject(name) => format!("dyn_{}", name), // vtable struct
+            MirType::TraitObject(name) => {
+                format!("dyn_{}", Self::sanitize_dyn_trait_name(name))
+            } // vtable struct
             MirType::Vec(_) => "BuildVecHandle".to_string(),
             MirType::Option(_) => "Option".to_string(),
             // The handle-struct name depends on key/value types. Default map is
@@ -5058,6 +5197,31 @@ impl CBackend {
                 ..
             } => {
                 let base_str = self.value_to_c(base, locals);
+                let enum_name = match base {
+                    MirValue::Local(id) => locals.get(id.0 as usize).and_then(|l| match &l.ty {
+                        MirType::Struct(n) => Some(n.as_ref()),
+                        MirType::Ptr(inner) => match inner.as_ref() {
+                            MirType::Struct(n) => Some(n.as_ref()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }),
+                    _ => None,
+                };
+                if let Some(en) = enum_name {
+                    if let Some(fname) = self.enum_variant_fields.get(&(
+                        en.to_string(),
+                        variant_name.to_string(),
+                        *field_index,
+                    )) {
+                        return Ok(format!(
+                            "{}.data.{}.{}",
+                            base_str,
+                            variant_name,
+                            Self::escape_c_keyword(fname)
+                        ));
+                    }
+                }
                 format!("{}.data.{}.f{}", base_str, variant_name, field_index)
             }
             MirRValue::IndexAccess {

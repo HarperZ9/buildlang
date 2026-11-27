@@ -148,6 +148,23 @@ impl MirLowerer<'_> {
         if args.len() != arity {
             return None;
         }
+        // Closures with tuple/ref destructuring patterns (e.g. `|(_, t)| ...`)
+        // or an active `parse_target_hint` (e.g. `and_then(|s| s.parse().ok())`)
+        // need inline lowering so tuple fields and `parse_target_hint` propagate cleanly.
+        if matches!(method, "map" | "and_then") {
+            if let ExprKind::Closure { params, .. } = &args[0].kind {
+                let needs_inline = self.parse_target_hint.is_some()
+                    || params.iter().any(|p| {
+                        matches!(
+                            p.pattern.kind,
+                            ast::PatternKind::Tuple(_) | ast::PatternKind::Ref { .. }
+                        )
+                    });
+                if needs_inline {
+                    return None;
+                }
+            }
+        }
         Some(self.lower_option_combinator(receiver_val, receiver_ty, inner_ty, method, args))
     }
 
