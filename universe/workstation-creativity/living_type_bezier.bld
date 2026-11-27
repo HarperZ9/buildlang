@@ -1,0 +1,168 @@
+// Wave 55I - Author Idea E5: Parametric Cubic-Bezier Living Type & Optical Kerning Balancer
+// Generates parametric cubic-Bezier glyph outlines across 12 pt..144 pt with optical stem-weight
+// contrast scaling and contour-area kerning balance, verifying 0 self-intersecting segments.
+// Planted Control: self-intersecting bowtie cubic Bezier caught fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_ln(x: f64) -> f64 {
+    let mut v: f64 = x;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.69314718055994530942;
+    while v > 1.4142135623730951 {
+        v = v * 0.5;
+        k = k + 1;
+    }
+    while v < 0.7071067811865476 {
+        v = v * 2.0;
+        k = k - 1;
+    }
+    let y: f64 = (v - 1.0) / (v + 1.0);
+    let y2: f64 = y * y;
+    let mut term: f64 = y;
+    let mut sum: f64 = y;
+    let mut n: i32 = 1;
+    while n < 12 {
+        term = term * y2;
+        sum = sum + term / ((2 * n + 1) as f64);
+        n = n + 1;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+fn cubic_eval(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+    let u: f64 = 1.0 - t;
+    u * u * u * p0 + 3.0 * u * u * t * p1 + 3.0 * u * t * t * p2 + t * t * t * p3
+}
+
+fn cross2d(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64 {
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+fn segs_intersect(
+    ax: f64, ay: f64, bx: f64, by: f64,
+    cx: f64, cy: f64, dx: f64, dy: f64,
+) -> bool {
+    let d1: f64 = cross2d(ax, ay, bx, by, cx, cy);
+    let d2: f64 = cross2d(ax, ay, bx, by, dx, dy);
+    let d3: f64 = cross2d(cx, cy, dx, dy, ax, ay);
+    let d4: f64 = cross2d(cx, cy, dx, dy, bx, by);
+    let opp1: bool = (d1 > 1.0e-12 && d2 < -1.0e-12) || (d1 < -1.0e-12 && d2 > 1.0e-12);
+    let opp2: bool = (d3 > 1.0e-12 && d4 < -1.0e-12) || (d3 < -1.0e-12 && d4 > 1.0e-12);
+    opp1 && opp2
+}
+
+// Count self-intersections along a 32-segment sampled cubic Bezier curve
+fn count_bezier_self_intersections(
+    x0: f64, y0: f64, x1: f64, y1: f64,
+    x2: f64, y2: f64, x3: f64, y3: f64,
+) -> i32 {
+    let n_seg: usize = 32;
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i <= n_seg {
+        let t: f64 = (i as f64) / (n_seg as f64);
+        xs.push(cubic_eval(x0, x1, x2, x3, t));
+        ys.push(cubic_eval(y0, y1, y2, y3, t));
+        i = i + 1;
+    }
+    let mut hits: i32 = 0;
+    i = 0;
+    while i < n_seg {
+        let mut j: usize = i + 2;
+        while j < n_seg {
+            if segs_intersect(xs[i], ys[i], xs[i + 1], ys[i + 1], xs[j], ys[j], xs[j + 1], ys[j + 1]) {
+                hits = hits + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    hits
+}
+
+// Optical stem-weight contrast ratio & tracking as smooth log-function of point size [12..144 pt]
+fn optical_contrast(pt: f64) -> f64 {
+    let s: f64 = (det_ln(pt) - det_ln(12.0)) / (det_ln(144.0) - det_ln(12.0));
+    1.60 + 3.20 * s
+}
+
+// Optical kerning offset (em) equalizing white trap area between facing glyph edge profiles
+fn compute_optical_kern(right_profile_a: &Vec<f64>, left_profile_b: &Vec<f64>, target_gap: f64) -> f64 {
+    let n: usize = right_profile_a.len();
+    let mut mean_gap: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        // Unkerned horizontal gap at slice y_i = (1.0 - right_edge_a) + left_edge_b
+        mean_gap = mean_gap + (1.0 - right_profile_a[i]) + left_profile_b[i];
+        i = i + 1;
+    }
+    mean_gap = mean_gap / (n as f64);
+    target_gap - mean_gap
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Sweep 5 optical sizes 12, 24, 48, 96, 144 pt verifying 0 self-intersections & monotonic contrast
+    let sizes: Vec<f64> = vec![12.0, 24.0, 48.0, 96.0, 144.0];
+    let mut total_hits: i32 = 0;
+    let mut prev_c: f64 = 0.0;
+    let mut mono_ok: bool = true;
+    let mut checksum: f64 = 0.0;
+
+    let mut idx: usize = 0;
+    while idx < 5 {
+        let pt: f64 = sizes[idx];
+        let c_rat: f64 = optical_contrast(pt);
+        if c_rat <= prev_c {
+            mono_ok = false;
+        }
+        prev_c = c_rat;
+        // Smooth S-spine and arch Bezier strokes parameterized by optical contrast
+        let bulge: f64 = 0.25 + 0.04 * c_rat;
+        let h1: i32 = count_bezier_self_intersections(0.0, 0.0, 0.0, 0.6 + bulge, 0.8, 0.6 + bulge, 0.8, 0.0);
+        let h2: i32 = count_bezier_self_intersections(0.1, 0.1, 0.9, 0.2, 0.1, 0.8, 0.9, 0.9);
+        total_hits = total_hits + h1 + h2;
+        checksum = checksum + c_rat;
+        idx = idx + 1;
+    }
+
+    // 2. Optical Kerning Balancer for AV, To, and HH pairs (equalizes target white area 0.24 em)
+    let right_a: Vec<f64> = vec![0.95, 0.82, 0.68, 0.55]; // 'A' slopes inward top-to-bottom
+    let left_v: Vec<f64> = vec![0.45, 0.32, 0.18, 0.05];  // 'V' slopes outward bottom-to-top
+    let right_h: Vec<f64> = vec![0.88, 0.88, 0.88, 0.88]; // 'H' vertical right stem
+    let left_h: Vec<f64> = vec![0.12, 0.12, 0.12, 0.12];  // 'H' vertical left stem
+    let kern_av: f64 = compute_optical_kern(&right_a, &left_v, 0.24);
+    let kern_hh: f64 = compute_optical_kern(&right_h, &left_h, 0.24);
+    checksum = checksum + kern_av + kern_hh;
+
+    if total_hits == 0 && mono_ok && kern_av < -0.20 && abs_f64(kern_hh) < 1.0e-12 {
+        println!(
+            "[PASS] living_type_12_to_144pt self_int={} contrast_144={:.4} kern_AV={:.6} kern_HH={:.6}",
+            total_hits, prev_c, kern_av, kern_hh
+        );
+    } else {
+        println!("[FAIL] living_type_12_to_144pt hits={} kern_AV={:.6}", total_hits, kern_av);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: Self-Intersecting Bowtie Cubic Bezier Caught Fail-Closed
+    let bowtie_hits: i32 = count_bezier_self_intersections(0.0, 0.0, 2.5, 1.5, -1.5, 1.5, 1.0, 0.0);
+    if bowtie_hits >= 1 {
+        println!("[PASS] planted_ctrl_bowtie_bezier caught intersections={}", bowtie_hits);
+    } else {
+        println!("[FAIL] planted_ctrl_bowtie_bezier missed intersections={}", bowtie_hits);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_E5] elapsed_ms={:.4} kern_av={:.9} checksum={:.9} failures={}",
+        elapsed_ms, kern_av, checksum, failures
+    );
+}

@@ -1,0 +1,245 @@
+// Wave 55I - Author Idea E8: Unified Deterministic Distill Feature Extractor
+// Extracts Oklab palette centroids, layout grid ratio, tempo BPM, and Schroeder RT60 acoustic
+// reverberation time across 5 synthetic mixed-format artifacts with deterministic hash parity.
+// Planted Control: NaN / negative / out-of-range corrupt channel rejected fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_cbrt(x: f64) -> f64 {
+    if x == 0.0 {
+        return 0.0;
+    }
+    let sign: f64 = if x < 0.0 { -1.0 } else { 1.0 };
+    let v: f64 = abs_f64(x);
+    let mut g: f64 = v;
+    if g < 0.5 {
+        g = 0.5;
+    }
+    let mut i: i32 = 0;
+    while i < 30 {
+        g = (2.0 * g + v / (g * g)) / 3.0;
+        i = i + 1;
+    }
+    sign * g
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 128.0;
+    let p6: f64 = 1.388888888888889e-3 + u * 1.984126984126984e-4;
+    let p5: f64 = 8.333333333333333e-3 + u * p6;
+    let p4: f64 = 4.1666666666666664e-2 + u * p5;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * p4)));
+    let mut i: i32 = 0;
+    while i < 7 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+fn det_ln(x: f64) -> f64 {
+    if x <= 1.0e-30 {
+        return -69.0;
+    }
+    let mut v: f64 = x;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.69314718055994530942;
+    while v > 1.4142135623730951 {
+        v = v * 0.5;
+        k = k + 1;
+    }
+    while v < 0.7071067811865476 {
+        v = v * 2.0;
+        k = k - 1;
+    }
+    let y: f64 = (v - 1.0) / (v + 1.0);
+    let y2: f64 = y * y;
+    let mut term: f64 = y;
+    let mut sum: f64 = y;
+    let mut n: i32 = 1;
+    while n < 12 {
+        term = term * y2;
+        sum = sum + term / ((2 * n + 1) as f64);
+        n = n + 1;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+fn det_log10(x: f64) -> f64 {
+    det_ln(x) / 2.30258509299404568402
+}
+
+fn fnv1a_i64(h: i64, val: i64) -> i64 {
+    let mask: i64 = 4294967295;
+    let prime: i64 = 16777619;
+    let mut cur: i64 = h;
+    let mut s: i64 = 0;
+    while s < 32 {
+        let byte: i64 = (val >> s) & 255;
+        cur = ((cur ^ byte) & mask) * prime & mask;
+        s = s + 8;
+    }
+    cur
+}
+
+struct DistillFeatures {
+    status: i32,
+    ok_l: f64,
+    ok_a: f64,
+    ok_b: f64,
+    grid_ratio: f64,
+    bpm: f64,
+    rt60_s: f64,
+    hash32: i64,
+}
+
+fn extract_artifact(
+    lr: f64,
+    lg: f64,
+    lb: f64,
+    width: f64,
+    height: f64,
+    beat_dt_s: f64,
+    ir_decay_tau: f64,
+) -> DistillFeatures {
+    // Fail-closed NaN / range / physicality guard
+    let bad_rgb: bool = (lr != lr) || (lg != lg) || (lb != lb)
+        || lr < 0.0 || lr > 1.0 || lg < 0.0 || lg > 1.0 || lb < 0.0 || lb > 1.0;
+    let bad_geom: bool = (width != width) || (height != height) || width <= 0.0 || height <= 0.0;
+    let bad_audio: bool = (beat_dt_s != beat_dt_s) || (ir_decay_tau != ir_decay_tau)
+        || beat_dt_s <= 0.05 || ir_decay_tau <= 0.0;
+    if bad_rgb || bad_geom || bad_audio {
+        return DistillFeatures {
+            status: 1, ok_l: 0.0, ok_a: 0.0, ok_b: 0.0,
+            grid_ratio: 0.0, bpm: 0.0, rt60_s: 0.0, hash32: 0,
+        };
+    }
+
+    // 1. Exact Ottosson (2020) Linear sRGB -> Oklab centroid
+    let l_c: f64 = det_cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
+    let m_c: f64 = det_cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
+    let s_c: f64 = det_cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+    let ok_l: f64 = 0.2104542553 * l_c + 0.7936177850 * m_c - 0.0040720468 * s_c;
+    let ok_a: f64 = 1.9779984951 * l_c - 2.4285922050 * m_c + 0.4505937099 * s_c;
+    let ok_b: f64 = 0.0259040371 * l_c + 0.7827717662 * m_c - 0.8086757660 * s_c;
+
+    // 2. Layout grid aspect ratio & BPM
+    let grid_ratio: f64 = width / height;
+    let bpm: f64 = 60.0 / beat_dt_s;
+
+    // 3. Acoustic IR RT60 via Schroeder backward-integrated decay curve (200 taps, dt=0.01 s)
+    let n_ir: usize = 200;
+    let dt_ir: f64 = 0.01;
+    let mut e_sq: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n_ir {
+        let t: f64 = (i as f64) * dt_ir;
+        let h_t: f64 = det_exp(-t / ir_decay_tau);
+        e_sq.push(h_t * h_t);
+        i = i + 1;
+    }
+    let mut sch: Vec<f64> = vec![0.0; n_ir];
+    let mut acc: f64 = 0.0;
+    let mut r_i: i32 = (n_ir as i32) - 1;
+    while r_i >= 0 {
+        acc = acc + e_sq[r_i as usize];
+        sch[r_i as usize] = acc;
+        r_i = r_i - 1;
+    }
+    let e0: f64 = sch[0];
+    // Linear regression slope of 10*log10(sch/e0) between -5 dB and -25 dB
+    let mut sx: f64 = 0.0;
+    let mut sy: f64 = 0.0;
+    let mut sxx: f64 = 0.0;
+    let mut sxy: f64 = 0.0;
+    let mut cnt: f64 = 0.0;
+    i = 0;
+    while i < n_ir {
+        let db: f64 = 10.0 * det_log10(sch[i] / e0);
+        if db <= -5.0 && db >= -25.0 {
+            let t: f64 = (i as f64) * dt_ir;
+            sx = sx + t;
+            sy = sy + db;
+            sxx = sxx + t * t;
+            sxy = sxy + t * db;
+            cnt = cnt + 1.0;
+        }
+        i = i + 1;
+    }
+    let slope: f64 = (cnt * sxy - sx * sy) / (cnt * sxx - sx * sx);
+    let rt60: f64 = -60.0 / slope;
+
+    // Canonical quantized 32-bit FNV-1a feature digest (1e-4 precision)
+    let mut h32: i64 = 2166136261;
+    h32 = fnv1a_i64(h32, (ok_l * 10000.0 + 0.5) as i64);
+    h32 = fnv1a_i64(h32, ((ok_a + 1.0) * 10000.0 + 0.5) as i64);
+    h32 = fnv1a_i64(h32, ((ok_b + 1.0) * 10000.0 + 0.5) as i64);
+    h32 = fnv1a_i64(h32, (grid_ratio * 10000.0 + 0.5) as i64);
+    h32 = fnv1a_i64(h32, (bpm * 100.0 + 0.5) as i64);
+    h32 = fnv1a_i64(h32, (rt60 * 1000.0 + 0.5) as i64);
+
+    DistillFeatures {
+        status: 0, ok_l: ok_l, ok_a: ok_a, ok_b: ok_b,
+        grid_ratio: grid_ratio, bpm: bpm, rt60_s: rt60, hash32: h32,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 5 mixed-format synthetic artifacts
+    let r_v: Vec<f64> = vec![0.82, 0.14, 0.45, 0.95, 0.20];
+    let g_v: Vec<f64> = vec![0.55, 0.62, 0.45, 0.88, 0.35];
+    let b_v: Vec<f64> = vec![0.25, 0.85, 0.45, 0.15, 0.78];
+    let w_v: Vec<f64> = vec![1920.0, 1440.0, 1618.0, 1080.0, 2560.0];
+    let h_v: Vec<f64> = vec![1080.0, 900.0, 1000.0, 1080.0, 1440.0];
+    let dt_v: Vec<f64> = vec![0.50, 0.46875, 0.60, 0.4285714, 0.5454545];
+    let tau_v: Vec<f64> = vec![0.18, 0.25, 0.12, 0.30, 0.22];
+
+    let mut xor_hash: i64 = 0;
+    let mut checksum: f64 = 0.0;
+    let mut ok_cnt: i32 = 0;
+    let mut i: usize = 0;
+    while i < 5 {
+        let f: DistillFeatures = extract_artifact(r_v[i], g_v[i], b_v[i], w_v[i], h_v[i], dt_v[i], tau_v[i]);
+        if f.status == 0 && f.ok_l > 0.0 && f.rt60_s > 0.3 && f.rt60_s < 2.5 {
+            ok_cnt = ok_cnt + 1;
+        }
+        xor_hash = xor_hash ^ f.hash32;
+        checksum = checksum + f.ok_l + f.ok_a + f.ok_b + f.grid_ratio + f.bpm + f.rt60_s;
+        i = i + 1;
+    }
+
+    if ok_cnt == 5 {
+        println!(
+            "[PASS] distill_5_artifacts extracted={}/5 xor_hash={} checksum={:.6}",
+            ok_cnt, xor_hash, checksum
+        );
+    } else {
+        println!("[FAIL] distill_5_artifacts extracted={}/5", ok_cnt);
+        failures = failures + 1;
+    }
+
+    // Planted Controls: Corrupt RGB (>1.0) and NaN (0.0/0.0) Channels Rejected Fail-Closed
+    let nan_val: f64 = 0.0 / 0.0;
+    let bad1: DistillFeatures = extract_artifact(1.45, 0.5, 0.5, 1920.0, 1080.0, 0.5, 0.2);
+    let bad2: DistillFeatures = extract_artifact(nan_val, 0.5, 0.5, 1920.0, 1080.0, 0.5, 0.2);
+    if bad1.status == 1 && bad2.status == 1 {
+        println!("[PASS] planted_ctrl_corrupt_nan caught oob_status=1 nan_status=1");
+    } else {
+        println!("[FAIL] planted_ctrl_corrupt_nan missed s1={} s2={}", bad1.status, bad2.status);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_E8] elapsed_ms={:.4} xor_hash={} checksum={:.9} failures={}",
+        elapsed_ms, xor_hash, checksum, failures
+    );
+}

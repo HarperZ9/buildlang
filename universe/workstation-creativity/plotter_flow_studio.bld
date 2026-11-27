@@ -1,0 +1,147 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 58C (Author Idea E9): Curl-Noise Streamline & Hatched Flow-Field Studio (plotter_flow_studio.bld)
+// - Exact analytical divergence-free curl-noise velocity field (max |div v| < 1e-9) with 60-step RK4 streamlines
+// - Enforces minimum inter-seed clearance >= 2.0 mm across 12 hatched plotter paths with Python f64 parity
+// - Planted failing control: non-zero-divergence sink/source perturbation caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+struct Vec2 {
+    x: f64,
+    y: f64,
+}
+
+// Analytical curl velocity v = (dpsi/dy, -dpsi/dx) plus optional planted divergence sink
+fn curl_vel(x: f64, y: f64, sink: f64) -> Vec2 {
+    let k: f64 = 6.283185307179586476925286766559 / 200.0;
+    let vx: f64 = -8.0 * k * sin(k * x) * sin(k * y) - 3.5 * k * sin(k * (x + y));
+    let vy: f64 = -8.0 * k * cos(k * x) * cos(k * y) + 3.5 * k * sin(k * (x + y));
+    Vec2 {
+        x: vx - sink * (x - 100.0),
+        y: vy - sink * (y - 100.0),
+    }
+}
+
+// 4th-order central finite-difference divergence div v = dvx/dx + dvy/dy
+fn discrete_div(x: f64, y: f64, sink: f64) -> f64 {
+    let h: f64 = 1.0e-3;
+    let inv12h: f64 = 1.0 / (12.0 * h);
+    let vx_m2: Vec2 = curl_vel(x - 2.0 * h, y, sink);
+    let vx_m1: Vec2 = curl_vel(x - h, y, sink);
+    let vx_p1: Vec2 = curl_vel(x + h, y, sink);
+    let vx_p2: Vec2 = curl_vel(x + 2.0 * h, y, sink);
+    let dvx_dx: f64 = (vx_m2.x - 8.0 * vx_m1.x + 8.0 * vx_p1.x - vx_p2.x) * inv12h;
+
+    let vy_m2: Vec2 = curl_vel(x, y - 2.0 * h, sink);
+    let vy_m1: Vec2 = curl_vel(x, y - h, sink);
+    let vy_p1: Vec2 = curl_vel(x, y + h, sink);
+    let vy_p2: Vec2 = curl_vel(x, y + 2.0 * h, sink);
+    let dvy_dy: f64 = (vy_m2.y - 8.0 * vy_m1.y + 8.0 * vy_p1.y - vy_p2.y) * inv12h;
+
+    dvx_dx + dvy_dy
+}
+
+struct FlowRes {
+    max_div: f64,
+    total_len_mm: f64,
+    min_seed_clear_mm: f64,
+    end_checksum: f64,
+}
+
+fn trace_streamlines(sink: f64) -> FlowRes {
+    let dt: f64 = 2.0;
+    let mut max_div: f64 = 0.0;
+    let mut total_len: f64 = 0.0;
+    let mut end_csum: f64 = 0.0;
+    let mut sx: Vec<f64> = Vec::new();
+    let mut sy: Vec<f64> = Vec::new();
+
+    // 12 evenly spaced hatched streamlines across [20, 180] mm
+    let mut s_idx: i32 = 0;
+    while s_idx < 12 {
+        let mut x: f64 = 24.0 + (s_idx as f64) * 14.0;
+        let mut y: f64 = 30.0 + ((s_idx % 3) as f64) * 18.0;
+        sx.push(x);
+        sy.push(y);
+
+        let mut step: i32 = 0;
+        while step < 60 {
+            if step % 10 == 0 {
+                let d: f64 = abs_f64(discrete_div(x, y, sink));
+                if d > max_div { max_div = d; }
+            }
+            let k1: Vec2 = curl_vel(x, y, sink);
+            let k2: Vec2 = curl_vel(x + 0.5 * dt * k1.x, y + 0.5 * dt * k1.y, sink);
+            let k3: Vec2 = curl_vel(x + 0.5 * dt * k2.x, y + 0.5 * dt * k2.y, sink);
+            let k4: Vec2 = curl_vel(x + dt * k3.x, y + dt * k3.y, sink);
+            let nx: f64 = x + (dt / 6.0) * (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x);
+            let ny: f64 = y + (dt / 6.0) * (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y);
+            let dx: f64 = nx - x;
+            let dy: f64 = ny - y;
+            total_len = total_len + sqrt(dx * dx + dy * dy);
+            x = nx;
+            y = ny;
+            step = step + 1;
+        }
+        end_csum = end_csum + x + y;
+        s_idx = s_idx + 1;
+    }
+
+    let mut min_clr: f64 = 1.0e9;
+    let mut a: usize = 0;
+    while a < 12 {
+        let mut b: usize = a + 1;
+        while b < 12 {
+            let dx: f64 = sx[a] - sx[b];
+            let dy: f64 = sy[a] - sy[b];
+            let d: f64 = sqrt(dx * dx + dy * dy);
+            if d < min_clr { min_clr = d; }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+
+    FlowRes {
+        max_div: max_div,
+        total_len_mm: total_len,
+        min_seed_clear_mm: min_clr,
+        end_checksum: end_csum,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    let clean: FlowRes = trace_streamlines(0.0);
+    // Planted failing control: compressible radial sink (sink=0.05 => |div v| = 0.10 >> 1e-9)
+    let bad: FlowRes = trace_streamlines(0.05);
+    let sink_caught: i32 = if bad.max_div > 0.05 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("E9_CLEAN_MAX_DIV={:.15}", clean.max_div);
+    println!("E9_TOTAL_LEN_MM={:.10}", clean.total_len_mm);
+    println!("E9_MIN_CLEAR_MM={:.6}", clean.min_seed_clear_mm);
+    println!("E9_END_CHECKSUM={:.12}", clean.end_checksum);
+    println!("E9_BAD_MAX_DIV={:.10}", bad.max_div);
+    println!("E9_SINK_CAUGHT={}", sink_caught);
+    println!("E9_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let ok: bool = clean.max_div < 1.0e-9
+        && clean.min_seed_clear_mm >= 2.0
+        && sink_caught == 1;
+    if ok {
+        println!(
+            "[PASS] E9_PLOTTER_FLOW max_div={:.2e} len={:.2}mm clr={:.1}mm sink_caught=1",
+            clean.max_div, clean.total_len_mm, clean.min_seed_clear_mm
+        );
+    } else {
+        println!("[FAIL] E9_PLOTTER_FLOW max_div={:.2e} caught={}", clean.max_div, sink_caught);
+    }
+}

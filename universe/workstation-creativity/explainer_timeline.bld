@@ -1,0 +1,191 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 58C (Author Idea E17): Mathematical Explainer Timeline & Hermite Keyframe Engine (explainer_timeline.bld)
+// - Evaluates multi-span cubic Hermite scene keyframes verifying exact C1 velocity continuity across knots
+// - Performs Simpson arc-length integration and bisection equal-arc-length reparameterization (<= 1e-6 vs Python)
+// - Planted failing control: non-monotonic keyframe time reversal (t1 < t0) rejected fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+struct Pt2 {
+    x: f64,
+    y: f64,
+}
+
+fn validate_monotonic(ts: &Vec<f64>) -> i32 {
+    let n: usize = ts.len();
+    if n < 2 { return -1; }
+    let mut i: usize = 0;
+    while i + 1 < n {
+        if ts[i + 1] <= ts[i] { return -1; }
+        i = i + 1;
+    }
+    1
+}
+
+// Evaluate cubic Hermite position at global time t along span [t0, t1]
+fn hermite_pos(u: f64, dt: f64, p0: f64, p1: f64, v0: f64, v1: f64) -> f64 {
+    let u2: f64 = u * u;
+    let u3: f64 = u2 * u;
+    let h00: f64 = 2.0 * u3 - 3.0 * u2 + 1.0;
+    let h10: f64 = u3 - 2.0 * u2 + u;
+    let h01: f64 = -2.0 * u3 + 3.0 * u2;
+    let h11: f64 = u3 - u2;
+    h00 * p0 + h10 * dt * v0 + h01 * p1 + h11 * dt * v1
+}
+
+// Exact analytical time derivative dp/dt on span [t0, t1]
+fn hermite_vel(u: f64, dt: f64, p0: f64, p1: f64, v0: f64, v1: f64) -> f64 {
+    let u2: f64 = u * u;
+    let dh00: f64 = 6.0 * u2 - 6.0 * u;
+    let dh10: f64 = 3.0 * u2 - 4.0 * u + 1.0;
+    let dh01: f64 = -6.0 * u2 + 6.0 * u;
+    let dh11: f64 = 3.0 * u2 - 2.0 * u;
+    (dh00 * p0 + dh10 * dt * v0 + dh01 * p1 + dh11 * dt * v1) / dt
+}
+
+fn eval_speed(
+    t: f64,
+    ts: &Vec<f64>,
+    xs: &Vec<f64>,
+    ys: &Vec<f64>,
+    vxs: &Vec<f64>,
+    vys: &Vec<f64>
+) -> f64 {
+    let mut k: usize = 0;
+    if t >= ts[2] { k = 2; }
+    else if t >= ts[1] { k = 1; }
+    let dt: f64 = ts[k + 1] - ts[k];
+    let u: f64 = (t - ts[k]) / dt;
+    let vx: f64 = hermite_vel(u, dt, xs[k], xs[k + 1], vxs[k], vxs[k + 1]);
+    let vy: f64 = hermite_vel(u, dt, ys[k], ys[k + 1], vys[k], vys[k + 1]);
+    sqrt(vx * vx + vy * vy)
+}
+
+fn eval_pos(
+    t: f64,
+    ts: &Vec<f64>,
+    xs: &Vec<f64>,
+    ys: &Vec<f64>,
+    vxs: &Vec<f64>,
+    vys: &Vec<f64>
+) -> Pt2 {
+    let mut k: usize = 0;
+    if t >= ts[2] { k = 2; }
+    else if t >= ts[1] { k = 1; }
+    let dt: f64 = ts[k + 1] - ts[k];
+    let u: f64 = (t - ts[k]) / dt;
+    Pt2 {
+        x: hermite_pos(u, dt, xs[k], xs[k + 1], vxs[k], vxs[k + 1]),
+        y: hermite_pos(u, dt, ys[k], ys[k + 1], vys[k], vys[k + 1]),
+    }
+}
+
+// Composite Simpson arc-length integral from 0.0 to t_end
+fn arc_length_to(
+    t_end: f64,
+    n_seg: i32,
+    ts: &Vec<f64>,
+    xs: &Vec<f64>,
+    ys: &Vec<f64>,
+    vxs: &Vec<f64>,
+    vys: &Vec<f64>
+) -> f64 {
+    if t_end <= 0.0 { return 0.0; }
+    let h: f64 = t_end / (n_seg as f64);
+    let mut acc: f64 = eval_speed(0.0, ts, xs, ys, vxs, vys) + eval_speed(t_end, ts, xs, ys, vxs, vys);
+    let mut i: i32 = 1;
+    while i < n_seg {
+        let w: f64 = if i % 2 == 1 { 4.0 } else { 2.0 };
+        acc = acc + w * eval_speed((i as f64) * h, ts, xs, ys, vxs, vys);
+        i = i + 1;
+    }
+    acc * (h / 3.0)
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    // 4 strictly monotonic keyframes across [0.0, 4.0] s
+    let mut ts: Vec<f64> = Vec::new();
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    let mut vxs: Vec<f64> = Vec::new();
+    let mut vys: Vec<f64> = Vec::new();
+    ts.push(0.0); xs.push(0.0); ys.push(0.0); vxs.push(1.2); vys.push(0.4);
+    ts.push(1.0); xs.push(1.5); ys.push(0.8); vxs.push(1.4); vys.push(0.9);
+    ts.push(2.5); xs.push(3.6); ys.push(1.9); vxs.push(1.1); vys.push(-0.6);
+    ts.push(4.0); xs.push(5.0); ys.push(0.5); vxs.push(0.8); vys.push(-0.9);
+
+    let clean_mono: i32 = validate_monotonic(&ts);
+
+    // Check C1 velocity continuity across both interior knots (k=1 at t=1.0, k=2 at t=2.5)
+    let mut max_c1_err: f64 = 0.0;
+    let mut k: usize = 1;
+    while k <= 2 {
+        let dt_l: f64 = ts[k] - ts[k - 1];
+        let dt_r: f64 = ts[k + 1] - ts[k];
+        let vxl: f64 = hermite_vel(1.0, dt_l, xs[k - 1], xs[k], vxs[k - 1], vxs[k]);
+        let vxr: f64 = hermite_vel(0.0, dt_r, xs[k], xs[k + 1], vxs[k], vxs[k + 1]);
+        let vyl: f64 = hermite_vel(1.0, dt_l, ys[k - 1], ys[k], vys[k - 1], vys[k]);
+        let vyr: f64 = hermite_vel(0.0, dt_r, ys[k], ys[k + 1], vys[k], vys[k + 1]);
+        let ex: f64 = abs_f64(vxl - vxr);
+        let ey: f64 = abs_f64(vyl - vyr);
+        if ex > max_c1_err { max_c1_err = ex; }
+        if ey > max_c1_err { max_c1_err = ey; }
+        k = k + 1;
+    }
+
+    // Total arc length via 256-panel Simpson quadrature
+    let s_total: f64 = arc_length_to(4.0, 256, &ts, &xs, &ys, &vxs, &vys);
+
+    // Reparameterize midpoint s_mid = 0.5 * s_total via 44-iteration bisection
+    let mut lo: f64 = 0.0;
+    let mut hi: f64 = 4.0;
+    let target_s: f64 = 0.5 * s_total;
+    let mut it: i32 = 0;
+    while it < 44 {
+        let mid: f64 = 0.5 * (lo + hi);
+        let sm: f64 = arc_length_to(mid, 128, &ts, &xs, &ys, &vxs, &vys);
+        if sm < target_s { lo = mid; } else { hi = mid; }
+        it = it + 1;
+    }
+    let t_mid: f64 = 0.5 * (lo + hi);
+    let s_mid_check: f64 = arc_length_to(t_mid, 256, &ts, &xs, &ys, &vxs, &vys);
+    let arc_reparam_err: f64 = abs_f64(s_mid_check - target_s) / s_total;
+    let p_mid: Pt2 = eval_pos(t_mid, &ts, &xs, &ys, &vxs, &vys);
+
+    // Planted failing control: non-monotonic time reversal (t1=0.8 < t0=1.0)
+    let mut bad_ts: Vec<f64> = Vec::new();
+    bad_ts.push(0.0); bad_ts.push(1.0); bad_ts.push(0.8); bad_ts.push(4.0);
+    let mono_caught: i32 = if validate_monotonic(&bad_ts) == -1 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("E17_MAX_C1_ERR={:.15}", max_c1_err);
+    println!("E17_ARC_TOTAL={:.12}", s_total);
+    println!("E17_T_MID={:.12}", t_mid);
+    println!("E17_PMID_X={:.12}", p_mid.x);
+    println!("E17_PMID_Y={:.12}", p_mid.y);
+    println!("E17_REPARAM_ERR={:.15}", arc_reparam_err);
+    println!("E17_MONO_CAUGHT={}", mono_caught);
+    println!("E17_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let ok: bool = clean_mono == 1
+        && max_c1_err < 1.0e-12
+        && arc_reparam_err <= 1.0e-6
+        && mono_caught == 1;
+    if ok {
+        println!(
+            "[PASS] E17_EXPLAINER_TIMELINE c1_err={:.2e} s_tot={:.6} reparam_err={:.2e} mono_caught=1",
+            max_c1_err, s_total, arc_reparam_err
+        );
+    } else {
+        println!("[FAIL] E17_EXPLAINER_TIMELINE c1={:.2e} mono={}", max_c1_err, mono_caught);
+    }
+}

@@ -1,0 +1,165 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 57D (Author Idea E4): Multi-Gen Console & Film Shader Stack (console_shader_stack.bld)
+// - Composites N64 3-point barycentric filter, 15-bit ordered Bayer dither, CRT triad mask, and 3x3 dye matrix
+// - Verifies passive linear-light energy bounds (0 <= c <= 1) across 16x16 frame with Python f64 parity
+// - Planted failing controls: negative radiance and NaN input pixel rejected fail-closed
+
+struct Rgb {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+fn clamp01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0; }
+    if x > 1.0 { return 1.0; }
+    x
+}
+
+fn floor_f64(x: f64) -> f64 {
+    let i: i64 = x as i64;
+    let f: f64 = i as f64;
+    if x < f { return f - 1.0; }
+    f
+}
+
+// Stage 1: N64 hardware 3-point barycentric texel filter
+fn n64_barycentric(u: f64, v: f64, c00: f64, c10: f64, c01: f64, c11: f64) -> f64 {
+    if u + v <= 1.0 {
+        return (1.0 - u - v) * c00 + u * c10 + v * c01;
+    }
+    (u + v - 1.0) * c11 + (1.0 - v) * c10 + (1.0 - u) * c01
+}
+
+// 4x4 ordered Bayer matrix threshold in [0, 15]
+fn bayer4(x: i32, y: i32) -> f64 {
+    let xi: i32 = x % 4;
+    let yi: i32 = y % 4;
+    let idx: i32 = yi * 4 + xi;
+    if idx == 0 { return 0.0; }
+    if idx == 1 { return 8.0; }
+    if idx == 2 { return 2.0; }
+    if idx == 3 { return 10.0; }
+    if idx == 4 { return 12.0; }
+    if idx == 5 { return 4.0; }
+    if idx == 6 { return 14.0; }
+    if idx == 7 { return 6.0; }
+    if idx == 8 { return 3.0; }
+    if idx == 9 { return 11.0; }
+    if idx == 10 { return 1.0; }
+    if idx == 11 { return 9.0; }
+    if idx == 12 { return 15.0; }
+    if idx == 13 { return 7.0; }
+    if idx == 14 { return 13.0; }
+    5.0
+}
+
+// Stage 2: 15-bit (5-bit/channel) ordered Bayer dither quantizer
+fn dither_5bit(val: f64, b_val: f64) -> f64 {
+    let offset: f64 = (b_val / 16.0 - 0.5) / 31.0;
+    let q: f64 = floor_f64(clamp01(val + offset) * 31.0 + 0.5);
+    q / 31.0
+}
+
+// Fail-closed radiance validator: returns 1 if finite & >= 0, -1 if negative, -2 if NaN
+fn validate_radiance(c: Rgb) -> i32 {
+    if c.r != c.r || c.g != c.g || c.b != c.b { return -2; }
+    if c.r < 0.0 || c.g < 0.0 || c.b < 0.0 { return -1; }
+    1
+}
+
+// Full 4-stage pipeline for one pixel
+fn run_shader_pixel(x: i32, y: i32, inp: Rgb) -> Rgb {
+    let b_val: f64 = bayer4(x, y);
+    let dr: f64 = dither_5bit(inp.r, b_val);
+    let dg: f64 = dither_5bit(inp.g, b_val);
+    let db: f64 = dither_5bit(inp.b, b_val);
+
+    // Stage 3: CRT aperture-grille phosphor triad mask
+    let slot: i32 = x % 3;
+    let mr: f64 = if slot == 0 { 1.0 } else { 0.72 };
+    let mg: f64 = if slot == 1 { 1.0 } else { 0.72 };
+    let mb: f64 = if slot == 2 { 1.0 } else { 0.72 };
+    let cr: f64 = dr * mr;
+    let cg: f64 = dg * mg;
+    let cb: f64 = db * mb;
+
+    // Stage 4: Passive 3x3 film print dye matrix (row sums == 1.0)
+    Rgb {
+        r: 0.92 * cr + 0.06 * cg + 0.02 * cb,
+        g: 0.04 * cr + 0.90 * cg + 0.06 * cb,
+        b: 0.02 * cr + 0.05 * cg + 0.93 * cb,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    let mut energy_in: f64 = 0.0;
+    let mut energy_out: f64 = 0.0;
+    let mut max_chan: f64 = 0.0;
+    let mut min_chan: f64 = 1.0e9;
+    let mut csum: f64 = 0.0;
+    let mut invalid_px: i32 = 0;
+
+    let mut y: i32 = 0;
+    while y < 16 {
+        let mut x: i32 = 0;
+        while x < 16 {
+            let u: f64 = ((x as f64) + 0.25) / 16.0;
+            let v: f64 = ((y as f64) + 0.35) / 16.0;
+            let r0: f64 = n64_barycentric(u, v, 0.15, 0.85, 0.35, 0.95);
+            let g0: f64 = n64_barycentric(u, v, 0.20, 0.55, 0.80, 0.90);
+            let b0: f64 = n64_barycentric(u, v, 0.65, 0.25, 0.45, 0.88);
+            let inp: Rgb = Rgb { r: r0, g: g0, b: b0 };
+            if validate_radiance(inp) != 1 { invalid_px = invalid_px + 1; }
+            let out: Rgb = run_shader_pixel(x, y, inp);
+            if validate_radiance(out) != 1 { invalid_px = invalid_px + 1; }
+
+            energy_in = energy_in + inp.r + inp.g + inp.b;
+            energy_out = energy_out + out.r + out.g + out.b;
+            if out.r > max_chan { max_chan = out.r; }
+            if out.g > max_chan { max_chan = out.g; }
+            if out.b > max_chan { max_chan = out.b; }
+            if out.r < min_chan { min_chan = out.r; }
+            if out.g < min_chan { min_chan = out.g; }
+            if out.b < min_chan { min_chan = out.b; }
+            csum = csum + out.r * 1.0 + out.g * 2.0 + out.b * 3.0;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    // Planted failing controls: negative radiance & NaN radiance rejected fail-closed
+    let rc_neg: i32 = validate_radiance(Rgb { r: -0.15, g: 0.4, b: 0.5 });
+    let nan_v: f64 = sqrt(-1.0);
+    let rc_nan: i32 = validate_radiance(Rgb { r: 0.4, g: nan_v, b: 0.5 });
+    let traps_caught: i32 = if rc_neg == -1 && rc_nan == -2 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("E4_ENERGY_IN={:.10}", energy_in);
+    println!("E4_ENERGY_OUT={:.10}", energy_out);
+    println!("E4_MIN_CHAN={:.10}", min_chan);
+    println!("E4_MAX_CHAN={:.10}", max_chan);
+    println!("E4_CHECKSUM={:.12}", csum);
+    println!("E4_TRAPS_CAUGHT={}", traps_caught);
+    println!("E4_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let ok: bool = invalid_px == 0
+        && min_chan >= 0.0
+        && max_chan <= 1.0
+        && energy_out <= energy_in
+        && traps_caught == 1;
+    if ok {
+        println!(
+            "[PASS] E4_CONSOLE_SHADER e_ratio={:.4} max_c={:.4} traps_caught=1",
+            energy_out / energy_in, max_chan
+        );
+    } else {
+        println!("[FAIL] E4_CONSOLE_SHADER invalid={} traps={}", invalid_px, traps_caught);
+    }
+}
