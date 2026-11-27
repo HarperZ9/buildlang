@@ -10,6 +10,15 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## [2.0.0] - 2026-11-27
+
+### Compiler and Assurance
+- Unified 4-pillar compile-time MIR assurance CLI (`buildc check --sovereign-audit`) combining `--deny-effect` capability-egress checks, `--max-stack-bytes` bounded-stack WCET analysis, `--constant-time` side-channel taint analysis, and `--strict-determinism` floating-point reproducibility checks.
+- Certified e-graph Superoptimizer V7 (`R31..R40`) with bitwise cryptographic and SPIR-V MIR cost reductions and fail-closed `buildc verify-cert`.
+- Exact 5-way GPU FMA parity across HLSL, GLSL, SPIR-V, WGSL, and Apple Metal MSL 3.1.
+- Added `buildc bench` native microbenchmark runner and `buildc doctor --json` self-diagnostic check.
+- Graduated verified pure-MIT `universe/` bundles covering `BuildOS-2.0`, `BuildOS-2.1` distributed cluster, `BuildOS-2.2` threshold-encrypted self-healing storage cluster, and `600/600` certified 5-backend GPU compute shaders while burning down `universe/CHECK-FAILS.txt` (`135 -> 126`).
+
 ### Compiler
 
 - Binary file I/O. `write_file_bytes(path, &bytes)`, `append_file_bytes(path, &bytes)` and `read_file_bytes(path) -> Vec<u8>` move a `Vec<u8>` to and from a file in binary mode, so a zero byte, 0x0A and 0x1A pass through unchanged on Windows and Linux. Before, the file writers took strings, and a string cannot hold a zero byte, so binary formats had to go through the C library's stdio by hand. `stdlib/bytes.bld` (`mod bytes;`) adds little-endian `put_*` and `get_*` for u8, u16, u32, u64, f32 and f64. A vector of anything but `u8` is refused at build time. `compiler/tests/binary_io.rs` checks every byte value and the file's SHA-256 against a reference digest; its controls, a writer that stops at the first zero byte and (on Windows) a text-mode open, must fail.
