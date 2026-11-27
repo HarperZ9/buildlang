@@ -1,0 +1,35 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Photonics-Geo GPU 320-Pack: 3D Seismic Reverse Time Migration (RTM) acoustic stencil kernel.
+// Evaluates a 4th-order 3D acoustic finite-difference Laplacian with Cerjan boundary sponge
+// damping and accumulates the zero-lag cross-correlation subsurface imaging condition.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn seismic_rtm_acoustic_3d_gpu(
+    c0: f32,
+    c1: f32,
+    c2: f32,
+    dt2: f32,
+    u_curr_buf: &[f32],
+    u_prev_buf: &[f32],
+    ring1_sum_buf: &[f32],
+    ring2_sum_buf: &[f32],
+    vel_sq_buf: &[f32],
+    sponge_buf: &[f32],
+    u_recv_buf: &[f32],
+    img_prev_buf: &[f32],
+    u_next_out: &mut [f32],
+    img_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let uc: f32 = u_curr_buf[i];
+    let up: f32 = u_prev_buf[i];
+
+    let lap: f32 = c0 * uc + c1 * ring1_sum_buf[i] + c2 * ring2_sum_buf[i];
+    let damp: f32 = sponge_buf[i];
+    let u_next: f32 = (2.0 * uc - up + dt2 * vel_sq_buf[i] * lap) * damp;
+
+    let img_new: f32 = img_prev_buf[i] + u_next * u_recv_buf[i];
+    u_next_out[i] = u_next;
+    img_out[i] = img_new;
+}

@@ -14670,29 +14670,30 @@ fn vec_of_tuple_or_array_element_is_rejected() {
         return;
     }
     // (name, source, behaviour on the pre-fix binary)
-    // Note: tuple elements (`Vec<(i64, i64)>`) graduated to
-    // `vec_of_supported_element_builds_and_reads` below once the C backend
-    // gained element-sized tuple-vec helpers. Fixed-array elements still
+    // Note: tuple elements (`Vec<(i64, i64)>`) and fixed-array elements
+    // (`Vec<[i64; 2]>`) graduated to `vec_of_supported_element_builds_and_reads`
+    // below once the C backend gained element-sized tuple-vec and array-vec
+    // helpers. Tuple-containing-array elements (`Vec<([i64; 2], i64)>`) still
     // fail closed here.
     let cases: [(&str, &str, &str); 2] = [
         (
-            "vec_of_array_macro_swa",
+            "vec_of_tuple_array_macro_swa",
             r#"fn main() ~ Console {
-    let v: Vec<[i64; 2]> = vec![[1, 2], [3, 4]];
-    println!("{}", v[0][0]);
+    let v: Vec<([i64; 2], i64)> = vec![([1, 2], 3)];
+    println!("{}", v[0].1);
 }
 "#,
-            "silent wrong answer: the array decayed to a pointer truncated to int32_t",
+            "unsupported composite tuple-of-array element must fail closed",
         ),
         (
-            "vec_of_array_push_swa",
+            "vec_of_tuple_array_push_swa",
             r#"fn main() ~ Console {
-    let mut v: Vec<[i64; 2]> = Vec::new();
-    v.push([1, 2]);
-    println!("{}", v[0][0]);
+    let mut v: Vec<([i64; 2], i64)> = Vec::new();
+    v.push(([1, 2], 3));
+    println!("{}", v[0].1);
 }
 "#,
-            "same array-element mis-store, reached through the .push() builder path",
+            "same tuple-of-array element reached through the .push() builder path",
         ),
     ];
     let dir = std::env::temp_dir().join("buildlang_vec_tuple_array_reject");
@@ -14739,7 +14740,7 @@ fn vec_of_supported_element_builds_and_reads() {
         return;
     }
     // (name, source, expected stdout)
-    let cases: [(&str, &str, &str); 11] = [
+    let cases: [(&str, &str, &str); 13] = [
         (
             "vec_i64",
             r#"fn main() ~ Console {
@@ -14841,6 +14842,25 @@ fn main() ~ Console {
     let mut v: Vec<(i64, i64)> = Vec::new();
     v.push((1, 2));
     println!("{}", v[0].0);
+}
+"#,
+            "1\n",
+        ),
+        (
+            "vec_of_array_macro",
+            r#"fn main() ~ Console {
+    let v: Vec<[i64; 2]> = vec![[1, 2], [3, 4]];
+    println!("{}", v[0][0]);
+}
+"#,
+            "1\n",
+        ),
+        (
+            "vec_of_array_push",
+            r#"fn main() ~ Console {
+    let mut v: Vec<[i64; 2]> = Vec::new();
+    v.push([1, 2]);
+    println!("{}", v[0][0]);
 }
 "#,
             "1\n",

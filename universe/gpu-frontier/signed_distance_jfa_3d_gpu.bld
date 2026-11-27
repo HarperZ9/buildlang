@@ -1,0 +1,65 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: 3D Jump Flooding Algorithm (JFA) signed distance field kernel.
+// Compares the current voxel seed against three strided 3D neighbor seeds by squared
+// Euclidean metric, selects the nearest surface seed, and emits signed Euclidean SDF.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn signed_distance_jfa_3d_gpu(
+    eps: f32,
+    px_buf: &[f32],
+    py_buf: &[f32],
+    pz_buf: &[f32],
+    sign_buf: &[f32],
+    s0x_buf: &[f32],
+    s0y_buf: &[f32],
+    s0z_buf: &[f32],
+    s1x_buf: &[f32],
+    s1y_buf: &[f32],
+    s1z_buf: &[f32],
+    s2x_buf: &[f32],
+    s2y_buf: &[f32],
+    s2z_buf: &[f32],
+    best_x_out: &mut [f32],
+    best_d2_out: &mut [f32],
+    sdf_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let px: f32 = px_buf[i];
+    let py: f32 = py_buf[i];
+    let pz: f32 = pz_buf[i];
+
+    let dx0: f32 = px - s0x_buf[i];
+    let dy0: f32 = py - s0y_buf[i];
+    let dz0: f32 = pz - s0z_buf[i];
+    let mut best_d2: f32 = dx0 * dx0 + dy0 * dy0 + dz0 * dz0;
+    let mut best_x: f32 = s0x_buf[i];
+
+    let dx1: f32 = px - s1x_buf[i];
+    let dy1: f32 = py - s1y_buf[i];
+    let dz1: f32 = pz - s1z_buf[i];
+    let d2_1: f32 = dx1 * dx1 + dy1 * dy1 + dz1 * dz1;
+    if d2_1 < best_d2 {
+        best_d2 = d2_1;
+        best_x = s1x_buf[i];
+    }
+
+    let dx2: f32 = px - s2x_buf[i];
+    let dy2: f32 = py - s2y_buf[i];
+    let dz2: f32 = pz - s2z_buf[i];
+    let d2_2: f32 = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
+    if d2_2 < best_d2 {
+        best_d2 = d2_2;
+        best_x = s2x_buf[i];
+    }
+
+    let d2_safe: f32 = best_d2 + eps;
+    let mut dist: f32 = 0.5 * (d2_safe + 1.0);
+    dist = 0.5 * (dist + d2_safe / dist);
+    dist = 0.5 * (dist + d2_safe / dist);
+    dist = 0.5 * (dist + d2_safe / dist);
+
+    best_x_out[i] = best_x;
+    best_d2_out[i] = best_d2;
+    sdf_out[i] = sign_buf[i] * dist;
+}

@@ -1,0 +1,66 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// World-Physics-3D 2D Navier-Stokes velocity advection + Jacobi pressure projection kernel.
+// Applies semi-Lagrangian viscous damping, computes finite-difference velocity divergence,
+// performs one Jacobi pressure relaxation step, and projects velocity onto divergence-free field.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn world_navier_stokes_jacobi_compute(
+    dt: f32,
+    inv_dx: f32,
+    dx2: f32,
+    visc_damp: f32,
+    u_c_buf: &[f32],
+    v_c_buf: &[f32],
+    u_l_buf: &[f32],
+    u_r_buf: &[f32],
+    v_d_buf: &[f32],
+    v_u_buf: &[f32],
+    p_l_buf: &[f32],
+    p_r_buf: &[f32],
+    p_d_buf: &[f32],
+    p_u_buf: &[f32],
+    p_out: &mut [f32],
+    u_out: &mut [f32],
+    v_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let uc: f32 = u_c_buf[i];
+    let vc: f32 = v_c_buf[i];
+    let ul: f32 = u_l_buf[i];
+    let ur: f32 = u_r_buf[i];
+    let vd: f32 = v_d_buf[i];
+    let vu: f32 = v_u_buf[i];
+
+    let u_adv: f32 = visc_damp * uc - 0.5 * dt * inv_dx * uc * (ur - ul);
+    let v_adv: f32 = visc_damp * vc - 0.5 * dt * inv_dx * vc * (vu - vd);
+
+    let div_uv: f32 = 0.5 * inv_dx * ((ur - ul) + (vu - vd));
+    let pl: f32 = p_l_buf[i];
+    let pr: f32 = p_r_buf[i];
+    let pd: f32 = p_d_buf[i];
+    let pu: f32 = p_u_buf[i];
+
+    let p_new: f32 = 0.25 * (pl + pr + pd + pu - dx2 * div_uv);
+    let grad_px: f32 = 0.5 * inv_dx * (pr - pl);
+    let grad_py: f32 = 0.5 * inv_dx * (pu - pd);
+
+    let mut u_proj: f32 = u_adv - dt * grad_px;
+    let mut v_proj: f32 = v_adv - dt * grad_py;
+    if u_proj > 32.0 {
+        u_proj = 32.0;
+    }
+    if u_proj < -32.0 {
+        u_proj = -32.0;
+    }
+    if v_proj > 32.0 {
+        v_proj = 32.0;
+    }
+    if v_proj < -32.0 {
+        v_proj = -32.0;
+    }
+
+    p_out[i] = p_new;
+    u_out[i] = u_proj;
+    v_out[i] = v_proj;
+}

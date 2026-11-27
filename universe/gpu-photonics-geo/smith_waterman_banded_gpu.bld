@@ -1,0 +1,59 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Photonics-Geo GPU 320-Pack: Genomics affine-gap banded Smith-Waterman alignment kernel.
+// Updates Gotoh horizontal insertion (E), vertical deletion (F), and local alignment (H)
+// DP states with zero-clamping and tracks the running best local alignment score.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn smith_waterman_banded_gpu(
+    gap_open: f32,
+    gap_extend: f32,
+    h_diag_buf: &[f32],
+    h_left_buf: &[f32],
+    h_up_buf: &[f32],
+    e_left_buf: &[f32],
+    f_up_buf: &[f32],
+    sub_score_buf: &[f32],
+    best_prev_buf: &[f32],
+    e_out: &mut [f32],
+    f_out: &mut [f32],
+    h_out: &mut [f32],
+    best_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let e_open: f32 = h_left_buf[i] - gap_open;
+    let e_ext: f32 = e_left_buf[i] - gap_extend;
+    let mut e_new: f32 = e_open;
+    if e_ext > e_new {
+        e_new = e_ext;
+    }
+
+    let f_open: f32 = h_up_buf[i] - gap_open;
+    let f_ext: f32 = f_up_buf[i] - gap_extend;
+    let mut f_new: f32 = f_open;
+    if f_ext > f_new {
+        f_new = f_ext;
+    }
+
+    let diag_score: f32 = h_diag_buf[i] + sub_score_buf[i];
+    let mut h_new: f32 = 0.0;
+    if diag_score > h_new {
+        h_new = diag_score;
+    }
+    if e_new > h_new {
+        h_new = e_new;
+    }
+    if f_new > h_new {
+        h_new = f_new;
+    }
+
+    let mut best_new: f32 = best_prev_buf[i];
+    if h_new > best_new {
+        best_new = h_new;
+    }
+
+    e_out[i] = e_new;
+    f_out[i] = f_new;
+    h_out[i] = h_new;
+    best_out[i] = best_new;
+}

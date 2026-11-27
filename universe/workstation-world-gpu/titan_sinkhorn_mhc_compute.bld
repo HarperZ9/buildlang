@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Zain Dana Harper.
+// Titan-AI CS-001 Sinkhorn-Knopp Doubly-Stochastic mHC residual highway compute kernel.
+// Projects per-lane 2x2 mixing logits onto the Birkhoff polytope via alternating row and
+// column normalizations, then mixes two residual streams with bounded stochastic drift.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn titan_sinkhorn_mhc_compute(
+    inv_temp: f32,
+    eps: f32,
+    a00_buf: &[f32],
+    a01_buf: &[f32],
+    a10_buf: &[f32],
+    a11_buf: &[f32],
+    s0_buf: &[f32],
+    s1_buf: &[f32],
+    y0_out: &mut [f32],
+    y1_out: &mut [f32],
+    drift_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let l00: f32 = a00_buf[i] * inv_temp;
+    let l01: f32 = a01_buf[i] * inv_temp;
+    let l10: f32 = a10_buf[i] * inv_temp;
+    let l11: f32 = a11_buf[i] * inv_temp;
+
+    let mut mx: f32 = l00;
+    if l01 > mx {
+        mx = l01;
+    }
+    if l10 > mx {
+        mx = l10;
+    }
+    if l11 > mx {
+        mx = l11;
+    }
+
+    let d00: f32 = mx - l00;
+    let d01: f32 = mx - l01;
+    let d10: f32 = mx - l10;
+    let d11: f32 = mx - l11;
+
+    let mut p00: f32 = 1.0 / (1.0 + d00 + 0.5 * d00 * d00 + 0.16666667 * d00 * d00 * d00);
+    let mut p01: f32 = 1.0 / (1.0 + d01 + 0.5 * d01 * d01 + 0.16666667 * d01 * d01 * d01);
+    let mut p10: f32 = 1.0 / (1.0 + d10 + 0.5 * d10 * d10 + 0.16666667 * d10 * d10 * d10);
+    let mut p11: f32 = 1.0 / (1.0 + d11 + 0.5 * d11 * d11 + 0.16666667 * d11 * d11 * d11);
+
+    let mut it: i32 = 0;
+    while it < 8 {
+        let ir0: f32 = 1.0 / (p00 + p01 + eps);
+        p00 = p00 * ir0;
+        p01 = p01 * ir0;
+        let ir1: f32 = 1.0 / (p10 + p11 + eps);
+        p10 = p10 * ir1;
+        p11 = p11 * ir1;
+
+        let ic0: f32 = 1.0 / (p00 + p10 + eps);
+        p00 = p00 * ic0;
+        p10 = p10 * ic0;
+        let ic1: f32 = 1.0 / (p01 + p11 + eps);
+        p01 = p01 * ic1;
+        p11 = p11 * ic1;
+        it = it + 1;
+    }
+
+    let s0: f32 = s0_buf[i];
+    let s1: f32 = s1_buf[i];
+    y0_out[i] = p00 * s0 + p01 * s1;
+    y1_out[i] = p10 * s0 + p11 * s1;
+
+    let mut r0e: f32 = (p00 + p01) - 1.0;
+    if r0e < 0.0 {
+        r0e = -r0e;
+    }
+    let mut r1e: f32 = (p10 + p11) - 1.0;
+    if r1e < 0.0 {
+        r1e = -r1e;
+    }
+    let mut md: f32 = r0e;
+    if r1e > md {
+        md = r1e;
+    }
+    drift_out[i] = md;
+}

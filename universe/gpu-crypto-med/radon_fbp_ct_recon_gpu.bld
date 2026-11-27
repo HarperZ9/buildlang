@@ -1,0 +1,42 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Crypto-Med GPU 360-Pack: Medical CT Filtered Back-Projection (FBP) Radon reconstruction kernel.
+// Evaluates Ram-Lak high-pass filtered sinogram samples across two orthogonal projection
+// angles with linear detector interpolation and accumulates voxel attenuation.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn radon_fbp_ct_recon_gpu(
+    d_theta: f32,
+    cos_t: f32,
+    sin_t: f32,
+    ramp_c0: f32,
+    ramp_c1: f32,
+    vx_buf: &[f32],
+    vy_buf: &[f32],
+    sino_m_buf: &[f32],
+    sino_c_buf: &[f32],
+    sino_p_buf: &[f32],
+    sino_n_buf: &[f32],
+    frac_buf: &[f32],
+    acc_prev_buf: &[f32],
+    det_pos_out: &mut [f32],
+    vox_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let vx: f32 = vx_buf[i];
+    let vy: f32 = vy_buf[i];
+    let t_det: f32 = vx * cos_t + vy * sin_t;
+
+    let f0: f32 = ramp_c0 * sino_c_buf[i] + ramp_c1 * (sino_m_buf[i] + sino_p_buf[i]);
+    let f1: f32 = ramp_c0 * sino_p_buf[i] + ramp_c1 * (sino_c_buf[i] + sino_n_buf[i]);
+
+    let w: f32 = frac_buf[i];
+    let interp: f32 = (1.0 - w) * f0 + w * f1;
+    let mut vox_new: f32 = acc_prev_buf[i] + d_theta * interp;
+    if vox_new < 0.0 {
+        vox_new = 0.0;
+    }
+
+    det_pos_out[i] = t_det;
+    vox_out[i] = vox_new;
+}

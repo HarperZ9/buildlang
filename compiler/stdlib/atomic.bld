@@ -1,0 +1,189 @@
+// BuildLang Standard Library - Atomic Types
+// Single-threaded and lock-free atomic wrappers over primitive scalars.
+//
+// `use core::atomic::{AtomicU32, AtomicU64, AtomicI32, AtomicI64, AtomicUsize, AtomicBool, Ordering};`
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ordering {
+    Relaxed,
+    Release,
+    Acquire,
+    AcqRel,
+    SeqCst,
+}
+
+#[derive(Debug)]
+pub struct AtomicU32 {
+    pub value: u32,
+}
+
+impl AtomicU32 {
+    pub fn new(v: u32) -> AtomicU32 {
+        AtomicU32 { value: v }
+    }
+    pub fn load(&self, _order: Ordering) -> u32 {
+        self.value
+    }
+    pub fn store(&mut self, val: u32, _order: Ordering) {
+        self.value = val;
+    }
+    pub fn swap(&mut self, val: u32, _order: Ordering) -> u32 {
+        let prev = self.value;
+        self.value = val;
+        prev
+    }
+    pub fn fetch_add(&mut self, val: u32, _order: Ordering) -> u32 {
+        let prev = self.value;
+        self.value = self.value + val;
+        prev
+    }
+    pub fn fetch_sub(&mut self, val: u32, _order: Ordering) -> u32 {
+        let prev = self.value;
+        self.value = self.value - val;
+        prev
+    }
+    pub fn fetch_max(&mut self, val: u32, _order: Ordering) -> u32 {
+        let prev = self.value;
+        if val > self.value {
+            self.value = val;
+        }
+        prev
+    }
+    pub fn fetch_min(&mut self, val: u32, _order: Ordering) -> u32 {
+        let prev = self.value;
+        if val < self.value {
+            self.value = val;
+        }
+        prev
+    }
+}
+
+#[derive(Debug)]
+pub struct AtomicU64 {
+    pub value: u64,
+}
+
+impl AtomicU64 {
+    pub fn new(v: u64) -> AtomicU64 {
+        AtomicU64 { value: v }
+    }
+    pub fn load(&self, _order: Ordering) -> u64 {
+        self.value
+    }
+    pub fn store(&mut self, val: u64, _order: Ordering) {
+        self.value = val;
+    }
+    pub fn fetch_add(&mut self, val: u64, _order: Ordering) -> u64 {
+        let prev = self.value;
+        self.value = self.value + val;
+        prev
+    }
+    pub fn fetch_sub(&mut self, val: u64, _order: Ordering) -> u64 {
+        let prev = self.value;
+        self.value = self.value - val;
+        prev
+    }
+}
+
+#[derive(Debug)]
+pub struct AtomicI32 {
+    pub value: i32,
+}
+
+impl AtomicI32 {
+    pub fn new(v: i32) -> AtomicI32 {
+        AtomicI32 { value: v }
+    }
+    pub fn load(&self, _order: Ordering) -> i32 {
+        self.value
+    }
+    pub fn store(&mut self, val: i32, _order: Ordering) {
+        self.value = val;
+    }
+    pub fn fetch_add(&mut self, val: i32, _order: Ordering) -> i32 {
+        let prev = self.value;
+        self.value = self.value + val;
+        prev
+    }
+    pub fn fetch_sub(&mut self, val: i32, _order: Ordering) -> i32 {
+        let prev = self.value;
+        self.value = self.value - val;
+        prev
+    }
+}
+
+#[derive(Debug)]
+pub struct AtomicI64 {
+    pub value: i64,
+}
+
+impl AtomicI64 {
+    pub fn new(v: i64) -> AtomicI64 {
+        AtomicI64 { value: v }
+    }
+    pub fn load(&self, _order: Ordering) -> i64 {
+        self.value
+    }
+    pub fn store(&mut self, val: i64, _order: Ordering) {
+        self.value = val;
+    }
+    pub fn fetch_add(&mut self, val: i64, _order: Ordering) -> i64 {
+        let prev = self.value;
+        self.value = self.value + val;
+        prev
+    }
+    pub fn fetch_sub(&mut self, val: i64, _order: Ordering) -> i64 {
+        let prev = self.value;
+        self.value = self.value - val;
+        prev
+    }
+}
+
+#[derive(Debug)]
+pub struct AtomicUsize {
+    pub value: usize,
+}
+
+impl AtomicUsize {
+    pub fn new(v: usize) -> AtomicUsize {
+        AtomicUsize { value: v }
+    }
+    pub fn load(&self, _order: Ordering) -> usize {
+        self.value
+    }
+    pub fn store(&mut self, val: usize, _order: Ordering) {
+        self.value = val;
+    }
+    pub fn fetch_add(&mut self, val: usize, _order: Ordering) -> usize {
+        let prev = self.value;
+        self.value = self.value + val;
+        prev
+    }
+    pub fn fetch_sub(&mut self, val: usize, _order: Ordering) -> usize {
+        let prev = self.value;
+        self.value = self.value - val;
+        prev
+    }
+}
+
+#[derive(Debug)]
+pub struct AtomicBool {
+    pub value: bool,
+}
+
+impl AtomicBool {
+    pub fn new(v: bool) -> AtomicBool {
+        AtomicBool { value: v }
+    }
+    pub fn load(&self, _order: Ordering) -> bool {
+        self.value
+    }
+    pub fn store(&mut self, val: bool, _order: Ordering) {
+        self.value = val;
+    }
+    pub fn swap(&mut self, val: bool, _order: Ordering) -> bool {
+        let prev = self.value;
+        self.value = val;
+        prev
+    }
+}

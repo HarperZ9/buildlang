@@ -1,0 +1,63 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: 4-bit radix-sort histogram and Blelloch prefix-scan kernel.
+// Extracts 4-bit radix digits from four packed keys per thread, accumulates four bucket
+// counts, and computes exclusive prefix offsets across the four-bucket tile.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn radix_sort_histogram_scan_gpu(
+    shift_bits: u32,
+    k0_buf: &[u32],
+    k1_buf: &[u32],
+    k2_buf: &[u32],
+    k3_buf: &[u32],
+    base_off_buf: &[u32],
+    off0_out: &mut [u32],
+    off1_out: &mut [u32],
+    off2_out: &mut [u32],
+    off3_out: &mut [u32],
+    total_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let d0: u32 = (k0_buf[i] >> shift_bits) & 3;
+    let d1: u32 = (k1_buf[i] >> shift_bits) & 3;
+    let d2: u32 = (k2_buf[i] >> shift_bits) & 3;
+    let d3: u32 = (k3_buf[i] >> shift_bits) & 3;
+
+    let mut c0: u32 = 0;
+    let mut c1: u32 = 0;
+    let mut c2: u32 = 0;
+    let mut c3: u32 = 0;
+
+    if d0 == 0 { c0 = c0 + 1; }
+    if d0 == 1 { c1 = c1 + 1; }
+    if d0 == 2 { c2 = c2 + 1; }
+    if d0 == 3 { c3 = c3 + 1; }
+
+    if d1 == 0 { c0 = c0 + 1; }
+    if d1 == 1 { c1 = c1 + 1; }
+    if d1 == 2 { c2 = c2 + 1; }
+    if d1 == 3 { c3 = c3 + 1; }
+
+    if d2 == 0 { c0 = c0 + 1; }
+    if d2 == 1 { c1 = c1 + 1; }
+    if d2 == 2 { c2 = c2 + 1; }
+    if d2 == 3 { c3 = c3 + 1; }
+
+    if d3 == 0 { c0 = c0 + 1; }
+    if d3 == 1 { c1 = c1 + 1; }
+    if d3 == 2 { c2 = c2 + 1; }
+    if d3 == 3 { c3 = c3 + 1; }
+
+    let base: u32 = base_off_buf[i];
+    let p0: u32 = base;
+    let p1: u32 = p0 + c0;
+    let p2: u32 = p1 + c1;
+    let p3: u32 = p2 + c2;
+
+    off0_out[i] = p0;
+    off1_out[i] = p1;
+    off2_out[i] = p2;
+    off3_out[i] = p3;
+    total_out[i] = p3 + c3;
+}

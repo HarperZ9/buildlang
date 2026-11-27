@@ -251,6 +251,46 @@ enum Commands {
         /// stdout (schema buildlang.diagnostics/v1)
         #[arg(long, value_name = "FORMAT", default_value = "human", value_parser = ["human", "json"])]
         error_format: String,
+
+        /// Run the unified 4-pillar MIR sovereign audit (capability/effect, bounded-stack/WCET, constant-time crypto, strict determinism)
+        #[arg(long = "sovereign-audit")]
+        sovereign_audit: bool,
+
+        /// Emit a canonical 4-pillar sovereign audit manifest JSON to stdout (schema buildlang.sovereign-audit/v1)
+        #[arg(long = "sovereign-manifest-json")]
+        sovereign_manifest_json: bool,
+
+        /// Deny comma-separated MIR capability effects (console,clock,fs,net,exec,unsafe)
+        #[arg(long = "deny-effect", value_name = "EFFECTS")]
+        deny_effect: Option<String>,
+
+        /// Emit a canonical MIR capability/effect manifest JSON to stdout (schema buildlang.effect-manifest/v1)
+        #[arg(long = "effect-manifest-json")]
+        effect_manifest_json: bool,
+
+        /// Enforce a compile-time transitive stack-frame budget in bytes (fails closed on overflow or recursion)
+        #[arg(long = "max-stack-bytes", value_name = "BYTES")]
+        max_stack_bytes: Option<u64>,
+
+        /// Emit a canonical MIR bounded-stack/WCET manifest JSON to stdout (schema buildlang.wcet-manifest/v1)
+        #[arg(long = "wcet-manifest-json")]
+        wcet_manifest_json: bool,
+
+        /// Enforce compile-time constant-time cryptography taint verification
+        #[arg(long = "constant-time")]
+        constant_time: bool,
+
+        /// Emit a canonical MIR constant-time taint manifest JSON to stdout (schema buildlang.ct-manifest/v1)
+        #[arg(long = "ct-manifest-json")]
+        ct_manifest_json: bool,
+
+        /// Enforce compile-time bit-exact determinism and reproducibility verification
+        #[arg(long = "strict-determinism")]
+        strict_determinism: bool,
+
+        /// Emit a canonical MIR determinism manifest JSON to stdout (schema buildlang.det-manifest/v1)
+        #[arg(long = "det-manifest-json")]
+        det_manifest_json: bool,
     },
 
     /// Check every .bld file under a directory in parallel
@@ -925,6 +965,16 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             profile,
             expect_profile_digest,
             error_format,
+            sovereign_audit,
+            sovereign_manifest_json,
+            deny_effect,
+            effect_manifest_json,
+            max_stack_bytes,
+            wcet_manifest_json,
+            constant_time,
+            ct_manifest_json,
+            strict_determinism,
+            det_manifest_json,
         }) => cmd_check(
             &file,
             receipt.as_deref(),
@@ -932,6 +982,18 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
             profile.as_deref(),
             expect_profile_digest.as_deref(),
             error_format == "json",
+            &CheckMirAuditFlags {
+                sovereign_audit,
+                sovereign_manifest_json,
+                deny_effect,
+                effect_manifest_json,
+                max_stack_bytes,
+                wcet_manifest_json,
+                constant_time,
+                ct_manifest_json,
+                strict_determinism,
+                det_manifest_json,
+            },
         ),
         Some(Commands::CheckDir {
             dir,
@@ -1667,6 +1729,22 @@ struct CheckOutcome {
     diagnostics: Vec<Diagnostic>,
     /// The `#[measured]` constants of the root file, for the check receipt.
     measured_constants: Vec<buildlang::types::measured::MeasuredConstant>,
+    /// Lowered MIR module for compile-time formal verification audits.
+    mir_module: Option<buildlang::codegen::MirModule>,
+}
+
+/// Optional compile-time MIR formal verification flags passed to `buildc check`.
+struct CheckMirAuditFlags {
+    sovereign_audit: bool,
+    sovereign_manifest_json: bool,
+    deny_effect: Option<String>,
+    effect_manifest_json: bool,
+    max_stack_bytes: Option<u64>,
+    wcet_manifest_json: bool,
+    constant_time: bool,
+    ct_manifest_json: bool,
+    strict_determinism: bool,
+    det_manifest_json: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -6678,6 +6756,7 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
     // to catch what the AST tracker's name-keyed tracking cannot (the open
     // classes: move-out-of-borrow, borrow-after-move, dataflow joins), never
     // to re-report what the AST tracker already rejected.
+    let mut mir_module = None;
     if parse_errors.is_empty() && type_errors.is_empty() {
         let codegen_source: Arc<str> = Arc::from(source_file.source());
         let mut codegen = CodeGenerator::with_source(&ctx, Target::C, codegen_source);
@@ -6686,7 +6765,10 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
         // way it always has -- surfaced separately, not folded into
         // `type_errors` -- by simply not adding linear diagnostics.
         match codegen.generate(&ast) {
-            Ok(_) => type_errors.extend(codegen.linear_errors().to_vec()),
+            Ok(_) => {
+                type_errors.extend(codegen.linear_errors().to_vec());
+                mir_module = codegen.mir().cloned();
+            }
             // A program the C backend cannot compile fails the check: a passing
             // `buildc check` means the program compiles. Shader and GPU kernel
             // programs target HLSL, GLSL or SPIR-V, so the C gate does not apply.
@@ -6749,6 +6831,7 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
         type_error_files: Vec::new(),
         function_summaries,
         measured_constants,
+        mir_module,
     };
     if let Some(map) = origins {
         pkg_check::remap_outcome(&mut outcome, map);
@@ -6882,12 +6965,46 @@ fn cmd_check(
     profile: Option<&str>,
     expect_profile_digest: Option<&str>,
     json: bool,
+    audit_flags: &CheckMirAuditFlags,
 ) -> Result<(), i32> {
     let receipt_to_stdout = receipt == Some(Path::new("-"));
+    let stdout_manifest_count = [
+        audit_flags.sovereign_manifest_json,
+        audit_flags.effect_manifest_json,
+        audit_flags.wcet_manifest_json,
+        audit_flags.ct_manifest_json,
+        audit_flags.det_manifest_json,
+    ]
+    .into_iter()
+    .filter(|&b| b)
+    .count();
+    let any_mir_manifest_json = stdout_manifest_count > 0;
+    if stdout_manifest_count > 1 {
+        eprintln!("Error: at most one MIR manifest JSON flag may write to stdout at a time");
+        return Err(1);
+    }
     if json && receipt_to_stdout {
         eprintln!("Error: --error-format=json writes to stdout; write the receipt to a file instead of '-'");
         return Err(1);
     }
+    if any_mir_manifest_json && (json || receipt_to_stdout) {
+        eprintln!("Error: MIR manifest JSON flags write to stdout and cannot be combined with --error-format=json or --receipt -");
+        return Err(1);
+    }
+    if let Some(0) = audit_flags.max_stack_bytes {
+        eprintln!("Error: invalid --max-stack-bytes value `0`: budget must be >= 1 byte");
+        return Err(1);
+    }
+    let parsed_deny_effects = if let Some(raw) = audit_flags.deny_effect.as_deref() {
+        Some(
+            buildlang::codegen::CapEffect::parse_deny_list(raw).map_err(|err| {
+                eprintln!("Error: {err}");
+                1
+            })?,
+        )
+    } else {
+        None
+    };
     if policy.is_some() && profile.is_some() {
         eprintln!("Error: --policy and --profile cannot be used together");
         return Err(1);
@@ -6959,18 +7076,199 @@ fn cmd_check(
         let report = buildlang::diagnostics::Report::new(outcome.source.clone(), diagnostics);
         println!("{}", report.to_json());
     } else {
-        render_check_human_output(&outcome, receipt_to_stdout);
+        render_check_human_output(&outcome, receipt_to_stdout || any_mir_manifest_json);
         render_check_policy_output(policy_decision.as_ref());
     }
     if let Some(receipt_value) = receipt_value {
         write_check_receipt(receipt.expect("receipt path is present"), &receipt_value)?;
     }
 
+    let mut mir_audit_passed = true;
+    let run_sovereign = audit_flags.sovereign_audit || audit_flags.sovereign_manifest_json;
+    let run_individual = audit_flags.deny_effect.is_some()
+        || audit_flags.effect_manifest_json
+        || audit_flags.max_stack_bytes.is_some()
+        || audit_flags.wcet_manifest_json
+        || audit_flags.constant_time
+        || audit_flags.ct_manifest_json
+        || audit_flags.strict_determinism
+        || audit_flags.det_manifest_json;
+
+    if (run_sovereign || run_individual)
+        && outcome.parse_errors.is_empty()
+        && outcome.type_errors.is_empty()
+    {
+        let Some(mir) = outcome.mir_module.as_ref() else {
+            eprintln!("Error: MIR module unavailable for compile-time formal verification audit");
+            return Err(1);
+        };
+
+        if run_sovereign {
+            let config = buildlang::codegen::SovereignAuditConfig {
+                denied_effects: parsed_deny_effects
+                    .clone()
+                    .unwrap_or_else(buildlang::codegen::default_sovereign_denied_effects),
+                max_stack_bytes: audit_flags
+                    .max_stack_bytes
+                    .unwrap_or(buildlang::codegen::DEFAULT_SOVEREIGN_STACK_BUDGET_BYTES),
+            };
+            let manifest =
+                buildlang::codegen::run_sovereign_mir_audit(mir, &outcome.source, &config)
+                    .map_err(|err| {
+                        eprintln!("Error: {err}");
+                        1
+                    })?;
+            for v in &manifest.effect.violations {
+                eprintln!(
+                    "Sovereign violation [cap_effect/{}]: {} (chain: {})",
+                    v.effect,
+                    v.message,
+                    v.call_chain.join(" -> ")
+                );
+            }
+            for v in &manifest.wcet.violations {
+                eprintln!(
+                    "Sovereign violation [wcet_stack/{:?}]: {} (chain: {})",
+                    v.kind,
+                    v.message,
+                    v.call_chain.join(" -> ")
+                );
+            }
+            for v in &manifest.constant_time.violations {
+                eprintln!(
+                    "Sovereign violation [constant_time/{:?}]: {}",
+                    v.kind, v.message
+                );
+            }
+            for v in &manifest.determinism.violations {
+                eprintln!(
+                    "Sovereign violation [strict_determinism/{:?}]: {} (chain: {})",
+                    v.kind,
+                    v.message,
+                    v.call_chain.join(" -> ")
+                );
+            }
+            if audit_flags.sovereign_manifest_json {
+                let rendered = serde_json::to_string_pretty(&manifest).map_err(|err| {
+                    eprintln!("Error serializing sovereign audit manifest: {err}");
+                    1
+                })?;
+                println!("{rendered}");
+            }
+            if audit_flags.sovereign_audit {
+                mir_audit_passed = mir_audit_passed && manifest.passed;
+            }
+        } else {
+            if parsed_deny_effects.is_some() || audit_flags.effect_manifest_json {
+                let denied = parsed_deny_effects.clone().unwrap_or_default();
+                let m = buildlang::codegen::audit_mir_effects(mir, &outcome.source, &denied)
+                    .map_err(|err| {
+                        eprintln!("Error: {err}");
+                        1
+                    })?;
+                for v in &m.violations {
+                    eprintln!(
+                        "Effect violation [{}]: {} (chain: {})",
+                        v.effect,
+                        v.message,
+                        v.call_chain.join(" -> ")
+                    );
+                }
+                if audit_flags.effect_manifest_json {
+                    let rendered = serde_json::to_string_pretty(&m).map_err(|err| {
+                        eprintln!("Error serializing effect manifest: {err}");
+                        1
+                    })?;
+                    println!("{rendered}");
+                }
+                mir_audit_passed = mir_audit_passed && m.passed;
+            }
+            if audit_flags.max_stack_bytes.is_some() || audit_flags.wcet_manifest_json {
+                let m = buildlang::codegen::audit_mir_wcet_stack(
+                    mir,
+                    &outcome.source,
+                    audit_flags.max_stack_bytes,
+                )
+                .map_err(|err| {
+                    eprintln!("Error: {err}");
+                    1
+                })?;
+                for v in &m.violations {
+                    eprintln!(
+                        "WCET/Stack violation [{:?}]: {} (chain: {})",
+                        v.kind,
+                        v.message,
+                        v.call_chain.join(" -> ")
+                    );
+                }
+                if audit_flags.wcet_manifest_json {
+                    let rendered = serde_json::to_string_pretty(&m).map_err(|err| {
+                        eprintln!("Error serializing WCET manifest: {err}");
+                        1
+                    })?;
+                    println!("{rendered}");
+                }
+                mir_audit_passed = mir_audit_passed && m.passed;
+            }
+            if audit_flags.constant_time || audit_flags.ct_manifest_json {
+                let m = buildlang::codegen::audit_mir_constant_time(mir, &outcome.source).map_err(
+                    |err| {
+                        eprintln!("Error: {err}");
+                        1
+                    },
+                )?;
+                for v in &m.violations {
+                    eprintln!("Constant-time violation [{:?}]: {}", v.kind, v.message);
+                }
+                if audit_flags.ct_manifest_json {
+                    let rendered = serde_json::to_string_pretty(&m).map_err(|err| {
+                        eprintln!("Error serializing constant-time manifest: {err}");
+                        1
+                    })?;
+                    println!("{rendered}");
+                }
+                if audit_flags.constant_time {
+                    mir_audit_passed = mir_audit_passed && m.passed;
+                }
+            }
+            if audit_flags.strict_determinism || audit_flags.det_manifest_json {
+                let m = buildlang::codegen::audit_mir_determinism(mir, &outcome.source).map_err(
+                    |err| {
+                        eprintln!("Error: {err}");
+                        1
+                    },
+                )?;
+                for v in &m.violations {
+                    eprintln!(
+                        "Determinism violation [{:?}]: {} (chain: {})",
+                        v.kind,
+                        v.message,
+                        v.call_chain.join(" -> ")
+                    );
+                }
+                if audit_flags.det_manifest_json {
+                    let rendered = serde_json::to_string_pretty(&m).map_err(|err| {
+                        eprintln!("Error serializing determinism manifest: {err}");
+                        1
+                    })?;
+                    println!("{rendered}");
+                }
+                if audit_flags.strict_determinism {
+                    mir_audit_passed = mir_audit_passed && m.passed;
+                }
+            }
+        }
+    }
+
     let policy_passed = policy_decision
         .as_ref()
         .map(|decision| decision.violations.is_empty())
         .unwrap_or(true);
-    if outcome.parse_errors.is_empty() && outcome.type_errors.is_empty() && policy_passed {
+    if outcome.parse_errors.is_empty()
+        && outcome.type_errors.is_empty()
+        && policy_passed
+        && mir_audit_passed
+    {
         Ok(())
     } else {
         Err(1)
@@ -10358,13 +10656,25 @@ fn resolve_modules_with_prefix(
         return Ok(());
     }
 
-    // Functions this file defines itself. A name imported by `use` never
-    // replaces one of them.
+    // Functions and types this file defines itself. A name imported by `use`
+    // (or pulled in transitively as a private helper of a selective import)
+    // never replaces or collides with one of them.
     let own_fn_names: HashSet<String> = ast
         .items
         .iter()
         .filter_map(|item| match &item.kind {
             ItemKind::Function(f) => Some(f.name.name.to_string()),
+            _ => None,
+        })
+        .collect();
+    let own_type_names: HashSet<String> = ast
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Struct(s) => Some(s.name.name.to_string()),
+            ItemKind::Enum(e) => Some(e.name.name.to_string()),
+            ItemKind::TypeAlias(t) => Some(t.name.name.to_string()),
+            ItemKind::Trait(t) => Some(t.name.name.to_string()),
             _ => None,
         })
         .collect();
@@ -10438,8 +10748,64 @@ fn resolve_modules_with_prefix(
         }
     }
 
-    // Append module items to the main AST
-    ast.items.extend(new_items);
+    let mut own_impl_methods: HashMap<String, HashSet<String>> = HashMap::new();
+    for item in &ast.items {
+        if let ItemKind::Impl(imp) = &item.kind {
+            if imp.trait_ref.is_none() {
+                if let ast::TypeKind::Path(p) = &imp.self_ty.kind {
+                    if let Some(id) = p.last_ident() {
+                        let entry = own_impl_methods.entry(id.name.to_string()).or_default();
+                        for impl_item in &imp.items {
+                            if let ast::ImplItemKind::Function(f) = &impl_item.kind {
+                                entry.insert(f.name.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Append module items to the main AST, dropping unrequested transitive
+    // helper types that would collide with types defined in this file, and
+    // filtering out colliding methods from merged impl blocks while preserving
+    // non-conflicting methods needed by merged items.
+    let mut filtered_items = Vec::with_capacity(new_items.len());
+    for mut item in new_items {
+        let keep = match &mut item.kind {
+            ItemKind::Struct(s) => !own_type_names.contains(s.name.name.as_ref()),
+            ItemKind::Enum(e) => !own_type_names.contains(e.name.name.as_ref()),
+            ItemKind::TypeAlias(t) => !own_type_names.contains(t.name.name.as_ref()),
+            ItemKind::Trait(t) => !own_type_names.contains(t.name.name.as_ref()),
+            ItemKind::Impl(imp) if imp.trait_ref.is_none() => {
+                let self_name = match &imp.self_ty.kind {
+                    ast::TypeKind::Path(p) => p.last_ident().map(|i| i.name.as_ref()),
+                    _ => None,
+                };
+                if let Some(n) = self_name {
+                    if own_type_names.contains(n) {
+                        if let Some(existing) = own_impl_methods.get(n) {
+                            imp.items.retain(|impl_item| match &impl_item.kind {
+                                ast::ImplItemKind::Function(f) => {
+                                    !existing.contains(f.name.name.as_ref())
+                                }
+                                _ => true,
+                            });
+                        }
+                        !imp.items.is_empty()
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        };
+        if keep {
+            filtered_items.push(item);
+        }
+    }
+    ast.items.extend(filtered_items);
 
     // Rewrite calls in the main program's existing functions and methods to
     // use prefixed names
@@ -10503,8 +10869,13 @@ fn prune_selective_module_items(
         false
     };
     let mut defined: HashSet<String> = HashSet::new();
+    let mut mod_names: HashSet<String> = HashSet::new();
     for item in items.iter() {
-        if let Some(id) = item.name() {
+        if let ItemKind::Mod(m) = &item.kind {
+            if m.content.is_some() {
+                mod_names.insert(m.name.name.to_string());
+            }
+        } else if let Some(id) = item.name() {
             defined.insert(id.name.to_string());
         } else if let ItemKind::ExternBlock(eb) = &item.kind {
             for ext_item in &eb.items {
@@ -10524,7 +10895,8 @@ fn prune_selective_module_items(
                 continue;
             }
             let should_keep = match &item.kind {
-                ItemKind::Use(_) => true,
+                ItemKind::Use(_) => false,
+                ItemKind::Mod(m) => m.content.is_some() && needed.contains(m.name.name.as_ref()),
                 ItemKind::Impl(imp) => {
                     let self_name = match &imp.self_ty.kind {
                         ast::TypeKind::Path(p) => p.last_ident().map(|i| i.name.as_ref()),
@@ -10581,12 +10953,76 @@ fn prune_selective_module_items(
                             let word = &slice[wstart..pos];
                             if defined.contains(word) && needed.insert(word.to_string()) {
                                 changed = true;
+                            } else if mod_names.contains(word)
+                                && slice.as_bytes().get(pos..pos + 2) == Some(b"::")
+                                && needed.insert(word.to_string())
+                            {
+                                changed = true;
                             }
                         } else {
                             pos += 1;
                         }
                     }
                 }
+            }
+        }
+    }
+    // Retain `use` declarations from a selectively imported module only when
+    // at least one kept non-`Use` item references an imported leaf name (or
+    // when the `use` is a glob). This prevents unrelated `use` statements in
+    // large library roots from leaking into selective importers.
+    let mut kept_words: HashSet<String> = HashSet::new();
+    for (idx, item) in items.iter().enumerate() {
+        if !kept[idx] || matches!(item.kind, ItemKind::Use(_)) {
+            continue;
+        }
+        let start = item.span.start.0 as usize;
+        let end = (item.span.end.0 as usize).min(source.len());
+        if start < end {
+            let slice = &source[start..end];
+            let bytes = slice.as_bytes();
+            let mut pos = 0;
+            while pos < bytes.len() {
+                if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
+                    let wstart = pos;
+                    pos += 1;
+                    while pos < bytes.len()
+                        && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+                    {
+                        pos += 1;
+                    }
+                    kept_words.insert(slice[wstart..pos].to_string());
+                } else {
+                    pos += 1;
+                }
+            }
+        }
+    }
+    if kept_words.is_empty() {
+        items.clear();
+        return;
+    }
+    fn use_tree_referenced(tree: &ast::UseTree, kept_words: &HashSet<String>) -> bool {
+        match &tree.kind {
+            ast::UseTreeKind::Glob(_) => true,
+            ast::UseTreeKind::Simple { path, rename } => {
+                if let Some(alias) = rename {
+                    kept_words.contains(alias.name.as_ref())
+                } else {
+                    path.segments
+                        .last()
+                        .is_some_and(|seg| kept_words.contains(seg.ident.name.as_ref()))
+                }
+            }
+            ast::UseTreeKind::Nested { trees, .. } => {
+                trees.iter().any(|c| use_tree_referenced(c, kept_words))
+            }
+        }
+    }
+    for (idx, item) in items.iter().enumerate() {
+        if let ItemKind::Use(u) = &item.kind {
+            if use_tree_referenced(&u.tree, &kept_words) {
+                kept[idx] = true;
             }
         }
     }
@@ -12134,6 +12570,7 @@ mod tests {
                 },
             ],
             measured_constants: Vec::new(),
+            mir_module: None,
         };
 
         let decision = evaluate_check_policy(&policy, &outcome);
@@ -12211,6 +12648,7 @@ mod tests {
             diagnostics: Vec::new(),
             function_summaries: Vec::new(),
             measured_constants: Vec::new(),
+            mir_module: None,
         };
 
         let decision = evaluate_check_policy(&policy, &outcome);

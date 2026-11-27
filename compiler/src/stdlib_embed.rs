@@ -19,6 +19,7 @@ use std::path::PathBuf;
 /// Every standard library module, by file name.
 pub const FILES: &[(&str, &str)] = &[
     ("algorithms.bld", include_str!("../stdlib/algorithms.bld")),
+    ("atomic.bld", include_str!("../stdlib/atomic.bld")),
     ("bitwise.bld", include_str!("../stdlib/bitwise.bld")),
     ("bytes.bld", include_str!("../stdlib/bytes.bld")),
     ("complex.bld", include_str!("../stdlib/complex.bld")),

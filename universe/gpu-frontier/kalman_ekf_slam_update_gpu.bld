@@ -1,0 +1,57 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: 2D Extended Kalman Filter (EKF) SLAM landmark range update kernel.
+// Computes range prediction and Jacobian via Newton-Raphson sqrt, Kalman gain, posterior
+// landmark position, and positive-definite Joseph-form variance update.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn kalman_ekf_slam_update_gpu(
+    r_noise: f32,
+    eps: f32,
+    lx_buf: &[f32],
+    ly_buf: &[f32],
+    rx_buf: &[f32],
+    ry_buf: &[f32],
+    z_range_buf: &[f32],
+    pxx_buf: &[f32],
+    pxy_buf: &[f32],
+    pyy_buf: &[f32],
+    lx_out: &mut [f32],
+    ly_out: &mut [f32],
+    pxx_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let dx: f32 = lx_buf[i] - rx_buf[i];
+    let dy: f32 = ly_buf[i] - ry_buf[i];
+    let d2: f32 = dx * dx + dy * dy + eps;
+
+    let mut r_est: f32 = 0.5 * (d2 + 1.0);
+    r_est = 0.5 * (r_est + d2 / r_est);
+    r_est = 0.5 * (r_est + d2 / r_est);
+    r_est = 0.5 * (r_est + d2 / r_est);
+
+    let inv_r: f32 = 1.0 / (r_est + eps);
+    let hx: f32 = dx * inv_r;
+    let hy: f32 = dy * inv_r;
+
+    let pxx: f32 = pxx_buf[i];
+    let pxy: f32 = pxy_buf[i];
+    let pyy: f32 = pyy_buf[i];
+
+    let ph_x: f32 = pxx * hx + pxy * hy;
+    let ph_y: f32 = pxy * hx + pyy * hy;
+    let s_var: f32 = hx * ph_x + hy * ph_y + r_noise + eps;
+    let inv_s: f32 = 1.0 / s_var;
+
+    let kx: f32 = ph_x * inv_s;
+    let ky: f32 = ph_y * inv_s;
+    let innov: f32 = z_range_buf[i] - r_est;
+
+    let a_xx: f32 = 1.0 - kx * hx;
+    let a_xy: f32 = -kx * hy;
+    let pxx_joseph: f32 = a_xx * a_xx * pxx + 2.0 * a_xx * a_xy * pxy + a_xy * a_xy * pyy + kx * kx * r_noise;
+
+    lx_out[i] = lx_buf[i] + kx * innov;
+    ly_out[i] = ly_buf[i] + ky * innov;
+    pxx_out[i] = pxx_joseph;
+}

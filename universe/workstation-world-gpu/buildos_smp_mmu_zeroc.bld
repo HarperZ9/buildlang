@@ -1,0 +1,442 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 119A (Slice 25: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C BuildOS 4-Core SMP
+// Capability Work-Stealing Scheduler + Sv39/x64 Hardware Page-Table Walk & TLB Shootdown
+// Verifier (buildos_smp_mmu_zeroc.bld). Compiled with ZERO C compiler, ZERO Rust, and
+// ZERO external linker across ALL FIVE zero-C ISAs.
+//
+// Modes:
+//   0 = Clean 4-core SMP + Sv39 MMU + TLB shootdown + RFC 6962 commit (status=1)
+//   1 = Planted attack (a): Stale-TLB use-after-unmap epoch mismatch -> status=-101
+//   2 = Planted attack (b): Cross-core unowned capability race / double-exec -> status=-201
+//   3 = Planted attack (c): Physical-frame W^X dual-mapping alias -> status=-301
+//   4 = Planted attack (d): Forged RFC 6962 SMP-MMU root tamper -> status=-401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn sv39_tbl(idx: i64) -> i64 {
+    if idx == 0 { return 1077936128; }
+    else if idx == 1 { return 10241; }
+    else if idx == 2 { return 20481; }
+    else if idx == 3 { return 458763; }
+    else if idx == 4 { return 1; }
+    else if idx == 5 { return 2; }
+    else if idx == 6 { return 0; }
+    else if idx == 7 { return 1077940224; }
+    else if idx == 8 { return 10241; }
+    else if idx == 9 { return 20481; }
+    else if idx == 10 { return 459787; }
+    else if idx == 11 { return 1; }
+    else if idx == 12 { return 2; }
+    else if idx == 13 { return 1; }
+    else if idx == 14 { return 1077944320; }
+    else if idx == 15 { return 10241; }
+    else if idx == 16 { return 20481; }
+    else if idx == 17 { return 460811; }
+    else if idx == 18 { return 1; }
+    else if idx == 19 { return 2; }
+    else if idx == 20 { return 2; }
+    else if idx == 21 { return 1077948416; }
+    else if idx == 22 { return 10241; }
+    else if idx == 23 { return 20481; }
+    else if idx == 24 { return 461835; }
+    else if idx == 25 { return 1; }
+    else if idx == 26 { return 2; }
+    else if idx == 27 { return 3; }
+    else if idx == 28 { return 2155872256; }
+    else if idx == 29 { return 11265; }
+    else if idx == 30 { return 21505; }
+    else if idx == 31 { return 462855; }
+    else if idx == 32 { return 2; }
+    else if idx == 33 { return 4; }
+    else if idx == 34 { return 0; }
+    else if idx == 35 { return 2155876352; }
+    else if idx == 36 { return 11265; }
+    else if idx == 37 { return 21505; }
+    else if idx == 38 { return 463879; }
+    else if idx == 39 { return 2; }
+    else if idx == 40 { return 4; }
+    else if idx == 41 { return 1; }
+    else if idx == 42 { return 2155880448; }
+    else if idx == 43 { return 11265; }
+    else if idx == 44 { return 21505; }
+    else if idx == 45 { return 464903; }
+    else if idx == 46 { return 2; }
+    else if idx == 47 { return 4; }
+    else if idx == 48 { return 2; }
+    else if idx == 49 { return 2155884544; }
+    else if idx == 50 { return 11265; }
+    else if idx == 51 { return 21505; }
+    else if idx == 52 { return 465927; }
+    else if idx == 53 { return 2; }
+    else if idx == 54 { return 4; }
+    else if idx == 55 { return 3; }
+    return 0;
+}
+
+fn exp_smp_mmu_root(i: i64) -> i64 {
+    if i == 0 { return 1984600807; }
+    else if i == 1 { return 172004385; }
+    else if i == 2 { return 2317912884; }
+    else if i == 3 { return 3302220514; }
+    else if i == 4 { return 3162710607; }
+    else if i == 5 { return 1426733961; }
+    else if i == 6 { return 3209658165; }
+    else if i == 7 { return 1122558035; }
+    return 0;
+}
+fn smp_mmu_run(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    // Compact stack arrays (1,248 B + ~200 B scalars < 1,500 B < 2,048 B RV64 frame limit)
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut leaves: [i64; 16] = [0; 16];
+    let mut smp_buf: [i64; 16] = [0; 16];
+    let mut mmu_buf: [i64; 16] = [0; 16];
+    let mut task_st: [i64; 16] = [0; 16];
+    let mut pfn_st: [i64; 16] = [0; 16];
+    let mut tlb_ep: [i64; 4] = [0; 4];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut p0: i64 = 0; let mut p1: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+
+    // =========================================================================
+    // PHASE 1: Sv39 3-Level Page-Table Walk + W^X No-Alias PFN + TLB Shootdown
+    // =========================================================================
+    i = 0; while i < 16 { pfn_st[i] = -1; i = i + 1; }
+    i = 0; while i < 4 { tlb_ep[i] = 7; i = i + 1; }
+
+    p0 = 0;
+    while p0 < 8 {
+        let base: i64 = p0 * 7;
+        let va: i64 = sv39_tbl(base);
+        let l2_pte: i64 = sv39_tbl(base + 1);
+        let l1_pte: i64 = sv39_tbl(base + 2);
+        let mut l0_pte: i64 = sv39_tbl(base + 3);
+
+        // Extract 9-bit Sv39 VPN fields and validate 3-level walk non-leaf pointers
+        let vpn2: i64 = (va >> 30) & 511;
+        let vpn1: i64 = (va >> 21) & 511;
+        let vpn0: i64 = (va >> 12) & 511;
+        if vpn2 != sv39_tbl(base + 4) || vpn1 != sv39_tbl(base + 5) || vpn0 != sv39_tbl(base + 6) {
+            println("{}", -302); println("{}", 0); return -302;
+        }
+        if (l2_pte & 1) == 0 || (l2_pte & 14) != 0 || (l1_pte & 1) == 0 || (l1_pte & 14) != 0 {
+            println("{}", -303); println("{}", 0); return -303;
+        }
+
+        // Planted attack (c): VA #6 (data R|W=3) aliases executable code PFN 2 (R|X=5 -> RWX alias!)
+        if mode == 3 && p0 == 6 {
+            l0_pte = (7 << 16) | (2 << 10) | (3 << 1) | 1;
+        }
+        // Clean remap of VA #7 from PFN 7 -> fresh unaliased PFN 11 at epoch 8
+        if p0 == 7 {
+            l0_pte = (8 << 16) | (11 << 10) | (3 << 1) | 1;
+        }
+
+        let perm: i64 = (l0_pte >> 1) & 7;
+        let pfn: i64 = (l0_pte >> 10) & 15;
+        if (l0_pte & 1) == 0 || perm == 0 || (perm & 6) == 6 {
+            println("{}", -301); println("{}", 0); return -301;
+        }
+        // Strict no-alias physical-frame ownership & combined W^X alias rejection
+        if pfn_st[pfn] != -1 {
+            println("{}", -301); println("{}", 0); return -301;
+        }
+        pfn_st[pfn] = (p0 << 4) | perm;
+        mmu_buf[p0] = ((p0 & 15) << 24) | ((vpn2 & 63) << 18) | ((vpn1 & 63) << 12) | ((pfn & 15) << 4) | perm;
+        p0 = p0 + 1;
+    }
+
+    // Generation-pinned 4-core TLB shootdown after VA #7 unmap/remap (epoch 7 -> 8)
+    let global_ep: i64 = 8;
+    i = 0;
+    while i < 4 {
+        // Planted attack (a): Core 2 misses TLB shootdown ACK, retaining stale epoch 7 < 8!
+        if mode == 1 && i == 2 {
+            tlb_ep[i] = 7;
+        } else {
+            tlb_ep[i] = global_ep;
+        }
+        if tlb_ep[i] != global_ep {
+            println("{}", -101); println("{}", 0); return -101;
+        }
+        mmu_buf[8 + i] = ((i & 15) << 24) | ((tlb_ep[i] & 255) << 8) | global_ep;
+        i = i + 1;
+    }
+    mmu_buf[12] = 8; mmu_buf[13] = 11; mmu_buf[14] = global_ep; mmu_buf[15] = 1398158137; // "SV39"
+
+    // =========================================================================
+    // PHASE 2: 4-Core Deterministic Capability Work-Stealing Scheduler (16 Tasks)
+    // =========================================================================
+    i = 0;
+    while i < 16 {
+        if i < 10 { task_st[i] = 0; } else { task_st[i] = 1; }
+        i = i + 1;
+    }
+
+    let mut steals: i64 = 0;
+    let mut tick: i64 = 0;
+    while tick < 4 {
+        let mut core: i64 = 0;
+        while core < 4 {
+            let mut picked: i64 = -1;
+            i = 0;
+            while i < 16 {
+                if picked < 0 && task_st[i] == core { picked = i; }
+                i = i + 1;
+            }
+            let mut was_steal: i64 = 0;
+            let mut victim: i64 = core;
+            if picked < 0 {
+                // Find busiest victim core deterministically
+                let mut best_v: i64 = -1;
+                let mut best_cnt: i64 = 0;
+                let mut vc: i64 = 0;
+                while vc < 4 {
+                    let mut cnt: i64 = 0;
+                    i = 0; while i < 16 { if task_st[i] == vc { cnt = cnt + 1; } i = i + 1; }
+                    if cnt > best_cnt { best_cnt = cnt; best_v = vc; }
+                    vc = vc + 1;
+                }
+                // Steal tail (highest tid) from victim deque via linear ownership transfer
+                i = 15;
+                while i >= 0 {
+                    if picked < 0 && task_st[i] == best_v { picked = i; }
+                    i = i - 1;
+                }
+                if picked < 0 || task_st[picked] != best_v {
+                    println("{}", -201); println("{}", 0); return -201;
+                }
+                victim = best_v;
+                was_steal = 1;
+                task_st[picked] = -1;   // atomic in-transit state
+                task_st[picked] = core; // exclusive linear ownership transfer
+                steals = steals + 1;
+            }
+
+            // Planted attack (b): Core 3 attempts unowned double-exec of Task 0 (already done by Core 0!)
+            if mode == 2 && tick == 1 && core == 3 { picked = 0; }
+
+            if picked < 0 || task_st[picked] != core {
+                println("{}", -201); println("{}", 0); return -201;
+            }
+            task_st[picked] = 10 + core;
+            smp_buf[tick * 4 + core] = ((tick & 15) << 24) | ((core & 15) << 20)
+                | ((was_steal & 1) << 16) | ((victim & 15) << 12) | (picked & 255);
+            core = core + 1;
+        }
+        tick = tick + 1;
+    }
+
+    i = 0;
+    while i < 16 {
+        if task_st[i] < 10 { println("{}", -202); println("{}", 0); return -202; }
+        i = i + 1;
+    }
+
+    // =========================================================================
+    // PHASE 3: SHA-256 SMP & MMU Trace Digests + RFC 6962 SMP-MMU Integrity Root
+    //   p0 == 0: smp_sha -> L_smp (leaves[0..7]); p0 == 1: mmu_sha -> L_mmu (leaves[8..15])
+    // =========================================================================
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p1 = 0;
+        while p1 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p1 == 0 {
+                if p0 == 0 { i = 0; while i < 16 { w[i] = smp_buf[i]; i = i + 1; } }
+                else { i = 0; while i < 16 { w[i] = mmu_buf[i]; i = i + 1; } }
+            } else { w[0] = 2147483648; w[15] = 512; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p1 = p1 + 1;
+        }
+        // Save mmu_sha in smp_buf[0..7] (now free!) for clean commit output
+        if p0 == 1 { i = 0; while i < 8 { smp_buf[i] = hv[i]; i = i + 1; } }
+        // Planted attack (d): flip bit 0 of SMP trace digest prior to RFC 6962 leaf commitment
+        if mode == 4 && p0 == 0 { hv[0] = hv[0] ^ 1; }
+
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1; while i < 8 { w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32; i = i + 1; }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        i = 0; while i < 8 { leaves[p0 * 8 + i] = hv[i]; i = i + 1; }
+        p0 = p0 + 1;
+    }
+
+    // Internal node: RFC 6962 Root = SHA256(0x01 || L_smp || L_mmu)
+    i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        if p0 == 0 {
+            w[0] = (16777216 | (leaves[0] >> 8)) & m32;
+            i = 1; while i < 8 { w[i] = (((leaves[i - 1] & 255) << 24) | (leaves[i] >> 8)) & m32; i = i + 1; }
+            w[8] = (((leaves[7] & 255) << 24) | (leaves[8] >> 8)) & m32;
+            i = 1;
+            while i < 8 {
+                w[8 + i] = (((leaves[8 + i - 1] & 255) << 24) | (leaves[8 + i] >> 8)) & m32; i = i + 1;
+            }
+        } else { w[0] = (((leaves[15] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        p0 = p0 + 1;
+    }
+
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_smp_mmu_root(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -401); println("{}", 0); return -401; }
+
+    // Clean commit: status=1, committed=1, cores=4, tasks=16, steals, pages=8, epoch=8, mmu_sha[0..7], root[0..7]
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 4);
+    println("{}", 16);
+    println("{}", steals);
+    println("{}", 8);
+    println("{}", global_ep);
+    i = 0; while i < 8 { println("{}", smp_buf[i]); i = i + 1; }
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    return 1;
+}
+
+fn main() ~ Console {
+    let _ = smp_mmu_run(0);
+}

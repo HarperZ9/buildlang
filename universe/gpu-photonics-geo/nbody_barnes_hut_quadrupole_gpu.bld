@@ -1,0 +1,58 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Photonics-Geo GPU 320-Pack: Barnes-Hut monopole plus quadrupole gravity force kernel.
+// Evaluates softened 3D monopole attraction plus traceless quadrupole tensor contraction
+// using Newton-Raphson inverse distance and emits 3D acceleration plus potential.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn nbody_barnes_hut_quadrupole_gpu(
+    g_const: f32,
+    eps2: f32,
+    dx_buf: &[f32],
+    dy_buf: &[f32],
+    dz_buf: &[f32],
+    mass_buf: &[f32],
+    qxx_buf: &[f32],
+    qyy_buf: &[f32],
+    qxy_buf: &[f32],
+    ax_out: &mut [f32],
+    ay_out: &mut [f32],
+    az_out: &mut [f32],
+    phi_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let dx: f32 = dx_buf[i];
+    let dy: f32 = dy_buf[i];
+    let dz: f32 = dz_buf[i];
+    let r2: f32 = dx * dx + dy * dy + dz * dz + eps2;
+
+    let mut r: f32 = 0.5 * (r2 + 1.0);
+    r = 0.5 * (r + r2 / r);
+    r = 0.5 * (r + r2 / r);
+    r = 0.5 * (r + r2 / r);
+
+    let inv_r: f32 = 1.0 / (r + 0.000001);
+    let inv_r2: f32 = inv_r * inv_r;
+    let inv_r3: f32 = inv_r2 * inv_r;
+    let inv_r5: f32 = inv_r3 * inv_r2;
+    let inv_r7: f32 = inv_r5 * inv_r2;
+
+    let qxx: f32 = qxx_buf[i];
+    let qyy: f32 = qyy_buf[i];
+    let qzz: f32 = -(qxx + qyy);
+    let qxy: f32 = qxy_buf[i];
+
+    let qr_x: f32 = qxx * dx + qxy * dy;
+    let qr_y: f32 = qxy * dx + qyy * dy;
+    let qr_z: f32 = qzz * dz;
+    let rqr: f32 = dx * qr_x + dy * qr_y + dz * qr_z;
+
+    let mono: f32 = -g_const * mass_buf[i] * inv_r3;
+    let quad_rad: f32 = -2.5 * g_const * rqr * inv_r7;
+    let quad_vec: f32 = g_const * inv_r5;
+
+    ax_out[i] = (mono + quad_rad) * dx + quad_vec * qr_x;
+    ay_out[i] = (mono + quad_rad) * dy + quad_vec * qr_y;
+    az_out[i] = (mono + quad_rad) * dz + quad_vec * qr_z;
+    phi_out[i] = -g_const * (mass_buf[i] * inv_r + 0.5 * rqr * inv_r5);
+}

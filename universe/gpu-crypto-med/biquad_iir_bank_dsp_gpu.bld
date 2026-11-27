@@ -1,0 +1,47 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Crypto-Med GPU 360-Pack: Studio parametric EQ biquad IIR DSP filter bank kernel.
+// Runs a two-band cascaded Transposed Direct Form II biquad equalizer with soft-clip
+// headroom protection and reports updated delay-line states plus filtered output.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn biquad_iir_bank_dsp_gpu(
+    b0_a: f32,
+    b1_a: f32,
+    b2_a: f32,
+    a1_a: f32,
+    a2_a: f32,
+    b0_b: f32,
+    b1_b: f32,
+    b2_b: f32,
+    a1_b: f32,
+    a2_b: f32,
+    x_buf: &[f32],
+    z1a_buf: &[f32],
+    z2a_buf: &[f32],
+    z1b_buf: &[f32],
+    z2b_buf: &[f32],
+    y_out: &mut [f32],
+    z1a_out: &mut [f32],
+    z2a_out: &mut [f32],
+    z1b_out: &mut [f32],
+    z2b_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let x: f32 = x_buf[i];
+
+    let y1: f32 = b0_a * x + z1a_buf[i];
+    let z1a_n: f32 = b1_a * x - a1_a * y1 + z2a_buf[i];
+    let z2a_n: f32 = b2_a * x - a2_a * y1;
+
+    let y2: f32 = b0_b * y1 + z1b_buf[i];
+    let z1b_n: f32 = b1_b * y1 - a1_b * y2 + z2b_buf[i];
+    let z2b_n: f32 = b2_b * y1 - a2_b * y2;
+
+    let y_soft: f32 = y2 / (1.0 + 0.15 * y2 * y2);
+    y_out[i] = y_soft;
+    z1a_out[i] = z1a_n;
+    z2a_out[i] = z2a_n;
+    z1b_out[i] = z1b_n;
+    z2b_out[i] = z2b_n;
+}

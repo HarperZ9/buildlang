@@ -277,7 +277,7 @@ fn sha256_wrap_step(
     let r6: u32 = 6;
     let l26: u32 = 26;
     let rot: u32 = (e >> r6) | (e << l26);
-    out_buf[i] = a + rot + k_round;
+    out_buf[i] = a.wrapping_add(rot).wrapping_add(k_round);
 }
 "#,
     )

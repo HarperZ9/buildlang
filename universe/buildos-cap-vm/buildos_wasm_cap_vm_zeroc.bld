@@ -1,0 +1,524 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 139A (Slice 32: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C Fuel-Metered
+// Capability Sandbox Bytecode VM (buildos_wasm_cap_vm_zeroc.bld). Compiled directly
+// by untouched Stage-2 buildc_crypto_stage2.exe (ZERO C compiler, ZERO Rust, ZERO
+// external linker) across ALL FIVE zero-C ISAs (x64-pe, x64-elf, rv64-elf,
+// aarch64-elf, wasm).
+//
+// Modes:
+//   0 = Clean 447-instruction guest compute + SHA-256 hostcall + RFC 6962 commit (status=1)
+//   1 = Planted attack (a): Infinite-loop fuel exhaustion (512 fuel burned) -> status=-101
+//   2 = Planted attack (b): Linear-memory out-of-bounds write (addr=40) -> status=-201
+//   3 = Planted attack (c): Unauthorized hostcall escalation (CAP_NET_EGRESS) -> status=-301
+//   4 = Planted attack (d): W^X code-segment write (addr=1024) / bad opcode -> status=-401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn vm_code_op(pc: i64) -> i64 {
+    if pc == 0 { return 1; }
+    else if pc == 1 { return 3; }
+    else if pc == 2 { return 1; }
+    else if pc == 3 { return 3; }
+    else if pc == 4 { return 2; }
+    else if pc == 5 { return 2; }
+    else if pc == 6 { return 1; }
+    else if pc == 7 { return 6; }
+    else if pc == 8 { return 1; }
+    else if pc == 9 { return 4; }
+    else if pc == 10 { return 2; }
+    else if pc == 11 { return 1; }
+    else if pc == 12 { return 6; }
+    else if pc == 13 { return 7; }
+    else if pc == 14 { return 3; }
+    else if pc == 15 { return 2; }
+    else if pc == 16 { return 11; }
+    else if pc == 17 { return 2; }
+    else if pc == 18 { return 1; }
+    else if pc == 19 { return 6; }
+    else if pc == 20 { return 2; }
+    else if pc == 21 { return 4; }
+    else if pc == 22 { return 3; }
+    else if pc == 23 { return 2; }
+    else if pc == 24 { return 1; }
+    else if pc == 25 { return 4; }
+    else if pc == 26 { return 3; }
+    else if pc == 27 { return 1; }
+    else if pc == 28 { return 2; }
+    else if pc == 29 { return 5; }
+    else if pc == 30 { return 12; }
+    else if pc == 31 { return 14; }
+    else if pc == 32 { return 1; }
+    else if pc == 33 { return 1; }
+    else if pc == 34 { return 10; }
+    else if pc == 35 { return 2; }
+    else if pc == 36 { return 7; }
+    else if pc == 37 { return 11; }
+    else if pc == 38 { return 1; }
+    else if pc == 39 { return 10; }
+    else if pc == 40 { return 14; }
+    else if pc == 41 { return 15; }
+    return 0;
+}
+
+fn vm_code_arg(pc: i64) -> i64 {
+    if pc == 0 { return 0; }
+    else if pc == 1 { return 0; }
+    else if pc == 2 { return 2654435769; }
+    else if pc == 3 { return 1; }
+    else if pc == 4 { return 0; }
+    else if pc == 5 { return 0; }
+    else if pc == 6 { return 16843009; }
+    else if pc == 7 { return 0; }
+    else if pc == 8 { return 1364543811; }
+    else if pc == 9 { return 0; }
+    else if pc == 10 { return 0; }
+    else if pc == 11 { return 2246822507; }
+    else if pc == 12 { return 0; }
+    else if pc == 13 { return 0; }
+    else if pc == 14 { return 2; }
+    else if pc == 15 { return 2; }
+    else if pc == 16 { return 0; }
+    else if pc == 17 { return 1; }
+    else if pc == 18 { return 33; }
+    else if pc == 19 { return 0; }
+    else if pc == 20 { return 2; }
+    else if pc == 21 { return 0; }
+    else if pc == 22 { return 1; }
+    else if pc == 23 { return 0; }
+    else if pc == 24 { return 1; }
+    else if pc == 25 { return 0; }
+    else if pc == 26 { return 0; }
+    else if pc == 27 { return 16; }
+    else if pc == 28 { return 0; }
+    else if pc == 29 { return 0; }
+    else if pc == 30 { return 4; }
+    else if pc == 31 { return 1; }
+    else if pc == 32 { return 24; }
+    else if pc == 33 { return 16; }
+    else if pc == 34 { return 0; }
+    else if pc == 35 { return 1; }
+    else if pc == 36 { return 0; }
+    else if pc == 37 { return 0; }
+    else if pc == 38 { return 24; }
+    else if pc == 39 { return 0; }
+    else if pc == 40 { return 2; }
+    else if pc == 41 { return 0; }
+    return 0;
+}
+
+fn exp_guest_mem(i: i64) -> i64 {
+    if i == 0 { return 1364543811; }
+    else if i == 1 { return 3619520559; }
+    else if i == 2 { return 1484840851; }
+    else if i == 3 { return 3315274503; }
+    else if i == 4 { return 1123443947; }
+    else if i == 5 { return 3418405471; }
+    else if i == 6 { return 1960702411; }
+    else if i == 7 { return 4046379175; }
+    else if i == 8 { return 1979908627; }
+    else if i == 9 { return 4011085711; }
+    else if i == 10 { return 1617607523; }
+    else if i == 11 { return 2638341847; }
+    else if i == 12 { return 443295819; }
+    else if i == 13 { return 2459636031; }
+    else if i == 14 { return 226903691; }
+    else if i == 15 { return 3098838039; }
+    return 0;
+}
+
+fn exp_trace_words(i: i64) -> i64 {
+    if i == 0 { return 512; }
+    else if i == 1 { return 447; }
+    else if i == 2 { return 65; }
+    else if i == 3 { return 3; }
+    else if i == 4 { return 42; }
+    else if i == 5 { return 32; }
+    else if i == 6 { return 0; }
+    else if i == 7 { return 42; }
+    else if i == 8 { return 4256336022; }
+    else if i == 9 { return 1565305751; }
+    else if i == 10 { return 16; }
+    else if i == 11 { return 3929512585; }
+    else if i == 12 { return 1364543811; }
+    else if i == 13 { return 3098838039; }
+    else if i == 14 { return 4256336022; }
+    else if i == 15 { return 1447899954; }
+    return 0;
+}
+
+fn exp_vm_root(i: i64) -> i64 {
+    if i == 0 { return 2720983014; }
+    else if i == 1 { return 3803142536; }
+    else if i == 2 { return 1534754273; }
+    else if i == 3 { return 116598271; }
+    else if i == 4 { return 3036681064; }
+    else if i == 5 { return 2513188132; }
+    else if i == 6 { return 3171901030; }
+    else if i == 7 { return 2152945499; }
+    return 0;
+}
+// =============================================================================
+// STAGE 1: Fuel-Metered Capability Sandbox Bytecode VM + Live SHA-256 Hostcall
+// Stack arrays: w[64]+hv[8]+mem[32]+stk[16]+regs[8] = 1,024 B + scalars < 1,350 B < 2,048 B RV64!
+// =============================================================================
+fn vm_stage1_execute(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let fuel_budget: i64 = 512;
+    let cap_mask: i64 = 3;
+    let code_len: i64 = 42;
+
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut mem: [i64; 32] = [0; 32];
+    let mut stk: [i64; 16] = [0; 16];
+    let mut regs: [i64; 8] = [0; 8];
+
+    let mut pc: i64 = 0; let mut sp: i64 = 0;
+    let mut fuel: i64 = fuel_budget; let mut fuel_used: i64 = 0;
+    let mut host_out: i64 = 0; let mut trace_fold: i64 = 2654435769;
+    let mut halted: i64 = 0;
+
+    let mut i: i64 = 0; let mut p1: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+
+    while halted == 0 {
+        // 1. Strict pre-instruction fuel metering (catches infinite loops fail-closed)
+        if fuel <= 0 {
+            println("{}", -101); println("{}", 0); return -101;
+        }
+        if pc < 0 || pc >= code_len {
+            println("{}", -401); println("{}", 0); return -401;
+        }
+        fuel = fuel - 1;
+        fuel_used = fuel_used + 1;
+
+        let mut op: i64 = vm_code_op(pc);
+        let mut arg: i64 = vm_code_arg(pc);
+        let cur_pc: i64 = pc;
+
+        // Planted sandbox-escape attacks (a..d):
+        if mode == 1 && cur_pc == 23 { op = 13; arg = 4; }   // (a) Infinite-loop JMP 4 -> fuel exhaustion
+        if mode == 2 && cur_pc == 32 { arg = 40; }           // (b) Linear-memory OOB write addr=40 >= 32
+        if mode == 3 && cur_pc == 40 { arg = 3; }            // (c) Unauthorized HOST_NET_EGRESS (cap 4)
+        if mode == 4 && cur_pc == 32 { arg = 1024; }         // (d) W^X code-segment write addr=1024
+
+        trace_fold = (trace_fold * 33 + ((cur_pc << 8) ^ op ^ (sp << 16))) & m32;
+        pc = pc + 1;
+
+        if op == 1 {
+            if sp >= 16 { println("{}", -202); println("{}", 0); return -202; }
+            stk[sp] = arg & m32; sp = sp + 1;
+        } else if op == 2 {
+            if arg < 0 || arg >= 8 || sp >= 16 { println("{}", -202); println("{}", 0); return -202; }
+            stk[sp] = regs[arg]; sp = sp + 1;
+        } else if op == 3 {
+            if arg < 0 || arg >= 8 || sp <= 0 { println("{}", -202); println("{}", 0); return -202; }
+            sp = sp - 1; regs[arg] = stk[sp];
+        } else if op == 4 || op == 5 || op == 6 || op == 7 {
+            if sp < 2 { println("{}", -202); println("{}", 0); return -202; }
+            sp = sp - 1; b = stk[sp]; sp = sp - 1; a = stk[sp];
+            if op == 4 { stk[sp] = (a + b) & m32; }
+            else if op == 5 { stk[sp] = (a - b) & m32; }
+            else if op == 6 { stk[sp] = (a * b) & m32; }
+            else { stk[sp] = (a ^ b) & m32; }
+            sp = sp + 1;
+        } else if op == 10 {
+            if sp < 1 { println("{}", -202); println("{}", 0); return -202; }
+            sp = sp - 1; a = stk[sp];
+            if a < 0 || a >= 32 { println("{}", -201); println("{}", 0); return -201; }
+            stk[sp] = mem[a]; sp = sp + 1;
+        } else if op == 11 {
+            if sp < 2 { println("{}", -202); println("{}", 0); return -202; }
+            sp = sp - 1; b = stk[sp]; sp = sp - 1; a = stk[sp];
+            // W^X immutable code segment guard (addresses >= 1024 map read-only code!)
+            if a >= 1024 { println("{}", -401); println("{}", 0); return -401; }
+            if a < 0 || a >= 32 { println("{}", -201); println("{}", 0); return -201; }
+            mem[a] = b;
+        } else if op == 12 {
+            if sp < 1 { println("{}", -202); println("{}", 0); return -202; }
+            sp = sp - 1; a = stk[sp];
+            if a != 0 {
+                if arg < 0 || arg >= code_len { println("{}", -401); println("{}", 0); return -401; }
+                pc = arg;
+            }
+        } else if op == 13 {
+            if arg < 0 || arg >= code_len { println("{}", -401); println("{}", 0); return -401; }
+            pc = arg;
+        } else if op == 14 {
+            // Capability-checked hostcall dispatcher
+            if arg == 1 {
+                if (cap_mask & 1) == 0 { println("{}", -301); println("{}", 0); return -301; }
+                // Live FIPS 180-4 SHA-256 over guest linear memory mem[0..15] -> mem[16..23]
+                i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+                p1 = 0;
+                while p1 < 2 {
+                    i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+                    if p1 == 0 { i = 0; while i < 16 { w[i] = mem[i]; i = i + 1; } }
+                    else { w[0] = 2147483648; w[15] = 512; }
+                    i = 16;
+                    while i < 64 {
+                        s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                        s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+                    }
+                    a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+                    i = 0;
+                    while i < 64 {
+                        s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                        t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                        s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                        t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                        h = g; g = f; f = e; e = (d + t1) & m32;
+                        d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+                    }
+                    hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+                    hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+                    hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+                    hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+                    p1 = p1 + 1;
+                }
+                i = 0; while i < 8 { mem[16 + i] = hv[i]; i = i + 1; }
+            } else if arg == 2 {
+                if (cap_mask & 2) == 0 { println("{}", -301); println("{}", 0); return -301; }
+                if sp < 1 { println("{}", -202); println("{}", 0); return -202; }
+                sp = sp - 1; host_out = stk[sp];
+            } else {
+                // Any ungranted / egress hostcall (e.g. HOST_NET_EGRESS=3 requiring cap 4) fails closed!
+                println("{}", -301); println("{}", 0); return -301;
+            }
+        } else if op == 15 {
+            halted = 1;
+        } else {
+            println("{}", -401); println("{}", 0); return -401;
+        }
+    }
+
+    // Verify guest memory and execution-trace invariants before Stage 2 RFC 6962 commit
+    i = 0;
+    while i < 16 {
+        if mem[i] != exp_guest_mem(i) { println("{}", -402); println("{}", 0); return -402; }
+        i = i + 1;
+    }
+    if fuel_used != 447 || host_out != 4256336022 || trace_fold != 1565305751 || mem[24] != 4256336022 {
+        println("{}", -403); println("{}", 0); return -403;
+    }
+    return vm_stage2_merkle_commit(fuel_used, host_out, trace_fold, mem[16]);
+}
+
+// =============================================================================
+// STAGE 2: RFC 6962 Execution-Trace Root = H(0x01 || L_guest_sha || L_trace_sha)
+// Stack arrays: w[64]+hv[8]+leaves[16]+gsha[8] = 768 B + scalars < 1,050 B < 2,048 B RV64!
+// =============================================================================
+fn vm_stage2_merkle_commit(fuel_used: i64, host_out: i64, trace_fold: i64, gsha0: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut leaves: [i64; 16] = [0; 16];
+    let mut gsha: [i64; 8] = [0; 8];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut p0: i64 = 0; let mut p1: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p1 = 0;
+        while p1 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p1 == 0 {
+                if p0 == 0 { i = 0; while i < 16 { w[i] = exp_guest_mem(i); i = i + 1; } }
+                else { i = 0; while i < 16 { w[i] = exp_trace_words(i); i = i + 1; } }
+            } else { w[0] = 2147483648; w[15] = 512; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p1 = p1 + 1;
+        }
+        if p0 == 0 {
+            if hv[0] != gsha0 { println("{}", -404); println("{}", 0); return -404; }
+            i = 0; while i < 8 { gsha[i] = hv[i]; i = i + 1; }
+        }
+
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1; while i < 8 { w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32; i = i + 1; }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        i = 0; while i < 8 { leaves[p0 * 8 + i] = hv[i]; i = i + 1; }
+        p0 = p0 + 1;
+    }
+
+    i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        if p0 == 0 {
+            w[0] = (16777216 | (leaves[0] >> 8)) & m32;
+            i = 1; while i < 8 { w[i] = (((leaves[i - 1] & 255) << 24) | (leaves[i] >> 8)) & m32; i = i + 1; }
+            w[8] = (((leaves[7] & 255) << 24) | (leaves[8] >> 8)) & m32;
+            i = 1;
+            while i < 8 {
+                w[8 + i] = (((leaves[8 + i - 1] & 255) << 24) | (leaves[8 + i] >> 8)) & m32; i = i + 1;
+            }
+        } else { w[0] = (((leaves[15] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        p0 = p0 + 1;
+    }
+
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_vm_root(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -405); println("{}", 0); return -405; }
+
+    // Clean commit: status=1, committed=1, budget=512, fuel_used=447, caps=3, host_out, trace_fold, gsha, vm_root
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 512);
+    println("{}", fuel_used);
+    println("{}", 3);
+    println("{}", host_out);
+    println("{}", trace_fold);
+    i = 0; while i < 8 { println("{}", gsha[i]); i = i + 1; }
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    return 1;
+}
+
+fn main() ~ Console {
+    let _ = vm_stage1_execute(0);
+}

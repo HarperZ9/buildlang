@@ -1,0 +1,62 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Titan AI/RLVR 240-Pack: GRPO group-relative advantage + KL-clipped RLVR loss kernel.
+// Normalizes rollout reward against 4-sample group statistics, computes clipped policy
+// importance ratio surrogate, and adds non-negative Schulman KL divergence penalty.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn grpo_advantage_clip_loss(
+    clip_eps: f32,
+    beta_kl: f32,
+    eps: f32,
+    r0_buf: &[f32],
+    r1_buf: &[f32],
+    r2_buf: &[f32],
+    r3_buf: &[f32],
+    ratio_buf: &[f32],
+    log_diff_buf: &[f32],
+    adv_out: &mut [f32],
+    loss_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let r0: f32 = r0_buf[i];
+    let r1: f32 = r1_buf[i];
+    let r2: f32 = r2_buf[i];
+    let r3: f32 = r3_buf[i];
+
+    let mean_r: f32 = 0.25 * (r0 + r1 + r2 + r3);
+    let d0: f32 = r0 - mean_r;
+    let d1: f32 = r1 - mean_r;
+    let d2: f32 = r2 - mean_r;
+    let d3: f32 = r3 - mean_r;
+    let var_r: f32 = 0.25 * (d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3) + eps;
+
+    let mut std_r: f32 = 0.5 * (var_r + 1.0);
+    std_r = 0.5 * (std_r + var_r / std_r);
+    std_r = 0.5 * (std_r + var_r / std_r);
+    std_r = 0.5 * (std_r + var_r / std_r);
+    let adv: f32 = d0 / (std_r + eps);
+
+    let ratio: f32 = ratio_buf[i];
+    let mut r_clip: f32 = ratio;
+    if r_clip < 1.0 - clip_eps {
+        r_clip = 1.0 - clip_eps;
+    }
+    if r_clip > 1.0 + clip_eps {
+        r_clip = 1.0 + clip_eps;
+    }
+
+    let surr1: f32 = ratio * adv;
+    let surr2: f32 = r_clip * adv;
+    let mut surr: f32 = surr1;
+    if surr2 < surr {
+        surr = surr2;
+    }
+
+    let ld: f32 = log_diff_buf[i];
+    let kl_pen: f32 = 0.5 * ld * ld + 0.16666667 * ld * ld * ld * ld;
+    let loss: f32 = -surr + beta_kl * kl_pen;
+
+    adv_out[i] = adv;
+    loss_out[i] = loss;
+}

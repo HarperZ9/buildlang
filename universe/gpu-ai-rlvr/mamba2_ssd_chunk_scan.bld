@@ -1,0 +1,48 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Titan AI/RLVR 240-Pack: Mamba-2 State-Space Dual (SSD) 2-step chunked scan kernel.
+// Evolves input-selective scalar-decay state recurrence across two intra-chunk steps
+// with strictly contractive decay a_t in (0, 1) and skip projection D * x_t.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn mamba2_ssd_chunk_scan(
+    a_rate: f32,
+    d_skip: f32,
+    h_prev_buf: &[f32],
+    x0_buf: &[f32],
+    x1_buf: &[f32],
+    dt0_buf: &[f32],
+    dt1_buf: &[f32],
+    b_buf: &[f32],
+    c_buf: &[f32],
+    h_out: &mut [f32],
+    y0_out: &mut [f32],
+    y1_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let h0: f32 = h_prev_buf[i];
+    let x0: f32 = x0_buf[i];
+    let x1: f32 = x1_buf[i];
+    let b: f32 = b_buf[i];
+    let c: f32 = c_buf[i];
+
+    let mut d0: f32 = dt0_buf[i] * a_rate;
+    if d0 < 0.0 {
+        d0 = 0.0;
+    }
+    let a0: f32 = 1.0 / (1.0 + d0 + 0.5 * d0 * d0);
+    let h1: f32 = a0 * h0 + (dt0_buf[i] * b) * x0;
+    let y0: f32 = c * h1 + d_skip * x0;
+
+    let mut d1: f32 = dt1_buf[i] * a_rate;
+    if d1 < 0.0 {
+        d1 = 0.0;
+    }
+    let a1: f32 = 1.0 / (1.0 + d1 + 0.5 * d1 * d1);
+    let h2: f32 = a1 * h1 + (dt1_buf[i] * b) * x1;
+    let y1: f32 = c * h2 + d_skip * x1;
+
+    h_out[i] = h2;
+    y0_out[i] = y0;
+    y1_out[i] = y1;
+}

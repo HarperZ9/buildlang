@@ -1,0 +1,58 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: Protein backbone Ramachandran torsion plus LJ energy kernel.
+// Computes cosine of backbone dihedral angle from bond normal vectors, evaluates Fourier
+// phi/psi torsion energy, and adds soft-core Lennard-Jones 12-6 steric clash energy.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn protein_dihedral_ramachandran_gpu(
+    k_phi1: f32,
+    k_phi2: f32,
+    lj_eps: f32,
+    lj_sig2: f32,
+    n1x_buf: &[f32],
+    n1y_buf: &[f32],
+    n1z_buf: &[f32],
+    n2x_buf: &[f32],
+    n2y_buf: &[f32],
+    n2z_buf: &[f32],
+    r2_buf: &[f32],
+    cos_phi_out: &mut [f32],
+    e_total_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let n1x: f32 = n1x_buf[i];
+    let n1y: f32 = n1y_buf[i];
+    let n1z: f32 = n1z_buf[i];
+    let n2x: f32 = n2x_buf[i];
+    let n2y: f32 = n2y_buf[i];
+    let n2z: f32 = n2z_buf[i];
+
+    let m1: f32 = n1x * n1x + n1y * n1y + n1z * n1z + 0.000001;
+    let m2: f32 = n2x * n2x + n2y * n2y + n2z * n2z + 0.000001;
+    let prod_m: f32 = m1 * m2;
+
+    let mut norm_p: f32 = 0.5 * (prod_m + 1.0);
+    norm_p = 0.5 * (norm_p + prod_m / norm_p);
+    norm_p = 0.5 * (norm_p + prod_m / norm_p);
+    norm_p = 0.5 * (norm_p + prod_m / norm_p);
+
+    let dot12: f32 = n1x * n2x + n1y * n2y + n1z * n2z;
+    let mut cos_phi: f32 = dot12 / (norm_p + 0.000001);
+    if cos_phi > 1.0 {
+        cos_phi = 1.0;
+    }
+    if cos_phi < -1.0 {
+        cos_phi = -1.0;
+    }
+
+    let cos_2phi: f32 = 2.0 * cos_phi * cos_phi - 1.0;
+    let e_tors: f32 = k_phi1 * (1.0 + cos_phi) + k_phi2 * (1.0 - cos_2phi);
+
+    let sr2: f32 = lj_sig2 / (r2_buf[i] + 0.25);
+    let sr6: f32 = sr2 * sr2 * sr2;
+    let e_lj: f32 = 4.0 * lj_eps * (sr6 * sr6 - sr6);
+
+    cos_phi_out[i] = cos_phi;
+    e_total_out[i] = e_tors + e_lj;
+}

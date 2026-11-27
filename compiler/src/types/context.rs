@@ -136,9 +136,17 @@ pub struct TypeContext {
     /// two checks resolved differently; lowering then keeps its own typing.
     inferred_local_ints: HashMap<crate::lexer::Span, Option<IntTy>>,
     inferred_local_vec_elems: HashMap<crate::lexer::Span, Option<Arc<str>>>,
+    /// Inferred full `Ty` for unannotated locals whose type is a nested `Vec<Vec<...>>`
+    /// (such as `let mut buckets = vec![Vec::new(); n];`), so MIR lowering preserves
+    /// the inner vector's element type instead of falling back to `Vec<Vec<i32>>`.
+    inferred_local_vec_tys: HashMap<crate::lexer::Span, Option<Ty>>,
     /// Inferred integer inner type of `Option<IntTy>` unannotated `let` bindings
     /// (used only as a `parse` target hint when `.parse().ok()` has no turbofish).
     inferred_local_option_ints: HashMap<crate::lexer::Span, Option<IntTy>>,
+    /// Spans of unannotated `let` bindings whose inferred type is `Option<T>`,
+    /// so MIR lowering preserves `Option<T>` for `HashMap::get` / `Vec::get`
+    /// initializers (e.g. `let inv = map.get(k); inv.map(...).unwrap_or(...)`).
+    inferred_local_is_options: HashSet<crate::lexer::Span>,
 
     /// Float type the checker inferred for an unannotated `let` whose
     /// initializer is an unsuffixed integer literal, as in `let mut c = 0;`
@@ -424,7 +432,9 @@ impl TypeContext {
             multi_methods: HashMap::new(),
             inferred_local_ints: HashMap::new(),
             inferred_local_vec_elems: HashMap::new(),
+            inferred_local_vec_tys: HashMap::new(),
             inferred_local_option_ints: HashMap::new(),
+            inferred_local_is_options: HashSet::new(),
             inferred_local_floats: HashMap::new(),
             current_mod_path: Vec::new(),
         };
@@ -670,6 +680,23 @@ impl TypeContext {
             .and_then(|o| o.clone())
     }
 
+    pub fn record_inferred_local_vec_ty(&mut self, span: crate::lexer::Span, ty: Ty) {
+        self.inferred_local_vec_tys
+            .entry(span)
+            .and_modify(|slot| {
+                if slot.as_ref() != Some(&ty) {
+                    *slot = None;
+                }
+            })
+            .or_insert(Some(ty));
+    }
+
+    pub fn inferred_local_vec_ty(&self, span: crate::lexer::Span) -> Option<&Ty> {
+        self.inferred_local_vec_tys
+            .get(&span)
+            .and_then(|o| o.as_ref())
+    }
+
     pub fn record_inferred_local_option_int(&mut self, span: crate::lexer::Span, ty: IntTy) {
         self.inferred_local_option_ints
             .entry(span)
@@ -686,6 +713,14 @@ impl TypeContext {
             .get(&span)
             .copied()
             .flatten()
+    }
+
+    pub fn record_inferred_local_is_option(&mut self, span: crate::lexer::Span) {
+        self.inferred_local_is_options.insert(span);
+    }
+
+    pub fn inferred_local_is_option(&self, span: crate::lexer::Span) -> bool {
+        self.inferred_local_is_options.contains(&span)
     }
 
     /// Mark whether the binding `name` in the current scope may be assigned.
