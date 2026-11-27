@@ -1,0 +1,54 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Finance-Graph-Optics-FFT Cooley-Tukey radix-2 complex FFT butterfly compute kernel.
+// Normalizes unit-circle twiddle factor (wr, wi), computes complex butterfly outputs
+// (y0, y1), and emits half-output Parseval energy for exact unitary conservation checks.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn dsp_fft_radix2_butterfly_compute(
+    eps: f32,
+    ar_buf: &[f32],
+    ai_buf: &[f32],
+    br_buf: &[f32],
+    bi_buf: &[f32],
+    wr_buf: &[f32],
+    wi_buf: &[f32],
+    y0r_out: &mut [f32],
+    y0i_out: &mut [f32],
+    y1r_out: &mut [f32],
+    y1i_out: &mut [f32],
+    energy_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let ar: f32 = ar_buf[i];
+    let ai: f32 = ai_buf[i];
+    let br: f32 = br_buf[i];
+    let bi: f32 = bi_buf[i];
+    let wr0: f32 = wr_buf[i];
+    let wi0: f32 = wi_buf[i];
+
+    let wn2: f32 = wr0 * wr0 + wi0 * wi0 + eps;
+    let mut wn: f32 = 0.5 * (wn2 + 1.0);
+    wn = 0.5 * (wn + wn2 / wn);
+    wn = 0.5 * (wn + wn2 / wn);
+    wn = 0.5 * (wn + wn2 / wn);
+    let inv_wn: f32 = 1.0 / (wn + eps);
+    let wr: f32 = wr0 * inv_wn;
+    let wi: f32 = wi0 * inv_wn;
+
+    let tr: f32 = wr * br - wi * bi;
+    let ti: f32 = wr * bi + wi * br;
+
+    let y0r: f32 = ar + tr;
+    let y0i: f32 = ai + ti;
+    let y1r: f32 = ar - tr;
+    let y1i: f32 = ai - ti;
+
+    let e_parseval: f32 = 0.5 * (y0r * y0r + y0i * y0i + y1r * y1r + y1i * y1i);
+
+    y0r_out[i] = y0r;
+    y0i_out[i] = y0i;
+    y1r_out[i] = y1r;
+    y1i_out[i] = y1i;
+    energy_out[i] = e_parseval;
+}
