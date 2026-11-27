@@ -52,7 +52,7 @@ pub fn horner_exp2_f64(f: f64) -> f64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SuperoptConfig {
     /// Enable `(a * b) + c -> fma(a, b, c)` contraction on targets with native
-    /// or libm FMA support (`c`, `wgsl`, `hlsl`, `msl`, `spirv`, `llvm`).
+    /// or libm FMA support (`c`, `wgsl`, `hlsl`, `msl`, `spirv`, `glsl`, `llvm`).
     pub allow_fma_contract: bool,
     /// Opt-in FlashAttention-4 (`arXiv:2603.05451`) Horner FMA-emulated `exp2`
     /// rewrite over fractional inputs `f in [0, 1]`.
@@ -63,7 +63,10 @@ impl SuperoptConfig {
     /// Default target-aware superoptimization configuration.
     pub fn for_target(target: &str) -> Self {
         Self {
-            allow_fma_contract: matches!(target, "c" | "wgsl" | "hlsl" | "msl" | "spirv" | "llvm"),
+            allow_fma_contract: matches!(
+                target,
+                "c" | "wgsl" | "hlsl" | "msl" | "spirv" | "glsl" | "llvm"
+            ),
             enable_horner_exp2_fma: false,
         }
     }
