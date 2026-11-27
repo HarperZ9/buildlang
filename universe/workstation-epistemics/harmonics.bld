@@ -1,0 +1,226 @@
+// Wave 51K - Author Idea D10: Orthonormal Spherical Harmonics & Circular Chladni Modes
+// Part 1: Associated Legendre / orthonormal spherical harmonics Y_l^m (l <= 6) verified
+//         via 16-point Gauss-Legendre quadrature (orthonormality error <= 1e-12).
+// Part 2: Circular drumhead Bessel J_m(k_mn r) roots & Chladni eigenfrequency ratios.
+// Part 3: Planted non-orthogonal contaminated mode caught fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 26 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn factorial_f64(n: i32) -> f64 {
+    let mut acc: f64 = 1.0;
+    let mut k: i32 = 2;
+    while k <= n {
+        acc = acc * (k as f64);
+        k = k + 1;
+    }
+    acc
+}
+
+// Associated Legendre polynomial P_l^m(x) for 0 <= m <= l <= 6 (Condon-Shortley phase)
+fn assoc_legendre(l: i32, m: i32, x: f64) -> f64 {
+    let mut pmm: f64 = 1.0;
+    if m > 0 {
+        let somx2: f64 = det_sqrt((1.0 - x) * (1.0 + x));
+        let mut fact: f64 = 1.0;
+        let mut i: i32 = 1;
+        while i <= m {
+            pmm = pmm * (-fact) * somx2;
+            fact = fact + 2.0;
+            i = i + 1;
+        }
+    }
+    if l == m {
+        return pmm;
+    }
+    let mut pmmp1: f64 = x * ((2 * m + 1) as f64) * pmm;
+    if l == m + 1 {
+        return pmmp1;
+    }
+    let mut pll: f64 = 0.0;
+    let mut ll: i32 = m + 2;
+    while ll <= l {
+        pll = (x * ((2 * ll - 1) as f64) * pmmp1 - ((ll + m - 1) as f64) * pmm) / ((ll - m) as f64);
+        pmm = pmmp1;
+        pmmp1 = pll;
+        ll = ll + 1;
+    }
+    pll
+}
+
+// Orthonormal polar basis function N_l^m * P_l^m(x) with integral_{-1}^1 = 1
+fn norm_plm(l: i32, m: i32, x: f64) -> f64 {
+    let num: f64 = ((2 * l + 1) as f64) * factorial_f64(l - m);
+    let den: f64 = 2.0 * factorial_f64(l + m);
+    det_sqrt(num / den) * assoc_legendre(l, m, x)
+}
+
+// Bessel function of the first kind J_m(z) via convergent power series
+fn bessel_j(m: i32, z: f64) -> f64 {
+    let half_z: f64 = 0.5 * z;
+    let neg_q: f64 = -half_z * half_z;
+    let mut prefix: f64 = 1.0 / factorial_f64(m);
+    let mut p: i32 = 0;
+    while p < m {
+        prefix = prefix * half_z;
+        p = p + 1;
+    }
+    let mut term: f64 = prefix;
+    let mut sum: f64 = term;
+    let mut k: i32 = 1;
+    while k <= 32 {
+        term = term * neg_q / ((k as f64) * ((m + k) as f64));
+        sum = sum + term;
+        if abs_f64(term) < 1.0e-16 {
+            return sum;
+        }
+        k = k + 1;
+    }
+    sum
+}
+
+// Derivative J_m'(z) = (m/z) J_m(z) - J_{m+1}(z)
+fn bessel_j_deriv(m: i32, z: f64) -> f64 {
+    if m == 0 {
+        -bessel_j(1, z)
+    } else {
+        ((m as f64) / z) * bessel_j(m, z) - bessel_j(m + 1, z)
+    }
+}
+
+fn find_bessel_root(m: i32, z0: f64) -> f64 {
+    let mut z: f64 = z0;
+    let mut it: i32 = 0;
+    while it < 16 {
+        let f: f64 = bessel_j(m, z);
+        let df: f64 = bessel_j_deriv(m, z);
+        z = z - f / df;
+        it = it + 1;
+    }
+    z
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 16-point Gauss-Legendre positive nodes and weights on [-1, 1] (exact to deg 31)
+    let gl_x: Vec<f64> = vec![
+        0.09501250983763744019, 0.28160355077925891323,
+        0.45801677765722738634, 0.61787624440264374845,
+        0.75540440835500303390, 0.86563120238783174388,
+        0.94457502307323257608, 0.98940093499164993260,
+    ];
+    let gl_w: Vec<f64> = vec![
+        0.18945061045506849629, 0.18260341504492358887,
+        0.16915651939500253819, 0.14959598881657673208,
+        0.12462897125553387205, 0.09515851168249278481,
+        0.06225352393864789286, 0.02715245941175409485,
+    ];
+
+    // 1. Verify full Y_l^m orthonormality for all 0 <= m <= l, l' <= 6
+    let mut max_ortho_err: f64 = 0.0;
+    let mut pair_count: i32 = 0;
+    let mut m: i32 = 0;
+    while m <= 6 {
+        let mut l1: i32 = m;
+        while l1 <= 6 {
+            let mut l2: i32 = l1;
+            while l2 <= 6 {
+                let mut integral: f64 = 0.0;
+                let mut q: usize = 0;
+                while q < 8 {
+                    let xp: f64 = gl_x[q];
+                    let xm: f64 = -xp;
+                    let w: f64 = gl_w[q];
+                    integral = integral + w * norm_plm(l1, m, xp) * norm_plm(l2, m, xp);
+                    integral = integral + w * norm_plm(l1, m, xm) * norm_plm(l2, m, xm);
+                    q = q + 1;
+                }
+                let expected: f64 = if l1 == l2 { 1.0 } else { 0.0 };
+                let err: f64 = abs_f64(integral - expected);
+                if err > max_ortho_err {
+                    max_ortho_err = err;
+                }
+                pair_count = pair_count + 1;
+                l2 = l2 + 1;
+            }
+            l1 = l1 + 1;
+        }
+        m = m + 1;
+    }
+
+    if max_ortho_err <= 1.0e-12 && pair_count == 84 {
+        println!(
+            "[PASS] spherical_harmonics_l6 pairs={} max_ortho_err={:.3e}",
+            pair_count, max_ortho_err
+        );
+    } else {
+        println!("[FAIL] spherical_harmonics_l6 max_ortho_err={:.3e}", max_ortho_err);
+        failures = failures + 1;
+    }
+
+    // 2. Circular Drumhead Chladni Bessel Roots J_m(k_mn R) = 0
+    let j01: f64 = find_bessel_root(0, 2.40);
+    let j11: f64 = find_bessel_root(1, 3.83);
+    let j21: f64 = find_bessel_root(2, 5.13);
+    let j02: f64 = find_bessel_root(0, 5.52);
+    let r11: f64 = j11 / j01;
+    let r21: f64 = j21 / j01;
+    let r02: f64 = j02 / j01;
+    let res_max: f64 = abs_f64(bessel_j(0, j01)) + abs_f64(bessel_j(1, j11))
+        + abs_f64(bessel_j(2, j21)) + abs_f64(bessel_j(0, j02));
+
+    if res_max < 1.0e-14 && abs_f64(r11 - 1.5933405057) < 1.0e-8 && abs_f64(r02 - 2.2954172674) < 1.0e-8 {
+        println!(
+            "[PASS] chladni_bessel_modes j01={:.10} r11={:.8} r21={:.8} r02={:.8} res={:.3e}",
+            j01, r11, r21, r02, res_max
+        );
+    } else {
+        println!("[FAIL] chladni_bessel_modes j01={:.10} res={:.3e}", j01, res_max);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: Non-Orthogonal Corrupted Mode (Y_2^0 + 0.25 * Y_0^0)
+    let mut bad_inner: f64 = 0.0;
+    let mut q: usize = 0;
+    while q < 8 {
+        let xp: f64 = gl_x[q];
+        let xm: f64 = -xp;
+        let w: f64 = gl_w[q];
+        let bad_p: f64 = norm_plm(2, 0, xp) + 0.25 * norm_plm(0, 0, xp);
+        let bad_m: f64 = norm_plm(2, 0, xm) + 0.25 * norm_plm(0, 0, xm);
+        bad_inner = bad_inner + w * (bad_p * norm_plm(0, 0, xp) + bad_m * norm_plm(0, 0, xm));
+        q = q + 1;
+    }
+    if abs_f64(bad_inner) > 0.20 {
+        println!("[PASS] planted_ctrl_non_ortho caught inner_prod={:.9}", bad_inner);
+    } else {
+        println!("[FAIL] planted_ctrl_non_ortho missed inner_prod={:.9}", bad_inner);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    let checksum: f64 = j01 + j11 + j21 + j02 + bad_inner;
+    println!(
+        "[METRICS_D10] elapsed_ms={:.4} max_ortho_err={:.3e} checksum={:.12} failures={}",
+        elapsed_ms, max_ortho_err, checksum, failures
+    );
+}
