@@ -1,0 +1,298 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// Wave 52I - Author Idea D2: Analog/Digital "Digics" ADC SQNR & Tape Saturation
+// Part 1: Uniform mid-tread 4-bit to 16-bit ADC quantizer reproducing theoretical
+//         SQNR = 6.0206*N + 1.7609 dB within 0.15 dB across all 7 bit depths.
+// Part 2: Smooth odd-symmetric analog tape/film tanh saturation curve (3rd-harmonic warmth).
+// Part 3: Planted clipped-overload input control caught fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn clamp_f64(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+fn wrap_pi(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut y: f64 = x;
+    while y > pi {
+        y = y - two_pi;
+    }
+    while y < -pi {
+        y = y + two_pi;
+    }
+    y
+}
+
+fn det_sin_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 1.6059043836821613e-10 - y2 * 7.647163731819816e-13;
+    let t6: f64 = 2.505210838544172e-8 - y2 * t7;
+    let t5: f64 = 2.7557319223985893e-6 - y2 * t6;
+    let t4: f64 = 1.984126984126984e-4 - y2 * t5;
+    let t3: f64 = 8.333333333333333e-3 - y2 * t4;
+    let t2: f64 = 1.6666666666666666e-1 - y2 * t3;
+    y * (1.0 - y2 * t2)
+}
+
+fn det_cos_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 2.08767569878681e-9 - y2 * 1.1470745597729725e-11;
+    let t6: f64 = 2.7557319223985893e-7 - y2 * t7;
+    let t5: f64 = 2.48015873015873e-5 - y2 * t6;
+    let t4: f64 = 1.388888888888889e-3 - y2 * t5;
+    let t3: f64 = 4.1666666666666664e-2 - y2 * t4;
+    let t2: f64 = 0.5 - y2 * t3;
+    1.0 - y2 * t2
+}
+
+fn det_sin(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = wrap_pi(x);
+    let mut sign: f64 = 1.0;
+    if y < 0.0 {
+        y = -y;
+        sign = -1.0;
+    }
+    if y > half_pi {
+        y = pi - y;
+    }
+    if y <= q_pi { sign * det_sin_poly(y) } else { sign * det_cos_poly(half_pi - y) }
+}
+
+fn det_cos(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = abs_f64(wrap_pi(x));
+    let mut sign: f64 = 1.0;
+    if y > half_pi {
+        y = pi - y;
+        sign = -1.0;
+    }
+    if y <= q_pi { sign * det_cos_poly(y) } else { sign * det_sin_poly(half_pi - y) }
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 128.0;
+    let p6: f64 = 1.388888888888889e-3 + u * 1.984126984126984e-4;
+    let p5: f64 = 8.333333333333333e-3 + u * p6;
+    let p4: f64 = 4.1666666666666664e-2 + u * p5;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * p4)));
+    let mut i: i32 = 0;
+    while i < 7 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+fn det_tanh(x: f64) -> f64 {
+    let ep: f64 = det_exp(x);
+    let em: f64 = det_exp(-x);
+    (ep - em) / (ep + em)
+}
+
+fn det_ln(x: f64) -> f64 {
+    let mut v: f64 = x;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.69314718055994530942;
+    while v > 1.4142135623730951 {
+        v = v * 0.5;
+        k = k + 1;
+    }
+    while v < 0.7071067811865476 {
+        v = v * 2.0;
+        k = k - 1;
+    }
+    let y: f64 = (v - 1.0) / (v + 1.0);
+    let y2: f64 = y * y;
+    let mut term: f64 = y;
+    let mut sum: f64 = y;
+    let mut n: i32 = 1;
+    while n < 12 {
+        term = term * y2;
+        sum = sum + term / ((2 * n + 1) as f64);
+        n = n + 1;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+fn det_log10(x: f64) -> f64 {
+    det_ln(x) / 2.30258509299404568402
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn round_nearest(x: f64) -> f64 {
+    if x >= 0.0 {
+        ((x + 0.5) as i64) as f64
+    } else {
+        ((x - 0.5) as i64) as f64
+    }
+}
+
+struct AdcEval {
+    sqnr_db: f64,
+    theory_db: f64,
+    err_db: f64,
+    clipped_count: i32,
+}
+
+fn eval_adc_mid_tread(bits: i32, amp: f64) -> AdcEval {
+    let mut levels: f64 = 1.0;
+    let mut b: i32 = 0;
+    while b < bits {
+        levels = levels * 2.0;
+        b = b + 1;
+    }
+    let delta: f64 = 2.0 / levels;
+    let q_min: f64 = -0.5 * levels;
+    let q_max: f64 = 0.5 * levels;
+
+    // 16 uniform subtractive-dither offsets x 256 coherent samples = 4,096 total samples (Schuchman 1964)
+    let n_off: i32 = 16;
+    let n_pts: i32 = 256;
+    let k_bin: f64 = 29.0;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut sig_pow: f64 = 0.0;
+    let mut err_pow: f64 = 0.0;
+    let mut clipped: i32 = 0;
+
+    let mut d_idx: i32 = 0;
+    while d_idx < n_off {
+        let dith: f64 = ((((d_idx as f64) + 0.5) / (n_off as f64)) - 0.5) * delta;
+        let mut i: i32 = 0;
+        while i < n_pts {
+            let ph: f64 = two_pi * k_bin * ((i as f64) / (n_pts as f64));
+            let x: f64 = amp * det_sin(ph);
+            let raw_code: f64 = round_nearest((x + dith) / delta);
+            if raw_code < q_min || raw_code > q_max {
+                clipped = clipped + 1;
+            }
+            let code: f64 = clamp_f64(raw_code, q_min, q_max);
+            let xq: f64 = code * delta - dith;
+            let e: f64 = xq - x;
+            sig_pow = sig_pow + x * x;
+            err_pow = err_pow + e * e;
+            i = i + 1;
+        }
+        d_idx = d_idx + 1;
+    }
+
+    let sqnr: f64 = 10.0 * det_log10(sig_pow / (err_pow + 1.0e-30));
+    let theory: f64 = 6.020599913279624 * (bits as f64) + 1.7609125905568124;
+    AdcEval {
+        sqnr_db: sqnr,
+        theory_db: theory,
+        err_db: abs_f64(sqnr - theory),
+        clipped_count: clipped,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Uniform Mid-Tread ADC Sweep: 4, 6, 8, 10, 12, 14, 16 bits
+    let depths: Vec<i32> = vec![4, 6, 8, 10, 12, 14, 16];
+    let mut max_err_db: f64 = 0.0;
+    let mut sqnr_16: f64 = 0.0;
+    let mut checksum: f64 = 0.0;
+    let mut idx: usize = 0;
+    while idx < depths.len() {
+        let n_bits: i32 = depths[idx];
+        let ev: AdcEval = eval_adc_mid_tread(n_bits, 1.0);
+        if ev.err_db > max_err_db {
+            max_err_db = ev.err_db;
+        }
+        if n_bits == 16 {
+            sqnr_16 = ev.sqnr_db;
+        }
+        checksum = checksum + ev.sqnr_db;
+        idx = idx + 1;
+    }
+
+    if max_err_db <= 0.15 {
+        println!(
+            "[PASS] adc_sqnr_4_to_16bit max_err_db={:.6} sqnr_16bit_db={:.6}",
+            max_err_db, sqnr_16
+        );
+    } else {
+        println!("[FAIL] adc_sqnr_4_to_16bit max_err_db={:.6}", max_err_db);
+        failures = failures + 1;
+    }
+
+    // 2. Soft Analog Tape/Film Saturation Curve: y = tanh(drive * x) / tanh(drive)
+    let drive: f64 = 2.4;
+    let norm_t: f64 = det_tanh(drive);
+    let n_t: i32 = 1024;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut h1_s: f64 = 0.0;
+    let mut h2_s: f64 = 0.0;
+    let mut h3_s: f64 = 0.0;
+    let mut k: i32 = 0;
+    while k < n_t {
+        let ph: f64 = two_pi * 8.0 * ((k as f64) / (n_t as f64));
+        let y: f64 = det_tanh(drive * det_sin(ph)) / norm_t;
+        h1_s = h1_s + y * det_sin(ph);
+        h2_s = h2_s + y * det_sin(2.0 * ph);
+        h3_s = h3_s + y * det_sin(3.0 * ph);
+        k = k + 1;
+    }
+    let a1: f64 = abs_f64(h1_s) * 2.0 / (n_t as f64);
+    let a2: f64 = abs_f64(h2_s) * 2.0 / (n_t as f64);
+    let a3: f64 = abs_f64(h3_s) * 2.0 / (n_t as f64);
+    let thd3_pct: f64 = 100.0 * a3 / a1;
+    checksum = checksum + thd3_pct;
+    if thd3_pct > 5.0 && thd3_pct < 25.0 && a2 < 1.0e-12 {
+        println!(
+            "[PASS] analog_tape_saturation fund={:.6} h2_even={:.3e} h3_thd_pct={:.4}",
+            a1, a2, thd3_pct
+        );
+    } else {
+        println!("[FAIL] analog_tape_saturation h2={:.3e} thd3_pct={:.4}", a2, thd3_pct);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: Clipped-Overload 16-Bit ADC Input (amp=1.60 > 1.0 FS)
+    let ovl: AdcEval = eval_adc_mid_tread(16, 1.60);
+    if ovl.clipped_count > 1500 && ovl.sqnr_db < 15.0 {
+        println!(
+            "[PASS] planted_ctrl_overload_clip caught clipped={}/4096 sqnr_db={:.4}",
+            ovl.clipped_count, ovl.sqnr_db
+        );
+    } else {
+        println!("[FAIL] planted_ctrl_overload_clip missed clipped={} sqnr={:.4}", ovl.clipped_count, ovl.sqnr_db);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_D2] elapsed_ms={:.4} max_err_db={:.9} checksum={:.9} failures={}",
+        elapsed_ms, max_err_db, checksum, failures
+    );
+}
