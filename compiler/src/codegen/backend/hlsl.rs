@@ -1027,7 +1027,12 @@ impl HlslBackend {
                 // Map C runtime functions to HLSL equivalents
                 match name.as_ref() {
                     // Math
-                    "fabs" => "abs".to_string(),
+                    "fabs" | "fabsf" => "abs".to_string(),
+                    "expf" => "exp".to_string(),
+                    "exp2f" => "exp2".to_string(),
+                    "logf" => "log".to_string(),
+                    "log2f" => "log2".to_string(),
+                    "fma" | "fmaf" => "mad".to_string(),
                     // Vector math
                     "build_dot2" | "build_dot3" | "build_dot4" => "dot".to_string(),
                     "build_normalize2" | "build_normalize3" | "build_normalize4" => {

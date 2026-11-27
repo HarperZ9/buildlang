@@ -1572,11 +1572,14 @@ impl SpirvBackend {
             "round" => Some(1),        // GLSLstd450Round
             "exp" => Some(27),         // GLSLstd450Exp
             "log" => Some(28),         // GLSLstd450Log
+            "exp2" => Some(29),        // GLSLstd450Exp2
+            "log2" => Some(30),        // GLSLstd450Log2
 
-            // Standard math (2-arg)
-            "pow" => Some(26),                    // GLSLstd450Pow
-            "build_min_i32" | "fmin" => Some(37), // GLSLstd450FMin
-            "build_max_i32" | "fmax" => Some(40), // GLSLstd450FMax
+            // Standard math (2-arg / 3-arg)
+            "pow" => Some(26), // GLSLstd450Pow
+            "build_min_i32" | "build_min_f32" | "build_min_f64" | "fmin" => Some(37), // GLSLstd450FMin
+            "build_max_i32" | "build_max_f32" | "build_max_f64" | "fmax" => Some(40), // GLSLstd450FMax
+            "fma" | "fmaf" => Some(50), // GLSLstd450Fma
 
             // Shader math (2-arg or 3-arg)
             "build_clampf" => Some(43),     // GLSLstd450FClamp

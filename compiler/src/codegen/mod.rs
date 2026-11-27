@@ -62,11 +62,15 @@ pub mod superopt;
 pub use backend::{Backend, CodegenError, CodegenResult, StdioMode, Target};
 pub use builder::*;
 pub use gpu_polyhedral::{
-    GpuTvCertificate, PolyhedralSchedule, SubgroupMode, SubgroupReductionPlan, GPU_TV_CERT_SCHEMA,
+    CooperativeTilePlan, GpuTvCertificate, PolyhedralSchedule, SubgroupMode, SubgroupReductionOp,
+    SubgroupReductionPlan, GPU_TV_CERT_SCHEMA,
 };
 pub use ir::*;
 pub use lower::*;
-pub use superopt::{SuperoptCertificate, SuperoptRule, SuperoptStep, SUPEROPT_CERT_SCHEMA};
+pub use superopt::{
+    RewriteErrorWitness, SuperoptCertificate, SuperoptConfig, SuperoptRule, SuperoptStep,
+    SUPEROPT_CERT_SCHEMA,
+};
 
 use std::sync::Arc;
 
