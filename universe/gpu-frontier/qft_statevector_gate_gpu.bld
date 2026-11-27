@@ -1,0 +1,43 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: Quantum Fourier Transform (QFT) statevector butterfly gate kernel.
+// Applies a controlled phase rotation R_k followed by a unitary Hadamard butterfly to a
+// paired complex amplitude slice and reports conserved total probability mass.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn qft_statevector_gate_gpu(
+    cos_phi: f32,
+    sin_phi: f32,
+    inv_sqrt2: f32,
+    ar_buf: &[f32],
+    ai_buf: &[f32],
+    br_buf: &[f32],
+    bi_buf: &[f32],
+    ar_out: &mut [f32],
+    ai_out: &mut [f32],
+    br_out: &mut [f32],
+    bi_out: &mut [f32],
+    prob_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let ar: f32 = ar_buf[i];
+    let ai: f32 = ai_buf[i];
+    let br: f32 = br_buf[i];
+    let bi: f32 = bi_buf[i];
+
+    let br_rot: f32 = br * cos_phi - bi * sin_phi;
+    let bi_rot: f32 = br * sin_phi + bi * cos_phi;
+
+    let out_ar: f32 = inv_sqrt2 * (ar + br_rot);
+    let out_ai: f32 = inv_sqrt2 * (ai + bi_rot);
+    let out_br: f32 = inv_sqrt2 * (ar - br_rot);
+    let out_bi: f32 = inv_sqrt2 * (ai - bi_rot);
+
+    let prob: f32 = out_ar * out_ar + out_ai * out_ai + out_br * out_br + out_bi * out_bi;
+
+    ar_out[i] = out_ar;
+    ai_out[i] = out_ai;
+    br_out[i] = out_br;
+    bi_out[i] = out_bi;
+    prob_out[i] = prob;
+}

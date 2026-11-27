@@ -1,0 +1,76 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: Material Point Method (MPM) snow elastoplasticity kernel.
+// Projects trial singular values onto the snow yield surface, updates plastic hardening
+// Lame moduli, and evaluates principal fixed-corotated Cauchy stress components.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn mpm_snow_elastoplastic_gpu(
+    theta_c: f32,
+    theta_s: f32,
+    hardening_xi: f32,
+    mu0: f32,
+    lam0: f32,
+    s0_trial_buf: &[f32],
+    s1_trial_buf: &[f32],
+    jp_prev_buf: &[f32],
+    stress0_out: &mut [f32],
+    stress1_out: &mut [f32],
+    jp_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let s0_t: f32 = s0_trial_buf[i];
+    let s1_t: f32 = s1_trial_buf[i];
+    let lo: f32 = 1.0 - theta_c;
+    let hi: f32 = 1.0 + theta_s;
+
+    let mut se0: f32 = s0_t;
+    if se0 < lo {
+        se0 = lo;
+    }
+    if se0 > hi {
+        se0 = hi;
+    }
+
+    let mut se1: f32 = s1_t;
+    if se1 < lo {
+        se1 = lo;
+    }
+    if se1 > hi {
+        se1 = hi;
+    }
+
+    let je: f32 = se0 * se1;
+    let j_ratio: f32 = (s0_t * s1_t) / (je + 0.000001);
+    let mut jp_new: f32 = jp_prev_buf[i] * j_ratio;
+    if jp_new < 0.1 {
+        jp_new = 0.1;
+    }
+    if jp_new > 10.0 {
+        jp_new = 10.0;
+    }
+
+    let mut z: f32 = hardening_xi * (1.0 - jp_new);
+    if z < -2.0 {
+        z = -2.0;
+    }
+    if z > 2.0 {
+        z = 2.0;
+    }
+    let mut hard: f32 = 1.0 + z + 0.5 * z * z + 0.16666667 * z * z * z;
+    if hard < 0.25 {
+        hard = 0.25;
+    }
+    if hard > 8.0 {
+        hard = 8.0;
+    }
+
+    let mu: f32 = mu0 * hard;
+    let lam: f32 = lam0 * hard;
+    let vol_term: f32 = lam * (je - 1.0);
+    let inv_je: f32 = 1.0 / (je + 0.000001);
+
+    stress0_out[i] = (2.0 * mu * (se0 - 1.0) * se0 + vol_term * je) * inv_je;
+    stress1_out[i] = (2.0 * mu * (se1 - 1.0) * se1 + vol_term * je) * inv_je;
+    jp_out[i] = jp_new;
+}

@@ -1,0 +1,51 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: Instant-NGP neural radiance hash-grid interpolation and volume march.
+// Performs bilinear feature blending over four hashed grid corners, predicts non-negative
+// optical density sigma, and integrates Beer-Lambert transmittance and RGB radiance.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn neural_radiance_hashgrid_gpu(
+    dt_step: f32,
+    w_sigma: f32,
+    b_sigma: f32,
+    wx_buf: &[f32],
+    wy_buf: &[f32],
+    f00_buf: &[f32],
+    f01_buf: &[f32],
+    f10_buf: &[f32],
+    f11_buf: &[f32],
+    col_r_buf: &[f32],
+    col_g_buf: &[f32],
+    t_prev_buf: &[f32],
+    rad_r_prev_buf: &[f32],
+    rad_g_prev_buf: &[f32],
+    t_out: &mut [f32],
+    rad_r_out: &mut [f32],
+    rad_g_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let wx: f32 = wx_buf[i];
+    let wy: f32 = wy_buf[i];
+    let omx: f32 = 1.0 - wx;
+    let omy: f32 = 1.0 - wy;
+
+    let r0: f32 = omx * f00_buf[i] + wx * f10_buf[i];
+    let r1: f32 = omx * f01_buf[i] + wx * f11_buf[i];
+    let feat: f32 = omy * r0 + wy * r1;
+
+    let mut sigma: f32 = w_sigma * feat + b_sigma;
+    if sigma < 0.0 {
+        sigma = 0.0;
+    }
+
+    let tau: f32 = sigma * dt_step;
+    let atten: f32 = 1.0 / (1.0 + tau + 0.5 * tau * tau + 0.16666667 * tau * tau * tau);
+    let alpha: f32 = 1.0 - atten;
+
+    let t_prev: f32 = t_prev_buf[i];
+    let weight: f32 = t_prev * alpha;
+    t_out[i] = t_prev * atten;
+    rad_r_out[i] = rad_r_prev_buf[i] + weight * col_r_buf[i];
+    rad_g_out[i] = rad_g_prev_buf[i] + weight * col_g_buf[i];
+}
