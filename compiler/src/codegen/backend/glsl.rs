@@ -953,6 +953,9 @@ impl GlslBackend {
         match callee_name {
             Some("tex2d") => format!("texture(backbuffer, {})", arg_strs.join(", ")),
             Some("tex2d_depth") => format!("texture(depthbuffer, {}).r", arg_strs.join(", ")),
+            Some("fma") | Some("fmaf") if arg_strs.len() == 3 => {
+                format!("fma({}, {}, {})", arg_strs[0], arg_strs[1], arg_strs[2])
+            }
             _ => format!("{}({})", callee_str, arg_strs.join(", ")),
         }
     }
@@ -1453,6 +1456,13 @@ impl GlslBackend {
             MirRValue::BinaryOp { op, left, right } => {
                 let l = self.compute_value_to_glsl(left, &func.locals, bindings)?;
                 let r = self.compute_value_to_glsl(right, &func.locals, bindings)?;
+                // Wrapping-Add Spec Note (Wave 99B / Wave 106A):
+                // GLSL 450 (section 5.9, matching WGSL, HLSL, MSL, and SPIR-V) defines unsigned
+                // `uint` (`u32`) `+`, `-`, and `*` as exact two's-complement modular arithmetic
+                // modulo 2^32 (required by FIPS 180-4 SHA-256 and bitwise compute kernels).
+                // By contrast, BuildLang's CPU C backend inserts checked-overflow traps on
+                // `AddChecked` (`exit 101`). Compute shaders therefore lower all Add/Sub/Mul
+                // variants to native GLSL modular operators without software overflow traps.
                 let sym = match op {
                     BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
                         "+"
@@ -1563,6 +1573,18 @@ impl GlslBackend {
                 ));
             }
         };
+        if matches!(name, "fma" | "fmaf") {
+            if args.len() != 3 {
+                return Err(CodegenError::Unsupported(format!(
+                    "GLSL 450 `fma(a, b, c)` requires exactly 3 arguments, got {}",
+                    args.len()
+                )));
+            }
+            let a = self.compute_value_to_glsl(&args[0], locals, bindings)?;
+            let b = self.compute_value_to_glsl(&args[1], locals, bindings)?;
+            let c = self.compute_value_to_glsl(&args[2], locals, bindings)?;
+            return Ok(format!("fma({a}, {b}, {c})"));
+        }
         let mapped = match name {
             "fabs" | "fabsf" => "abs",
             "sqrtf" => "sqrt",
@@ -1574,7 +1596,6 @@ impl GlslBackend {
             "powf" => "pow",
             "floorf" => "floor",
             "ceilf" => "ceil",
-            "fmaf" => "fma",
             "build_dot2" | "build_dot3" | "build_dot4" => "dot",
             "build_normalize2" | "build_normalize3" | "build_normalize4" => "normalize",
             "build_length2" | "build_length3" | "build_length4" => "length",
