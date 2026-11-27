@@ -192,6 +192,42 @@ pub enum SuperoptRule {
     /// (`x + (-0.0) -> x`, `(-0.0) + x -> x`, `x - (+0.0) -> x`).
     #[serde(rename = "R30_FLOAT_SIGNED_ZERO_ID")]
     FloatSignedZeroId,
+    /// V7: Integer bitwise all-ones identity and absorption (`x & !0 -> x`, `x | !0 -> !0`).
+    #[serde(rename = "R31_INT_BIT_ALL_ONES")]
+    IntBitAllOnes,
+    /// V7: Integer bitwise complement laws (`x & ~x -> 0`, `x | ~x -> !0`, `x ^ ~x -> !0`).
+    #[serde(rename = "R32_INT_BIT_COMPLEMENT")]
+    IntBitComplement,
+    /// V7: Bitwise lattice absorption and XOR self-cancellation
+    /// (`x & (x | y) -> x`, `x | (x & y) -> x`, `x ^ (x ^ y) -> y`).
+    #[serde(rename = "R33_INT_BIT_ABSORPTION")]
+    IntBitAbsorption,
+    /// V7: Exact boolean logic and comparison identities (strictly `bool` operands).
+    #[serde(rename = "R34_BOOL_LOGIC_ID")]
+    BoolLogicId,
+    /// V7: Exact integer self-comparison and constant integer comparison folding
+    /// (strictly integer operands; never applied to floats due to IEEE-754 `NaN`).
+    #[serde(rename = "R35_INT_SELF_COMPARE")]
+    IntSelfCompare,
+    /// V7: Comparison negation (`!(a == b) -> a != b`, `!(a != b) -> a == b`, and
+    /// integer-only `!(a < b) -> a >= b`, `!(a <= b) -> a > b`, etc.; guards float `NaN`).
+    #[serde(rename = "R36_COMPARE_NEGATION")]
+    CompareNegation,
+    /// V7: Exact modular wrapping arithmetic identities, cancellations, and power-of-two
+    /// strength reductions (`AddWrapping`, `SubWrapping`, `MulWrapping` over `Z / 2^W Z`).
+    #[serde(rename = "R37_WRAPPING_ARITH_ID")]
+    WrappingArithId,
+    /// V7: Exact signed integer multiplication by `-1` (`x * (-1) -> -x`, preserving `INT_MIN` trap).
+    #[serde(rename = "R38_INT_MUL_NEG_ONE")]
+    IntMulNegOne,
+    /// V7: Unsigned shift-mask range simplifications
+    /// (`(u >> k) & full_low_mask -> u >> k`, `(u << k) & low_mask -> 0`, `(u & low_mask) >> k -> 0`).
+    #[serde(rename = "R39_UINT_SHIFT_MASK_SIMPLIFY")]
+    UintShiftMaskSimplify,
+    /// V7: Pointwise bitwise distributive factoring and De Morgan laws
+    /// (`(x & y) | (x & z) -> x & (y | z)`, `(~x) & (~y) -> ~(x | y)`, etc.).
+    #[serde(rename = "R40_INT_BIT_DISTRIBUTIVE_DEMORGAN")]
+    IntBitDistributiveDeMorgan,
 }
 
 /// Canonical pure expression term recorded in a certificate step.
@@ -1292,7 +1328,17 @@ pub fn expected_error_witness(rule: &SuperoptRule, before: &CertExpr) -> Rewrite
         | SuperoptRule::IntAssocConstFold
         | SuperoptRule::PureCse
         | SuperoptRule::RedundantLoadFold
-        | SuperoptRule::FloatSignedZeroId => RewriteErrorWitness::BitExact,
+        | SuperoptRule::FloatSignedZeroId
+        | SuperoptRule::IntBitAllOnes
+        | SuperoptRule::IntBitComplement
+        | SuperoptRule::IntBitAbsorption
+        | SuperoptRule::BoolLogicId
+        | SuperoptRule::IntSelfCompare
+        | SuperoptRule::CompareNegation
+        | SuperoptRule::WrappingArithId
+        | SuperoptRule::IntMulNegOne
+        | SuperoptRule::UintShiftMaskSimplify
+        | SuperoptRule::IntBitDistributiveDeMorgan => RewriteErrorWitness::BitExact,
         SuperoptRule::OnlineSoftmaxExpMulFuse | SuperoptRule::OnlineSoftmaxExpDivFuse => {
             RewriteErrorWitness::BoundedUlp { max_ulps: 2 }
         }
@@ -1399,14 +1445,400 @@ pub fn quantize_e2m1_block(block: &[f64], use_e8m0_pow2: bool) -> Result<(f64, V
     Ok((scale, q))
 }
 
+fn zero_int_const(ty: &MirType) -> CertExpr {
+    if ty.is_signed() {
+        CertExpr::Int(0, ty.clone())
+    } else {
+        CertExpr::Uint(0, ty.clone())
+    }
+}
+
+fn int_all_ones_const(ty: &MirType) -> Option<CertExpr> {
+    let bits = int_bit_width(ty)?;
+    if ty.is_signed() {
+        Some(CertExpr::Int(-1, ty.clone()))
+    } else {
+        let mask = if bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        };
+        Some(CertExpr::Uint(mask, ty.clone()))
+    }
+}
+
+fn is_all_ones_const(expr: &CertExpr, ty: &MirType) -> bool {
+    int_all_ones_const(ty).is_some_and(|all1| match (expr, &all1) {
+        (CertExpr::Int(v, et), CertExpr::Int(a, _)) => et == ty && v == a,
+        (CertExpr::Uint(v, et), CertExpr::Uint(a, _)) => et == ty && v == a,
+        _ => false,
+    })
+}
+
+fn eval_bool_binop(op: BinOp, l: bool, r: bool) -> Option<bool> {
+    match op {
+        BinOp::Eq => Some(l == r),
+        BinOp::Ne => Some(l != r),
+        BinOp::BitAnd => Some(l && r),
+        BinOp::BitOr => Some(l || r),
+        BinOp::BitXor => Some(l ^ r),
+        _ => None,
+    }
+}
+
+fn eval_int_compare(op: BinOp, left: &CertExpr, right: &CertExpr) -> Option<bool> {
+    match (left, right) {
+        (CertExpr::Int(l, lt), CertExpr::Int(r, rt)) if lt == rt && lt.is_integer() => match op {
+            BinOp::Eq => Some(l == r),
+            BinOp::Ne => Some(l != r),
+            BinOp::Lt => Some(l < r),
+            BinOp::Le => Some(l <= r),
+            BinOp::Gt => Some(l > r),
+            BinOp::Ge => Some(l >= r),
+            _ => None,
+        },
+        (CertExpr::Uint(l, lt), CertExpr::Uint(r, rt)) if lt == rt && lt.is_integer() => match op {
+            BinOp::Eq => Some(l == r),
+            BinOp::Ne => Some(l != r),
+            BinOp::Lt => Some(l < r),
+            BinOp::Le => Some(l <= r),
+            BinOp::Gt => Some(l > r),
+            BinOp::Ge => Some(l >= r),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn invert_compare_op(op: BinOp, allow_ordered: bool) -> Option<BinOp> {
+    match op {
+        BinOp::Eq => Some(BinOp::Ne),
+        BinOp::Ne => Some(BinOp::Eq),
+        BinOp::Lt if allow_ordered => Some(BinOp::Ge),
+        BinOp::Le if allow_ordered => Some(BinOp::Gt),
+        BinOp::Gt if allow_ordered => Some(BinOp::Le),
+        BinOp::Ge if allow_ordered => Some(BinOp::Lt),
+        _ => None,
+    }
+}
+
+fn try_bit_complement(
+    op: BinOp,
+    left: &CertExpr,
+    right: &CertExpr,
+    dest_ty: &MirType,
+) -> Option<CertExpr> {
+    if !matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) || !dest_ty.is_integer() {
+        return None;
+    }
+    let is_comp = |a: &CertExpr, b: &CertExpr| -> bool {
+        matches!(
+            b,
+            CertExpr::UnaryOp {
+                op: UnaryOp::BitNot,
+                operand
+            } if is_cert_atom(a) && operand.as_ref() == a
+        )
+    };
+    if is_comp(left, right) || is_comp(right, left) {
+        match op {
+            BinOp::BitAnd => Some(zero_int_const(dest_ty)),
+            BinOp::BitOr | BinOp::BitXor => int_all_ones_const(dest_ty),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+fn try_bit_absorption(op: BinOp, left: &CertExpr, right: &CertExpr) -> Option<CertExpr> {
+    let check_absorb = |atom: &CertExpr, nested: &CertExpr, inner_op: BinOp| -> Option<CertExpr> {
+        if !is_cert_atom(atom) {
+            return None;
+        }
+        if let CertExpr::BinOp {
+            op: nop,
+            left: nl,
+            right: nr,
+        } = nested
+        {
+            if *nop == inner_op && is_cert_atom(nl) && is_cert_atom(nr) {
+                if nl.as_ref() == atom {
+                    return Some(if op == BinOp::BitXor {
+                        nr.as_ref().clone()
+                    } else {
+                        atom.clone()
+                    });
+                }
+                if nr.as_ref() == atom {
+                    return Some(if op == BinOp::BitXor {
+                        nl.as_ref().clone()
+                    } else {
+                        atom.clone()
+                    });
+                }
+            }
+        }
+        None
+    };
+    match op {
+        BinOp::BitAnd => check_absorb(left, right, BinOp::BitOr)
+            .or_else(|| check_absorb(right, left, BinOp::BitOr)),
+        BinOp::BitOr => check_absorb(left, right, BinOp::BitAnd)
+            .or_else(|| check_absorb(right, left, BinOp::BitAnd)),
+        BinOp::BitXor => check_absorb(left, right, BinOp::BitXor)
+            .or_else(|| check_absorb(right, left, BinOp::BitXor)),
+        _ => None,
+    }
+}
+
+fn try_wrapping_cancel(op: BinOp, left: &CertExpr, right: &CertExpr) -> Option<CertExpr> {
+    match op {
+        // `(x.wrapping_add(y)).wrapping_sub(y) -> x` and `(y.wrapping_add(x)).wrapping_sub(y) -> x`
+        BinOp::SubWrapping => {
+            if is_cert_atom(right) {
+                if let CertExpr::BinOp {
+                    op: BinOp::AddWrapping,
+                    left: al,
+                    right: ar,
+                } = left
+                {
+                    if is_cert_atom(al) && is_cert_atom(ar) {
+                        if ar.as_ref() == right {
+                            return Some(al.as_ref().clone());
+                        }
+                        if al.as_ref() == right {
+                            return Some(ar.as_ref().clone());
+                        }
+                    }
+                }
+            }
+            None
+        }
+        // `(x.wrapping_sub(y)).wrapping_add(y) -> x` and `y.wrapping_add(x.wrapping_sub(y)) -> x`
+        BinOp::AddWrapping => {
+            let check = |sub_side: &CertExpr, atom: &CertExpr| -> Option<CertExpr> {
+                if !is_cert_atom(atom) {
+                    return None;
+                }
+                if let CertExpr::BinOp {
+                    op: BinOp::SubWrapping,
+                    left: sl,
+                    right: sr,
+                } = sub_side
+                {
+                    if is_cert_atom(sl) && sr.as_ref() == atom {
+                        return Some(sl.as_ref().clone());
+                    }
+                }
+                None
+            };
+            check(left, right).or_else(|| check(right, left))
+        }
+        _ => None,
+    }
+}
+
+fn try_uint_shift_mask_simplify(
+    op: BinOp,
+    left: &CertExpr,
+    right: &CertExpr,
+    dest_ty: &MirType,
+) -> Option<CertExpr> {
+    if !dest_ty.is_integer() || dest_ty.is_signed() {
+        return None;
+    }
+    let bits = int_bit_width(dest_ty)?;
+    let full_mask: u128 = if bits >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    };
+
+    match op {
+        BinOp::BitAnd => {
+            let check_shift_and =
+                |shift_side: &CertExpr, mask_side: &CertExpr| -> Option<CertExpr> {
+                    let CertExpr::Uint(mask, mty) = mask_side else {
+                        return None;
+                    };
+                    if mty != dest_ty {
+                        return None;
+                    }
+                    let CertExpr::BinOp {
+                        op: sop,
+                        left: base,
+                        right: shift_amt,
+                    } = shift_side
+                    else {
+                        return None;
+                    };
+                    if !is_cert_atom(base) {
+                        return None;
+                    }
+                    let k = match shift_amt.as_ref() {
+                        CertExpr::Uint(v, _) => *v,
+                        CertExpr::Int(v, _) if *v >= 0 => *v as u128,
+                        _ => return None,
+                    };
+                    if k == 0 || k >= bits as u128 {
+                        return None;
+                    }
+                    match sop {
+                        // `(u >> k) & mask -> u >> k` when `mask` covers all remaining low `bits - k` bits.
+                        BinOp::Shr => {
+                            let active_bits = full_mask >> (k as u32);
+                            if (mask & active_bits) == active_bits {
+                                Some(shift_side.clone())
+                            } else {
+                                None
+                            }
+                        }
+                        // `(u << k) & mask -> 0` when `mask` has zero overlap with shifted bits `[k, bits)`.
+                        BinOp::Shl => {
+                            let active_bits = (full_mask << (k as u32)) & full_mask;
+                            if (mask & active_bits) == 0 {
+                                Some(CertExpr::Uint(0, dest_ty.clone()))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+            check_shift_and(left, right).or_else(|| check_shift_and(right, left))
+        }
+        // `(u & mask) >> k -> 0` when `mask >> k == 0`.
+        BinOp::Shr => {
+            let k = match right {
+                CertExpr::Uint(v, _) => *v,
+                CertExpr::Int(v, _) if *v >= 0 => *v as u128,
+                _ => return None,
+            };
+            if k == 0 || k >= bits as u128 {
+                return None;
+            }
+            let CertExpr::BinOp {
+                op: BinOp::BitAnd,
+                left: al,
+                right: ar,
+            } = left
+            else {
+                return None;
+            };
+            let mask_val = match (al.as_ref(), ar.as_ref()) {
+                (base, CertExpr::Uint(m, mt)) | (CertExpr::Uint(m, mt), base)
+                    if is_cert_atom(base) && mt == dest_ty =>
+                {
+                    Some(*m)
+                }
+                _ => None,
+            }?;
+            if (mask_val >> (k as u32)) == 0 {
+                Some(CertExpr::Uint(0, dest_ty.clone()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn try_bit_distributive_demorgan(op: BinOp, left: &CertExpr, right: &CertExpr) -> Option<CertExpr> {
+    // De Morgan: `(~x) & (~y) -> ~(x | y)` and `(~x) | (~y) -> ~(x & y)` (cost 3 -> 2).
+    if matches!(op, BinOp::BitAnd | BinOp::BitOr) {
+        if let (
+            CertExpr::UnaryOp {
+                op: UnaryOp::BitNot,
+                operand: lx,
+            },
+            CertExpr::UnaryOp {
+                op: UnaryOp::BitNot,
+                operand: ry,
+            },
+        ) = (left, right)
+        {
+            if is_cert_atom(lx) && is_cert_atom(ry) {
+                let inner_op = if op == BinOp::BitAnd {
+                    BinOp::BitOr
+                } else {
+                    BinOp::BitAnd
+                };
+                return Some(CertExpr::UnaryOp {
+                    op: UnaryOp::BitNot,
+                    operand: Box::new(CertExpr::BinOp {
+                        op: inner_op,
+                        left: lx.clone(),
+                        right: ry.clone(),
+                    }),
+                });
+            }
+        }
+    }
+
+    // Distributive factoring (cost 3 -> 2):
+    // `(x & y) | (x & z) -> x & (y | z)`
+    // `(x | y) & (x | z) -> x | (y & z)`
+    // `(x & y) ^ (x & z) -> x & (y ^ z)`
+    let expected_inner = match op {
+        BinOp::BitOr | BinOp::BitXor => BinOp::BitAnd,
+        BinOp::BitAnd => BinOp::BitOr,
+        _ => return None,
+    };
+    let (
+        CertExpr::BinOp {
+            op: lop,
+            left: la,
+            right: lb,
+        },
+        CertExpr::BinOp {
+            op: rop,
+            left: ra,
+            right: rb,
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if *lop != expected_inner || *rop != expected_inner {
+        return None;
+    }
+    if !(is_cert_atom(la) && is_cert_atom(lb) && is_cert_atom(ra) && is_cert_atom(rb)) {
+        return None;
+    }
+    let shared = if la == ra {
+        Some((la.as_ref(), lb.as_ref(), rb.as_ref()))
+    } else if la == rb {
+        Some((la.as_ref(), lb.as_ref(), ra.as_ref()))
+    } else if lb == ra {
+        Some((lb.as_ref(), la.as_ref(), rb.as_ref()))
+    } else if lb == rb {
+        Some((lb.as_ref(), la.as_ref(), ra.as_ref()))
+    } else {
+        None
+    }?;
+    let (x, y, z) = shared;
+    Some(CertExpr::BinOp {
+        op: expected_inner,
+        left: Box::new(x.clone()),
+        right: Box::new(CertExpr::BinOp {
+            op,
+            left: Box::new(y.clone()),
+            right: Box::new(z.clone()),
+        }),
+    })
+}
+
 fn saturate_binop(
     op: BinOp,
     left: &CertExpr,
     right: &CertExpr,
     dest_ty: &MirType,
+    operand_ty: Option<&MirType>,
     allow_int_shift: bool,
     allow_fma_contract: bool,
     enable_v6: bool,
+    enable_v7: bool,
 ) -> Option<(CertExpr, SuperoptRule, u32, u32)> {
     let root = CertExpr::BinOp {
         op,
@@ -1676,6 +2108,333 @@ fn saturate_binop(
         if enable_v6 {
             if let Some(folded) = try_int_assoc_const_fold(op, left, right, dest_ty) {
                 eg.add_equiv(folded, SuperoptRule::IntAssocConstFold);
+            }
+        }
+
+        // V7 (R31, R32, R33, R37, R38, R39, R40) bit-exact integer rules.
+        if enable_v7 {
+            // R31: Bitwise all-ones identities (`x & !0 -> x`, `x | !0 -> !0`).
+            if op == BinOp::BitAnd {
+                if is_cert_atom(left) && is_all_ones_const(right, dest_ty) {
+                    eg.add_equiv(left.clone(), SuperoptRule::IntBitAllOnes);
+                }
+                if is_cert_atom(right) && is_all_ones_const(left, dest_ty) {
+                    eg.add_equiv(right.clone(), SuperoptRule::IntBitAllOnes);
+                }
+            } else if op == BinOp::BitOr {
+                if (is_cert_atom(left) && is_all_ones_const(right, dest_ty))
+                    || (is_cert_atom(right) && is_all_ones_const(left, dest_ty))
+                {
+                    if let Some(all1) = int_all_ones_const(dest_ty) {
+                        eg.add_equiv(all1, SuperoptRule::IntBitAllOnes);
+                    }
+                }
+            }
+
+            // R32: Bitwise complement laws (`x & ~x -> 0`, `x | ~x -> !0`, `x ^ ~x -> !0`).
+            if let Some(comp_res) = try_bit_complement(op, left, right, dest_ty) {
+                eg.add_equiv(comp_res, SuperoptRule::IntBitComplement);
+            }
+
+            // R33: Bitwise lattice absorption and XOR self-cancellation.
+            if let Some(abs_res) = try_bit_absorption(op, left, right) {
+                eg.add_equiv(abs_res, SuperoptRule::IntBitAbsorption);
+            }
+
+            // R37: Exact modular wrapping arithmetic identities, cancellations, and strength reductions.
+            match op {
+                BinOp::AddWrapping => {
+                    if is_cert_atom(left)
+                        && matches!(right, CertExpr::Int(0, _) | CertExpr::Uint(0, _))
+                    {
+                        eg.add_equiv(left.clone(), SuperoptRule::WrappingArithId);
+                    }
+                    if is_cert_atom(right)
+                        && matches!(left, CertExpr::Int(0, _) | CertExpr::Uint(0, _))
+                    {
+                        eg.add_equiv(right.clone(), SuperoptRule::WrappingArithId);
+                    }
+                    if let Some(cancel) = try_wrapping_cancel(op, left, right) {
+                        eg.add_equiv(cancel, SuperoptRule::WrappingArithId);
+                    }
+                }
+                BinOp::SubWrapping => {
+                    if is_cert_atom(left)
+                        && matches!(right, CertExpr::Int(0, _) | CertExpr::Uint(0, _))
+                    {
+                        eg.add_equiv(left.clone(), SuperoptRule::WrappingArithId);
+                    }
+                    if is_cert_atom(left) && left == right {
+                        eg.add_equiv(zero_int_const(dest_ty), SuperoptRule::WrappingArithId);
+                    }
+                    if let Some(cancel) = try_wrapping_cancel(op, left, right) {
+                        eg.add_equiv(cancel, SuperoptRule::WrappingArithId);
+                    }
+                }
+                BinOp::MulWrapping => {
+                    if is_cert_atom(left)
+                        && matches!(right, CertExpr::Int(1, _) | CertExpr::Uint(1, _))
+                    {
+                        eg.add_equiv(left.clone(), SuperoptRule::WrappingArithId);
+                    }
+                    if is_cert_atom(right)
+                        && matches!(left, CertExpr::Int(1, _) | CertExpr::Uint(1, _))
+                    {
+                        eg.add_equiv(right.clone(), SuperoptRule::WrappingArithId);
+                    }
+                    if (is_cert_atom(left)
+                        && matches!(right, CertExpr::Int(0, _) | CertExpr::Uint(0, _)))
+                        || (is_cert_atom(right)
+                            && matches!(left, CertExpr::Int(0, _) | CertExpr::Uint(0, _)))
+                    {
+                        eg.add_equiv(zero_int_const(dest_ty), SuperoptRule::WrappingArithId);
+                    }
+                    if is_cert_atom(left)
+                        && matches!(right, CertExpr::Int(2, _) | CertExpr::Uint(2, _))
+                    {
+                        eg.add_equiv(
+                            CertExpr::BinOp {
+                                op: BinOp::AddWrapping,
+                                left: Box::new(left.clone()),
+                                right: Box::new(left.clone()),
+                            },
+                            SuperoptRule::WrappingArithId,
+                        );
+                    }
+                    if is_cert_atom(right)
+                        && matches!(left, CertExpr::Int(2, _) | CertExpr::Uint(2, _))
+                    {
+                        eg.add_equiv(
+                            CertExpr::BinOp {
+                                op: BinOp::AddWrapping,
+                                left: Box::new(right.clone()),
+                                right: Box::new(right.clone()),
+                            },
+                            SuperoptRule::WrappingArithId,
+                        );
+                    }
+                    if allow_int_shift {
+                        let bits = int_bit_width(dest_ty).unwrap_or(32);
+                        let try_wpow2 = |var: &CertExpr,
+                                         c: u128,
+                                         c_ty: &MirType,
+                                         is_signed_c: bool|
+                         -> Option<CertExpr> {
+                            if is_cert_atom(var) && c > 2 && c.is_power_of_two() && c_ty == dest_ty
+                            {
+                                let shift = c.trailing_zeros();
+                                if shift < bits {
+                                    let sh_const = if is_signed_c {
+                                        CertExpr::Int(shift as i128, c_ty.clone())
+                                    } else {
+                                        CertExpr::Uint(shift as u128, c_ty.clone())
+                                    };
+                                    return Some(CertExpr::BinOp {
+                                        op: BinOp::Shl,
+                                        left: Box::new(var.clone()),
+                                        right: Box::new(sh_const),
+                                    });
+                                }
+                            }
+                            None
+                        };
+                        match right {
+                            CertExpr::Int(c, c_ty) if *c > 2 => {
+                                if let Some(shl) = try_wpow2(left, *c as u128, c_ty, true) {
+                                    eg.add_equiv(shl, SuperoptRule::WrappingArithId);
+                                }
+                            }
+                            CertExpr::Uint(c, c_ty) if *c > 2 => {
+                                if let Some(shl) = try_wpow2(left, *c, c_ty, false) {
+                                    eg.add_equiv(shl, SuperoptRule::WrappingArithId);
+                                }
+                            }
+                            _ => {}
+                        }
+                        match left {
+                            CertExpr::Int(c, c_ty) if *c > 2 => {
+                                if let Some(shl) = try_wpow2(right, *c as u128, c_ty, true) {
+                                    eg.add_equiv(shl, SuperoptRule::WrappingArithId);
+                                }
+                            }
+                            CertExpr::Uint(c, c_ty) if *c > 2 => {
+                                if let Some(shl) = try_wpow2(right, *c, c_ty, false) {
+                                    eg.add_equiv(shl, SuperoptRule::WrappingArithId);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            // R38: Signed integer `x * (-1) -> -x` (strictly signed integers; preserves INT_MIN trap).
+            if op == BinOp::Mul && dest_ty.is_signed() {
+                if is_cert_atom(left) && matches!(right, CertExpr::Int(-1, rt) if rt == dest_ty) {
+                    eg.add_equiv(
+                        CertExpr::UnaryOp {
+                            op: UnaryOp::Neg,
+                            operand: Box::new(left.clone()),
+                        },
+                        SuperoptRule::IntMulNegOne,
+                    );
+                }
+                if is_cert_atom(right) && matches!(left, CertExpr::Int(-1, lt) if lt == dest_ty) {
+                    eg.add_equiv(
+                        CertExpr::UnaryOp {
+                            op: UnaryOp::Neg,
+                            operand: Box::new(right.clone()),
+                        },
+                        SuperoptRule::IntMulNegOne,
+                    );
+                }
+            }
+
+            // R39: Unsigned shift-mask range simplification.
+            if let Some(sm_res) = try_uint_shift_mask_simplify(op, left, right, dest_ty) {
+                eg.add_equiv(sm_res, SuperoptRule::UintShiftMaskSimplify);
+            }
+
+            // R40: Bitwise distributive factoring and De Morgan laws.
+            if let Some(dm_res) = try_bit_distributive_demorgan(op, left, right) {
+                eg.add_equiv(dm_res, SuperoptRule::IntBitDistributiveDeMorgan);
+            }
+        }
+    }
+
+    // V7 (R34, R35): Strictly typed boolean logic and integer-only comparison rules.
+    if matches!(dest_ty, MirType::Bool) && enable_v7 {
+        // R34: Exact boolean logic & bool-equality identities (strictly bool operands).
+        let operands_are_bool = matches!(operand_ty, Some(MirType::Bool))
+            || matches!(left, CertExpr::Bool(_))
+            || matches!(right, CertExpr::Bool(_));
+        if operands_are_bool {
+            if let (CertExpr::Bool(lb), CertExpr::Bool(rb)) = (left, right) {
+                if let Some(res) = eval_bool_binop(op, *lb, *rb) {
+                    eg.add_equiv(CertExpr::Bool(res), SuperoptRule::BoolLogicId);
+                }
+            }
+            match op {
+                BinOp::Eq => {
+                    if is_cert_atom(left) && matches!(right, CertExpr::Bool(true)) {
+                        eg.add_equiv(left.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(right) && matches!(left, CertExpr::Bool(true)) {
+                        eg.add_equiv(right.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(left) && matches!(right, CertExpr::Bool(false)) {
+                        eg.add_equiv(
+                            CertExpr::UnaryOp {
+                                op: UnaryOp::Not,
+                                operand: Box::new(left.clone()),
+                            },
+                            SuperoptRule::BoolLogicId,
+                        );
+                    }
+                    if is_cert_atom(right) && matches!(left, CertExpr::Bool(false)) {
+                        eg.add_equiv(
+                            CertExpr::UnaryOp {
+                                op: UnaryOp::Not,
+                                operand: Box::new(right.clone()),
+                            },
+                            SuperoptRule::BoolLogicId,
+                        );
+                    }
+                    if is_cert_atom(left) && left == right {
+                        eg.add_equiv(CertExpr::Bool(true), SuperoptRule::BoolLogicId);
+                    }
+                }
+                BinOp::Ne => {
+                    if is_cert_atom(left) && matches!(right, CertExpr::Bool(false)) {
+                        eg.add_equiv(left.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(right) && matches!(left, CertExpr::Bool(false)) {
+                        eg.add_equiv(right.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(left) && matches!(right, CertExpr::Bool(true)) {
+                        eg.add_equiv(
+                            CertExpr::UnaryOp {
+                                op: UnaryOp::Not,
+                                operand: Box::new(left.clone()),
+                            },
+                            SuperoptRule::BoolLogicId,
+                        );
+                    }
+                    if is_cert_atom(right) && matches!(left, CertExpr::Bool(true)) {
+                        eg.add_equiv(
+                            CertExpr::UnaryOp {
+                                op: UnaryOp::Not,
+                                operand: Box::new(right.clone()),
+                            },
+                            SuperoptRule::BoolLogicId,
+                        );
+                    }
+                    if is_cert_atom(left) && left == right {
+                        eg.add_equiv(CertExpr::Bool(false), SuperoptRule::BoolLogicId);
+                    }
+                }
+                BinOp::BitAnd => {
+                    if is_cert_atom(left) && matches!(right, CertExpr::Bool(true)) {
+                        eg.add_equiv(left.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(right) && matches!(left, CertExpr::Bool(true)) {
+                        eg.add_equiv(right.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if matches!(left, CertExpr::Bool(false))
+                        || matches!(right, CertExpr::Bool(false))
+                    {
+                        eg.add_equiv(CertExpr::Bool(false), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(left) && left == right {
+                        eg.add_equiv(left.clone(), SuperoptRule::BoolLogicId);
+                    }
+                }
+                BinOp::BitOr => {
+                    if is_cert_atom(left) && matches!(right, CertExpr::Bool(false)) {
+                        eg.add_equiv(left.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(right) && matches!(left, CertExpr::Bool(false)) {
+                        eg.add_equiv(right.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if matches!(left, CertExpr::Bool(true)) || matches!(right, CertExpr::Bool(true))
+                    {
+                        eg.add_equiv(CertExpr::Bool(true), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(left) && left == right {
+                        eg.add_equiv(left.clone(), SuperoptRule::BoolLogicId);
+                    }
+                }
+                BinOp::BitXor => {
+                    if is_cert_atom(left) && matches!(right, CertExpr::Bool(false)) {
+                        eg.add_equiv(left.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(right) && matches!(left, CertExpr::Bool(false)) {
+                        eg.add_equiv(right.clone(), SuperoptRule::BoolLogicId);
+                    }
+                    if is_cert_atom(left) && left == right {
+                        eg.add_equiv(CertExpr::Bool(false), SuperoptRule::BoolLogicId);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // R35: Exact integer self-comparison and constant integer comparison folding.
+        // Strictly integer-only (NEVER float, where NaN == NaN is false and NaN != NaN is true).
+        let operands_are_int = operand_ty.is_some_and(MirType::is_integer);
+        if operands_are_int {
+            if let Some(res) = eval_int_compare(op, left, right) {
+                eg.add_equiv(CertExpr::Bool(res), SuperoptRule::IntSelfCompare);
+            } else if is_cert_atom(left) && left == right {
+                let folded = match op {
+                    BinOp::Eq | BinOp::Le | BinOp::Ge => Some(true),
+                    BinOp::Ne | BinOp::Lt | BinOp::Gt => Some(false),
+                    _ => None,
+                };
+                if let Some(b) = folded {
+                    eg.add_equiv(CertExpr::Bool(b), SuperoptRule::IntSelfCompare);
+                }
             }
         }
     }
@@ -2606,6 +3365,7 @@ fn superoptimize_function(
     allow_int_shift: bool,
     config: SuperoptConfig,
     enable_v6: bool,
+    enable_v7: bool,
     steps: &mut Vec<SuperoptStep>,
 ) {
     let (mutated_locals, single_def_locals, unsafe_const_locals, addr_taken_locals) =
@@ -2984,13 +3744,13 @@ fn superoptimize_function(
                     if let Some(CertExpr::UnaryOp {
                         op: inner_op,
                         operand: inner_val,
-                    }) = expanded_op
+                    }) = &expanded_op
                     {
-                        if inner_op == op && is_cert_atom(&inner_val) {
+                        if *inner_op == op && is_cert_atom(inner_val) {
                             let before_expr = CertExpr::UnaryOp {
                                 op,
                                 operand: Box::new(CertExpr::UnaryOp {
-                                    op: inner_op,
+                                    op: *inner_op,
                                     operand: inner_val.clone(),
                                 }),
                             };
@@ -3037,6 +3797,84 @@ fn superoptimize_function(
                                 });
                                 stmt_idx += 1;
                                 continue;
+                            }
+                        }
+                    }
+
+                    // V7 R36: Comparison negation (`!(a == b) -> a != b`, `!(a != b) -> a == b`,
+                    // and integer-only `!(a < b) -> a >= b`, etc. Strictly guards float NaN!).
+                    if enable_v7 && op == UnaryOp::Not {
+                        if let Some(CertExpr::BinOp {
+                            op: cmp_op,
+                            left: ca,
+                            right: cb,
+                        }) = &expanded_op
+                        {
+                            if is_cert_atom(ca) && is_cert_atom(cb) {
+                                let cert_atom_is_int = |e: &CertExpr| -> bool {
+                                    match e {
+                                        CertExpr::Int(_, ty) | CertExpr::Uint(_, ty) => {
+                                            ty.is_integer()
+                                        }
+                                        CertExpr::Local(id) => func
+                                            .locals
+                                            .get(*id as usize)
+                                            .is_some_and(|l| l.ty.is_integer()),
+                                        _ => false,
+                                    }
+                                };
+                                let both_int = cert_atom_is_int(ca) && cert_atom_is_int(cb);
+                                if let Some(inv_op) = invert_compare_op(*cmp_op, both_int) {
+                                    let before_expr = CertExpr::UnaryOp {
+                                        op: UnaryOp::Not,
+                                        operand: Box::new(CertExpr::BinOp {
+                                            op: *cmp_op,
+                                            left: ca.clone(),
+                                            right: cb.clone(),
+                                        }),
+                                    };
+                                    let after_expr = CertExpr::BinOp {
+                                        op: inv_op,
+                                        left: ca.clone(),
+                                        right: cb.clone(),
+                                    };
+                                    if let Some(new_rval) = cert_to_mir_rvalue(&after_expr) {
+                                        let cost_before = expr_cost(&before_expr);
+                                        let cost_after = expr_cost(&after_expr);
+                                        if let MirStmtKind::Assign {
+                                            value: ref mut v_slot,
+                                            ..
+                                        } = blocks[bi].stmts[stmt_idx].kind
+                                        {
+                                            *v_slot = new_rval;
+                                        }
+                                        if let MirValue::Local(op_id) = operand {
+                                            mark_eliminable_chain(
+                                                op_id,
+                                                &copy_origin,
+                                                &mut eliminable_locals,
+                                            );
+                                        }
+                                        let witness = expected_error_witness(
+                                            &SuperoptRule::CompareNegation,
+                                            &before_expr,
+                                        );
+                                        steps.push(SuperoptStep {
+                                            function: func_name.clone(),
+                                            block_id: blocks[bi].id.0,
+                                            stmt_index: stmt_idx,
+                                            dest_local: dest_id.0,
+                                            rule: SuperoptRule::CompareNegation,
+                                            before: before_expr,
+                                            after: after_expr,
+                                            cost_before,
+                                            cost_after,
+                                            error_witness: witness,
+                                        });
+                                        stmt_idx += 1;
+                                        continue;
+                                    }
+                                }
                             }
                         }
                     }
@@ -3254,15 +4092,34 @@ fn superoptimize_function(
                         continue;
                     };
 
-                    // First attempt atom-level saturation (R1..R14 + V6 R23..R26, R30).
+                    let operand_ty = match &left {
+                        MirValue::Local(id) => func.locals.get(id.0 as usize).map(|l| l.ty.clone()),
+                        MirValue::Const(MirConst::Bool(_)) => Some(MirType::Bool),
+                        MirValue::Const(MirConst::Int(_, ty))
+                        | MirValue::Const(MirConst::Uint(_, ty))
+                        | MirValue::Const(MirConst::Float(_, ty)) => Some(ty.clone()),
+                        _ => None,
+                    }
+                    .or_else(|| match &right {
+                        MirValue::Local(id) => func.locals.get(id.0 as usize).map(|l| l.ty.clone()),
+                        MirValue::Const(MirConst::Bool(_)) => Some(MirType::Bool),
+                        MirValue::Const(MirConst::Int(_, ty))
+                        | MirValue::Const(MirConst::Uint(_, ty))
+                        | MirValue::Const(MirConst::Float(_, ty)) => Some(ty.clone()),
+                        _ => None,
+                    });
+
+                    // First attempt atom-level saturation (R1..R14 + V6 R23..R26, R30 + V7 R31, R34, R35, R37, R38).
                     let atom_best = saturate_binop(
                         op,
                         &l_atom,
                         &r_atom,
                         &dest_ty,
+                        operand_ty.as_ref(),
                         allow_int_shift,
                         config.allow_fma_contract,
                         enable_v6,
+                        enable_v7,
                     );
                     if let Some((after_expr, rule, cost_before, cost_after)) = atom_best {
                         if let Some(new_rval) = cert_to_mir_rvalue(&after_expr) {
@@ -3377,9 +4234,11 @@ fn superoptimize_function(
                                 cl,
                                 cr,
                                 &dest_ty,
+                                operand_ty.as_ref(),
                                 allow_int_shift,
                                 config.allow_fma_contract,
                                 enable_v6,
+                                enable_v7,
                             ) {
                                 matched_compound =
                                     Some((cl.clone(), cr.clone(), use_l, use_r, res));
@@ -3402,9 +4261,16 @@ fn superoptimize_function(
                             };
                             let witness = expected_error_witness(&rule, &before_expr);
 
-                            // V6 R27: Integer associative constant folding emits directly as
-                            // a single MirRValue (`Use` or `BinaryOp`) and supersedes the inner def.
-                            if rule == SuperoptRule::IntAssocConstFold {
+                            // V6 R27 & V7 single-rvalue compound rewrites (R32, R33, R37, R39)
+                            // emit directly as a single MirRValue (`Use` or `BinaryOp`) and supersede inner defs.
+                            if matches!(
+                                rule,
+                                SuperoptRule::IntAssocConstFold
+                                    | SuperoptRule::IntBitComplement
+                                    | SuperoptRule::IntBitAbsorption
+                                    | SuperoptRule::WrappingArithId
+                                    | SuperoptRule::UintShiftMaskSimplify
+                            ) {
                                 if let Some(new_rval) = cert_to_mir_rvalue(&after_expr) {
                                     if let MirStmtKind::Assign {
                                         value: ref mut v_slot,
@@ -3412,6 +4278,11 @@ fn superoptimize_function(
                                     } = blocks[bi].stmts[stmt_idx].kind
                                     {
                                         *v_slot = new_rval.clone();
+                                    }
+                                    if !unsafe_const_locals.contains(&dest_id) {
+                                        if let MirRValue::Use(MirValue::Const(c)) = &new_rval {
+                                            const_env.insert(dest_id, c.clone());
+                                        }
                                     }
                                     if used_l_compound {
                                         if let MirValue::Local(lid) = left {
@@ -3855,6 +4726,153 @@ fn superoptimize_function(
                                         }
                                     }
 
+                                    // V7 R40: Bitwise distributive factoring & De Morgan (cost 3 -> 2).
+                                    // Require both compound operands to be strictly single-use so
+                                    // dead-def pruning monotonically reduces total module MIR cost.
+                                    (SuperoptRule::IntBitDistributiveDeMorgan, _)
+                                        if used_l_compound
+                                            && used_r_compound
+                                            && matches!(
+                                                left,
+                                                MirValue::Local(id)
+                                                    if initial_uses.get(&id).copied().unwrap_or(0) == 1
+                                            )
+                                            && matches!(
+                                                right,
+                                                MirValue::Local(id)
+                                                    if initial_uses.get(&id).copied().unwrap_or(0) == 1
+                                            ) =>
+                                    {
+                                        let emitted = match &after_expr {
+                                            // `x outer_op (y inner_op z)`
+                                            CertExpr::BinOp {
+                                                op: outer_op,
+                                                left: x_expr,
+                                                right: inner_box,
+                                            } => {
+                                                if let CertExpr::BinOp {
+                                                    op: inner_op,
+                                                    left: y_expr,
+                                                    right: z_expr,
+                                                } = inner_box.as_ref()
+                                                {
+                                                    if let (Some(vx), Some(vy), Some(vz)) = (
+                                                        cert_atom_to_mir_value(x_expr),
+                                                        cert_atom_to_mir_value(y_expr),
+                                                        cert_atom_to_mir_value(z_expr),
+                                                    ) {
+                                                        let tmp = alloc_fresh_local(
+                                                            &mut func.locals,
+                                                            dest_ty.clone(),
+                                                        );
+                                                        blocks[bi].stmts[stmt_idx] =
+                                                            MirStmt::assign(
+                                                                dest_id,
+                                                                MirRValue::BinaryOp {
+                                                                    op: *outer_op,
+                                                                    left: vx,
+                                                                    right: MirValue::Local(tmp),
+                                                                },
+                                                            );
+                                                        blocks[bi].stmts.insert(
+                                                            stmt_idx,
+                                                            MirStmt::assign(
+                                                                tmp,
+                                                                MirRValue::BinaryOp {
+                                                                    op: *inner_op,
+                                                                    left: vy,
+                                                                    right: vz,
+                                                                },
+                                                            ),
+                                                        );
+                                                        true
+                                                    } else {
+                                                        false
+                                                    }
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                            // `~(x inner_op y)`
+                                            CertExpr::UnaryOp {
+                                                op: UnaryOp::BitNot,
+                                                operand: inner_box,
+                                            } => {
+                                                if let CertExpr::BinOp {
+                                                    op: inner_op,
+                                                    left: x_expr,
+                                                    right: y_expr,
+                                                } = inner_box.as_ref()
+                                                {
+                                                    if let (Some(vx), Some(vy)) = (
+                                                        cert_atom_to_mir_value(x_expr),
+                                                        cert_atom_to_mir_value(y_expr),
+                                                    ) {
+                                                        let tmp = alloc_fresh_local(
+                                                            &mut func.locals,
+                                                            dest_ty.clone(),
+                                                        );
+                                                        blocks[bi].stmts[stmt_idx] =
+                                                            MirStmt::assign(
+                                                                dest_id,
+                                                                MirRValue::UnaryOp {
+                                                                    op: UnaryOp::BitNot,
+                                                                    operand: MirValue::Local(tmp),
+                                                                },
+                                                            );
+                                                        blocks[bi].stmts.insert(
+                                                            stmt_idx,
+                                                            MirStmt::assign(
+                                                                tmp,
+                                                                MirRValue::BinaryOp {
+                                                                    op: *inner_op,
+                                                                    left: vx,
+                                                                    right: vy,
+                                                                },
+                                                            ),
+                                                        );
+                                                        true
+                                                    } else {
+                                                        false
+                                                    }
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                            _ => false,
+                                        };
+                                        if emitted {
+                                            if let MirValue::Local(lid) = left {
+                                                mark_eliminable_chain(
+                                                    lid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            if let MirValue::Local(rid) = right {
+                                                mark_eliminable_chain(
+                                                    rid,
+                                                    &copy_origin,
+                                                    &mut eliminable_locals,
+                                                );
+                                            }
+                                            steps.push(SuperoptStep {
+                                                function: func_name.clone(),
+                                                block_id: blocks[bi].id.0,
+                                                stmt_index: stmt_idx,
+                                                dest_local: dest_id.0,
+                                                rule,
+                                                before: before_expr,
+                                                after: after_expr,
+                                                cost_before,
+                                                cost_after,
+                                                error_witness: witness,
+                                            });
+                                            stmt_idx += 2;
+                                            continue;
+                                        }
+                                    }
+
                                     _ => {}
                                 }
                             }
@@ -3911,18 +4929,32 @@ fn superoptimize_function(
                         collect_expr_locals(&cur_binop, &mut ls);
                         if !ls.contains(&dest_id) {
                             avail_exprs.push((cur_binop.clone(), dest_ty.clone(), dest_id));
-                            if dest_ty.is_integer()
+                            if ((dest_ty.is_integer()
                                 && matches!(
                                     op,
                                     BinOp::Add
                                         | BinOp::Sub
                                         | BinOp::Mul
+                                        | BinOp::AddWrapping
+                                        | BinOp::SubWrapping
+                                        | BinOp::MulWrapping
                                         | BinOp::Shl
                                         | BinOp::Shr
                                         | BinOp::BitAnd
                                         | BinOp::BitOr
                                         | BinOp::BitXor
-                                )
+                                ))
+                                || (enable_v7
+                                    && matches!(dest_ty, MirType::Bool)
+                                    && matches!(
+                                        op,
+                                        BinOp::Eq
+                                            | BinOp::Ne
+                                            | BinOp::Lt
+                                            | BinOp::Le
+                                            | BinOp::Gt
+                                            | BinOp::Ge
+                                    )))
                                 && is_cert_atom(&l_atom)
                                 && is_cert_atom(&r_atom)
                             {
@@ -4023,6 +5055,7 @@ fn superoptimize_module_internal(
     target: &str,
     config: SuperoptConfig,
     enable_v6: bool,
+    enable_v7: bool,
 ) -> Result<SuperoptCertificate, String> {
     let mir_before_sha256 = mir_digest(module)?;
     // WGSL requires unsigned u32 shift RHS (`<< u32(k)`), whereas C/MSL/RISC-V
@@ -4033,7 +5066,14 @@ fn superoptimize_module_internal(
     let functions_visited = module.functions.len();
 
     for func in &mut module.functions {
-        superoptimize_function(func, allow_int_shift, config, enable_v6, &mut steps);
+        superoptimize_function(
+            func,
+            allow_int_shift,
+            config,
+            enable_v6,
+            enable_v7,
+            &mut steps,
+        );
     }
 
     let mir_after_sha256 = mir_digest(module)?;
@@ -4060,7 +5100,7 @@ fn superoptimize_module_internal(
     Ok(cert)
 }
 
-/// Run V6 certified e-graph superoptimization across every function in `module`
+/// Run V7 certified e-graph superoptimization across every function in `module`
 /// with explicit configuration, independently verify the generated certificate
 /// fail-closed, and return it.
 pub fn superoptimize_module_with_config(
@@ -4068,19 +5108,40 @@ pub fn superoptimize_module_with_config(
     target: &str,
     config: SuperoptConfig,
 ) -> Result<SuperoptCertificate, String> {
-    superoptimize_module_internal(module, target, config, true)
+    superoptimize_module_internal(module, target, config, true, true)
+}
+
+/// Run V6-only baseline certified e-graph superoptimization (`R1..R30`) for
+/// direct V6-vs-V7 cost reduction benchmarking.
+pub fn superoptimize_module_v6_baseline(
+    module: &mut MirModule,
+    target: &str,
+) -> Result<SuperoptCertificate, String> {
+    superoptimize_module_internal(
+        module,
+        target,
+        SuperoptConfig::for_target(target),
+        true,
+        false,
+    )
 }
 
 /// Run V5-only baseline certified e-graph superoptimization (`R1..R20`) for
-/// direct V5-vs-V6 cost reduction benchmarking.
+/// direct V5-vs-V6/V7 cost reduction benchmarking.
 pub fn superoptimize_module_v5_baseline(
     module: &mut MirModule,
     target: &str,
 ) -> Result<SuperoptCertificate, String> {
-    superoptimize_module_internal(module, target, SuperoptConfig::for_target(target), false)
+    superoptimize_module_internal(
+        module,
+        target,
+        SuperoptConfig::for_target(target),
+        false,
+        false,
+    )
 }
 
-/// Run V6 certified e-graph superoptimization across every function in `module`,
+/// Run V7 certified e-graph superoptimization across every function in `module`,
 /// independently verify the generated certificate fail-closed, and return it.
 pub fn superoptimize_module(
     module: &mut MirModule,
@@ -4211,6 +5272,41 @@ pub fn verify_step_axiom(
             } else {
                 Err(format!(
                     "axiom violation for rule {:?}: before {:?} does not match redundant load witness {:?}",
+                    rule, before, after
+                ))
+            };
+        }
+        SuperoptRule::CompareNegation => {
+            let ok = match (before, after) {
+                (
+                    CertExpr::UnaryOp {
+                        op: UnaryOp::Not,
+                        operand,
+                    },
+                    CertExpr::BinOp {
+                        op: after_op,
+                        left: al,
+                        right: ar,
+                    },
+                ) => match operand.as_ref() {
+                    CertExpr::BinOp {
+                        op: before_op,
+                        left: bl,
+                        right: br,
+                    } if bl == al && br == ar => {
+                        let has_float = matches!(bl.as_ref(), CertExpr::FloatBits(_, _))
+                            || matches!(br.as_ref(), CertExpr::FloatBits(_, _));
+                        invert_compare_op(*before_op, !has_float) == Some(*after_op)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            return if ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "axiom violation for rule {:?}: before {:?} does not entail negated comparison {:?}",
                     rule, before, after
                 ))
             };
@@ -4724,12 +5820,215 @@ pub fn verify_step_axiom(
                 _ => false,
             }
         }
+        SuperoptRule::IntBitAllOnes => {
+            let inferred_ty = match (left.as_ref(), right.as_ref()) {
+                (_, CertExpr::Int(_, ty)) | (CertExpr::Int(_, ty), _) if ty.is_integer() => {
+                    Some(ty.clone())
+                }
+                (_, CertExpr::Uint(_, ty)) | (CertExpr::Uint(_, ty), _) if ty.is_integer() => {
+                    Some(ty.clone())
+                }
+                _ => None,
+            };
+            inferred_ty.is_some_and(|ty| match op {
+                BinOp::BitAnd => {
+                    (is_all_ones_const(right.as_ref(), &ty) && after == left.as_ref())
+                        || (is_all_ones_const(left.as_ref(), &ty) && after == right.as_ref())
+                }
+                BinOp::BitOr => {
+                    (is_all_ones_const(right.as_ref(), &ty)
+                        || is_all_ones_const(left.as_ref(), &ty))
+                        && is_all_ones_const(after, &ty)
+                }
+                _ => false,
+            })
+        }
+        SuperoptRule::IntBitComplement => {
+            let inferred_ty = match after {
+                CertExpr::Int(_, ty) | CertExpr::Uint(_, ty) if ty.is_integer() => Some(ty.clone()),
+                _ => None,
+            };
+            inferred_ty.is_some_and(|ty| {
+                try_bit_complement(*op, left.as_ref(), right.as_ref(), &ty).as_ref() == Some(after)
+            })
+        }
+        SuperoptRule::IntBitAbsorption => {
+            try_bit_absorption(*op, left.as_ref(), right.as_ref()).as_ref() == Some(after)
+        }
+        SuperoptRule::BoolLogicId => {
+            if matches!(left.as_ref(), CertExpr::FloatBits(_, _))
+                || matches!(right.as_ref(), CertExpr::FloatBits(_, _))
+            {
+                false
+            } else if let (CertExpr::Bool(lb), CertExpr::Bool(rb)) = (left.as_ref(), right.as_ref())
+            {
+                eval_bool_binop(*op, *lb, *rb).map(CertExpr::Bool).as_ref() == Some(after)
+            } else {
+                match op {
+                    BinOp::Eq => {
+                        (matches!(right.as_ref(), CertExpr::Bool(true)) && after == left.as_ref())
+                            || (matches!(left.as_ref(), CertExpr::Bool(true))
+                                && after == right.as_ref())
+                            || (matches!(right.as_ref(), CertExpr::Bool(false))
+                                && matches!(after, CertExpr::UnaryOp { op: UnaryOp::Not, operand } if operand.as_ref() == left.as_ref()))
+                            || (matches!(left.as_ref(), CertExpr::Bool(false))
+                                && matches!(after, CertExpr::UnaryOp { op: UnaryOp::Not, operand } if operand.as_ref() == right.as_ref()))
+                            || (left == right && matches!(after, CertExpr::Bool(true)))
+                    }
+                    BinOp::Ne => {
+                        (matches!(right.as_ref(), CertExpr::Bool(false)) && after == left.as_ref())
+                            || (matches!(left.as_ref(), CertExpr::Bool(false))
+                                && after == right.as_ref())
+                            || (matches!(right.as_ref(), CertExpr::Bool(true))
+                                && matches!(after, CertExpr::UnaryOp { op: UnaryOp::Not, operand } if operand.as_ref() == left.as_ref()))
+                            || (matches!(left.as_ref(), CertExpr::Bool(true))
+                                && matches!(after, CertExpr::UnaryOp { op: UnaryOp::Not, operand } if operand.as_ref() == right.as_ref()))
+                            || (left == right && matches!(after, CertExpr::Bool(false)))
+                    }
+                    BinOp::BitAnd => {
+                        (matches!(right.as_ref(), CertExpr::Bool(true)) && after == left.as_ref())
+                            || (matches!(left.as_ref(), CertExpr::Bool(true))
+                                && after == right.as_ref())
+                            || ((matches!(left.as_ref(), CertExpr::Bool(false))
+                                || matches!(right.as_ref(), CertExpr::Bool(false)))
+                                && matches!(after, CertExpr::Bool(false)))
+                            || (left == right && after == left.as_ref())
+                    }
+                    BinOp::BitOr => {
+                        (matches!(right.as_ref(), CertExpr::Bool(false)) && after == left.as_ref())
+                            || (matches!(left.as_ref(), CertExpr::Bool(false))
+                                && after == right.as_ref())
+                            || ((matches!(left.as_ref(), CertExpr::Bool(true))
+                                || matches!(right.as_ref(), CertExpr::Bool(true)))
+                                && matches!(after, CertExpr::Bool(true)))
+                            || (left == right && after == left.as_ref())
+                    }
+                    BinOp::BitXor => {
+                        (matches!(right.as_ref(), CertExpr::Bool(false)) && after == left.as_ref())
+                            || (matches!(left.as_ref(), CertExpr::Bool(false))
+                                && after == right.as_ref())
+                            || (left == right && matches!(after, CertExpr::Bool(false)))
+                    }
+                    _ => false,
+                }
+            }
+        }
+        SuperoptRule::IntSelfCompare => {
+            if matches!(left.as_ref(), CertExpr::FloatBits(_, _))
+                || matches!(right.as_ref(), CertExpr::FloatBits(_, _))
+            {
+                false
+            } else if let Some(b) = eval_int_compare(*op, left.as_ref(), right.as_ref()) {
+                after == &CertExpr::Bool(b)
+            } else if left == right {
+                match op {
+                    BinOp::Eq | BinOp::Le | BinOp::Ge => after == &CertExpr::Bool(true),
+                    BinOp::Ne | BinOp::Lt | BinOp::Gt => after == &CertExpr::Bool(false),
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
+        SuperoptRule::WrappingArithId => match op {
+            BinOp::AddWrapping => {
+                (matches!(right.as_ref(), CertExpr::Int(0, _) | CertExpr::Uint(0, _))
+                    && after == left.as_ref())
+                    || (matches!(left.as_ref(), CertExpr::Int(0, _) | CertExpr::Uint(0, _))
+                        && after == right.as_ref())
+                    || try_wrapping_cancel(*op, left.as_ref(), right.as_ref()).as_ref()
+                        == Some(after)
+            }
+            BinOp::SubWrapping => {
+                (matches!(right.as_ref(), CertExpr::Int(0, _) | CertExpr::Uint(0, _))
+                    && after == left.as_ref())
+                    || (left == right
+                        && matches!(after, CertExpr::Int(0, _) | CertExpr::Uint(0, _)))
+                    || try_wrapping_cancel(*op, left.as_ref(), right.as_ref()).as_ref()
+                        == Some(after)
+            }
+            BinOp::MulWrapping => {
+                let id_one = (matches!(right.as_ref(), CertExpr::Int(1, _) | CertExpr::Uint(1, _))
+                    && after == left.as_ref())
+                    || (matches!(left.as_ref(), CertExpr::Int(1, _) | CertExpr::Uint(1, _))
+                        && after == right.as_ref());
+                let ann_zero =
+                    (matches!(right.as_ref(), CertExpr::Int(0, _) | CertExpr::Uint(0, _))
+                        || matches!(left.as_ref(), CertExpr::Int(0, _) | CertExpr::Uint(0, _)))
+                        && matches!(after, CertExpr::Int(0, _) | CertExpr::Uint(0, _));
+                let mul_two = (matches!(
+                    right.as_ref(),
+                    CertExpr::Int(2, _) | CertExpr::Uint(2, _)
+                ) && matches!(after, CertExpr::BinOp { op: BinOp::AddWrapping, left: al, right: ar } if al == left && ar == left))
+                    || (matches!(left.as_ref(), CertExpr::Int(2, _) | CertExpr::Uint(2, _))
+                        && matches!(after, CertExpr::BinOp { op: BinOp::AddWrapping, left: al, right: ar } if al == right && ar == right));
+                let check_wpow2 = |var: &CertExpr, c_expr: &CertExpr| -> bool {
+                    let (c_val, ty) = match c_expr {
+                        CertExpr::Int(c, ty) if *c > 2 => (*c as u128, ty),
+                        CertExpr::Uint(c, ty) if *c > 2 => (*c, ty),
+                        _ => return false,
+                    };
+                    if !c_val.is_power_of_two() {
+                        return false;
+                    }
+                    let bits = int_bit_width(ty).unwrap_or(0);
+                    let shift = c_val.trailing_zeros();
+                    if shift >= bits {
+                        return false;
+                    }
+                    matches!(
+                        after,
+                        CertExpr::BinOp { op: BinOp::Shl, left: al, right: ar }
+                        if al.as_ref() == var && match ar.as_ref() {
+                            CertExpr::Int(sh, st) => st == ty && *sh == shift as i128,
+                            CertExpr::Uint(sh, st) => st == ty && *sh == shift as u128,
+                            _ => false,
+                        }
+                    )
+                };
+                id_one
+                    || ann_zero
+                    || mul_two
+                    || check_wpow2(left.as_ref(), right.as_ref())
+                    || check_wpow2(right.as_ref(), left.as_ref())
+            }
+            _ => false,
+        },
+        SuperoptRule::IntMulNegOne => {
+            *op == BinOp::Mul
+                && ((matches!(right.as_ref(), CertExpr::Int(-1, ty) if ty.is_signed())
+                    && matches!(after, CertExpr::UnaryOp { op: UnaryOp::Neg, operand } if operand.as_ref() == left.as_ref()))
+                    || (matches!(left.as_ref(), CertExpr::Int(-1, ty) if ty.is_signed())
+                        && matches!(after, CertExpr::UnaryOp { op: UnaryOp::Neg, operand } if operand.as_ref() == right.as_ref())))
+        }
+        SuperoptRule::UintShiftMaskSimplify => {
+            let inferred_ty = match after {
+                CertExpr::Uint(_, ty) => Some(ty.clone()),
+                CertExpr::BinOp { right: ar, .. } => match ar.as_ref() {
+                    CertExpr::Uint(_, ty) => Some(ty.clone()),
+                    _ => match (left.as_ref(), right.as_ref()) {
+                        (_, CertExpr::Uint(_, ty)) | (CertExpr::Uint(_, ty), _) => Some(ty.clone()),
+                        _ => None,
+                    },
+                },
+                _ => None,
+            };
+            inferred_ty.is_some_and(|ty| {
+                try_uint_shift_mask_simplify(*op, left.as_ref(), right.as_ref(), &ty).as_ref()
+                    == Some(after)
+            })
+        }
+        SuperoptRule::IntBitDistributiveDeMorgan => {
+            try_bit_distributive_demorgan(*op, left.as_ref(), right.as_ref()).as_ref()
+                == Some(after)
+        }
         SuperoptRule::LogExpCancel
         | SuperoptRule::HornerExp2Fma
         | SuperoptRule::UnaryConstFold
         | SuperoptRule::DoubleNegInvolution
         | SuperoptRule::PureCse
-        | SuperoptRule::RedundantLoadFold => unreachable!(),
+        | SuperoptRule::RedundantLoadFold
+        | SuperoptRule::CompareNegation => unreachable!(),
     };
 
     if ok {
