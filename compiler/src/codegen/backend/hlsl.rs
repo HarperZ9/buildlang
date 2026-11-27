@@ -797,7 +797,7 @@ impl HlslBackend {
             if let MirStmtKind::Assign { dest, value } = &stmt.kind {
                 if self.single_use_temps.contains(&dest.0) {
                     // Don't emit - store the expression for inlining at use site
-                    let expr_str = self.rvalue_to_hlsl(value, func);
+                    let expr_str = self.rvalue_to_hlsl(value, func)?;
                     self.inlined_exprs.borrow_mut().insert(dest.0, expr_str);
                     continue;
                 }
@@ -938,7 +938,7 @@ impl HlslBackend {
                     return Ok(());
                 }
                 let dest_name = self.local_name(*dest, &func.locals);
-                let val_str = self.rvalue_to_hlsl(value, func);
+                let val_str = self.rvalue_to_hlsl(value, func)?;
                 // Fold declaration with first assignment if eligible
                 if self.fold_decl.contains(&dest.0) && !self.declared.contains(&dest.0) {
                     let ty_str = self.type_to_hlsl(dest_ty.unwrap());
@@ -988,102 +988,177 @@ impl HlslBackend {
         Ok(())
     }
 
-    fn rvalue_to_hlsl(&self, rvalue: &MirRValue, func: &MirFunction) -> String {
+    fn infer_hlsl_value_type(value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
+        match value {
+            MirValue::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()),
+            MirValue::Const(c) => match c {
+                MirConst::Bool(_) => Some(MirType::Bool),
+                MirConst::Int(_, ty) | MirConst::Uint(_, ty) | MirConst::Float(_, ty) => {
+                    Some(ty.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn hlsl_shift_mask(ty: Option<&MirType>) -> u32 {
+        match ty {
+            Some(MirType::Int(IntSize::I8, _)) => 7,
+            Some(MirType::Int(IntSize::I16, _)) => 15,
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, _)) => 63,
+            _ => 31,
+        }
+    }
+
+    fn emit_binop_hlsl(
+        &self,
+        op: BinOp,
+        left: &MirValue,
+        right: &MirValue,
+        l: String,
+        r: String,
+        locals: &[MirLocal],
+    ) -> CodegenResult<String> {
+        let left_ty = Self::infer_hlsl_value_type(left, locals);
+        let right_ty = Self::infer_hlsl_value_type(right, locals);
+        let op_ty = left_ty.as_ref().or(right_ty.as_ref());
+        let is_float = op_ty.is_some_and(MirType::is_float);
+        let is_int = op_ty.is_some_and(MirType::is_integer);
+        match op {
+            BinOp::AddChecked
+            | BinOp::SubChecked
+            | BinOp::MulChecked
+            | BinOp::AddSaturating
+            | BinOp::SubSaturating
+            | BinOp::MulSaturating => Err(CodegenError::Unsupported(format!(
+                "MIR operator `{op:?}` is not supported in HLSL shaders"
+            ))),
+            BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping => {
+                if !is_int {
+                    return Err(CodegenError::Unsupported(format!(
+                        "wrapping operator `{op:?}` requires integer operands in HLSL"
+                    )));
+                }
+                let sym = match op {
+                    BinOp::AddWrapping => "+",
+                    BinOp::SubWrapping => "-",
+                    BinOp::MulWrapping => "*",
+                    _ => unreachable!(),
+                };
+                if op_ty.is_some_and(MirType::is_signed) {
+                    Ok(format!("asint((asuint({l}) {sym} asuint({r})))"))
+                } else {
+                    Ok(format!("({l} {sym} {r})"))
+                }
+            }
+            BinOp::Rem if is_float => Ok(format!("fmod({l}, {r})")),
+            BinOp::Pow => {
+                if is_int {
+                    return Err(CodegenError::Unsupported(
+                        "integer `Pow` is not supported in HLSL shaders".to_string(),
+                    ));
+                }
+                Ok(format!("pow({l}, {r})"))
+            }
+            BinOp::Shl | BinOp::Shr => {
+                let mask = Self::hlsl_shift_mask(left_ty.as_ref());
+                let sym = if matches!(op, BinOp::Shl) { "<<" } else { ">>" };
+                Ok(format!("({l} {sym} ((uint)({r}) & {mask}u))"))
+            }
+            BinOp::Add => Ok(format!("({l} + {r})")),
+            BinOp::Sub => Ok(format!("({l} - {r})")),
+            BinOp::Mul => Ok(format!("({l} * {r})")),
+            BinOp::Div => Ok(format!("({l} / {r})")),
+            BinOp::Rem => Ok(format!("({l} % {r})")),
+            BinOp::Eq => Ok(format!("({l} == {r})")),
+            BinOp::Ne => Ok(format!("({l} != {r})")),
+            BinOp::Lt => Ok(format!("({l} < {r})")),
+            BinOp::Le => Ok(format!("({l} <= {r})")),
+            BinOp::Gt => Ok(format!("({l} > {r})")),
+            BinOp::Ge => Ok(format!("({l} >= {r})")),
+            BinOp::BitAnd => Ok(format!("({l} & {r})")),
+            BinOp::BitOr => Ok(format!("({l} | {r})")),
+            BinOp::BitXor => Ok(format!("({l} ^ {r})")),
+        }
+    }
+
+    fn emit_cast_hlsl(
+        &self,
+        kind: CastKind,
+        value: &MirValue,
+        v: String,
+        ty: &MirType,
+        locals: &[MirLocal],
+    ) -> String {
+        if matches!(kind, CastKind::Transmute) {
+            let from_ty = Self::infer_hlsl_value_type(value, locals);
+            match (from_ty.as_ref(), ty) {
+                (Some(MirType::Float(FloatSize::F32)), MirType::Int(IntSize::I32, false)) => {
+                    return format!("asuint({v})");
+                }
+                (Some(MirType::Float(FloatSize::F32)), MirType::Int(IntSize::I32, true)) => {
+                    return format!("asint({v})");
+                }
+                (Some(MirType::Int(IntSize::I32, _)), MirType::Float(FloatSize::F32)) => {
+                    return format!("asfloat({v})");
+                }
+                _ => {}
+            }
+        }
+        let t = self.type_to_hlsl(ty);
+        format!("({t})({v})")
+    }
+
+    fn rvalue_to_hlsl(&self, rvalue: &MirRValue, func: &MirFunction) -> CodegenResult<String> {
         match rvalue {
-            MirRValue::Use(val) => self.value_to_hlsl(val, &func.locals),
+            MirRValue::Use(val) => Ok(self.value_to_hlsl(val, &func.locals)),
             MirRValue::BinaryOp { op, left, right } => {
                 let l = self.value_to_hlsl(left, &func.locals);
                 let r = self.value_to_hlsl(right, &func.locals);
-                if matches!(
-                    op,
-                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping
-                ) {
-                    let sym = match op {
-                        BinOp::AddWrapping => "+",
-                        BinOp::SubWrapping => "-",
-                        BinOp::MulWrapping => "*",
-                        _ => unreachable!(),
-                    };
-                    let is_signed_int = match left {
-                        MirValue::Local(id) => func
-                            .locals
-                            .get(id.0 as usize)
-                            .is_some_and(|loc| matches!(loc.ty, MirType::Int(_, true))),
-                        MirValue::Const(MirConst::Int(_, _)) => true,
-                        _ => false,
-                    };
-                    return if is_signed_int {
-                        format!("asint((asuint({}) {} asuint({})))", l, sym, r)
-                    } else {
-                        format!("({} {} {})", l, sym, r)
-                    };
-                }
-                let op_str = match op {
-                    BinOp::Add => "+",
-                    BinOp::Sub => "-",
-                    BinOp::Mul => "*",
-                    BinOp::Div => "/",
-                    BinOp::Rem => "%",
-                    BinOp::Eq => "==",
-                    BinOp::Ne => "!=",
-                    BinOp::Lt => "<",
-                    BinOp::Le => "<=",
-                    BinOp::Gt => ">",
-                    BinOp::Ge => ">=",
-                    BinOp::BitAnd => "&",
-                    BinOp::BitOr => "|",
-                    BinOp::BitXor => "^",
-                    BinOp::Shl => "<<",
-                    BinOp::Shr => ">>",
-                    BinOp::Pow => "pow", // handled as function call
-                    _ => "??",
-                };
-                if matches!(op, BinOp::Pow) {
-                    format!("pow({}, {})", l, r)
-                } else {
-                    format!("({} {} {})", l, op_str, r)
-                }
+                self.emit_binop_hlsl(*op, left, right, l, r, &func.locals)
             }
             MirRValue::UnaryOp { op, operand } => {
                 let v = self.value_to_hlsl(operand, &func.locals);
-                match op {
+                Ok(match op {
                     UnaryOp::Neg => format!("(-{})", v),
                     UnaryOp::Not => format!("(!{})", v),
                     UnaryOp::BitNot => format!("(~{})", v),
-                }
+                })
             }
-            MirRValue::Aggregate { kind, operands } => {
-                match kind {
-                    AggregateKind::Struct(name) => {
-                        // HLSL struct initialization
-                        let fields: Vec<String> = operands
-                            .iter()
-                            .map(|o| self.value_to_hlsl(o, &func.locals))
-                            .collect();
+            MirRValue::Aggregate { kind, operands } => match kind {
+                AggregateKind::Struct(name) => {
+                    // HLSL struct initialization
+                    let fields: Vec<String> = operands
+                        .iter()
+                        .map(|o| self.value_to_hlsl(o, &func.locals))
+                        .collect();
 
-                        // Map build_vec types to HLSL constructors
-                        match name.as_ref() {
-                            "build_vec2" => format!("float2({})", fields.join(", ")),
-                            "build_vec3" => format!("float3({})", fields.join(", ")),
-                            "build_vec4" => format!("float4({})", fields.join(", ")),
-                            _ => format!("{{ {} }}", fields.join(", ")),
-                        }
-                    }
-                    _ => "0".to_string(),
+                    // Map build_vec types to HLSL constructors
+                    Ok(match name.as_ref() {
+                        "build_vec2" => format!("float2({})", fields.join(", ")),
+                        "build_vec3" => format!("float3({})", fields.join(", ")),
+                        "build_vec4" => format!("float4({})", fields.join(", ")),
+                        _ => format!("{{ {} }}", fields.join(", ")),
+                    })
                 }
-            }
+                other => Err(CodegenError::Unsupported(format!(
+                    "aggregate kind `{other:?}` is not supported in HLSL"
+                ))),
+            },
             MirRValue::FieldAccess {
                 base, field_name, ..
             } => {
                 let b = self.value_to_hlsl(base, &func.locals);
-                format!("{}.{}", b, field_name)
+                Ok(format!("{}.{}", b, field_name))
             }
-            MirRValue::Cast { value, ty, .. } => {
+            MirRValue::Cast { kind, value, ty } => {
                 let v = self.value_to_hlsl(value, &func.locals);
-                let t = self.type_to_hlsl(ty);
-                format!("({})({})", t, v)
+                Ok(self.emit_cast_hlsl(*kind, value, v, ty, &func.locals))
             }
-            _ => "0".to_string(),
+            other => Err(CodegenError::Unsupported(format!(
+                "rvalue `{other:?}` is not supported in HLSL"
+            ))),
         }
     }
 
@@ -1102,11 +1177,23 @@ impl HlslBackend {
                 match name.as_ref() {
                     // Math
                     "fabs" | "fabsf" => "abs".to_string(),
+                    "sqrtf" => "sqrt".to_string(),
+                    "sinf" => "sin".to_string(),
+                    "cosf" => "cos".to_string(),
+                    "tanf" => "tan".to_string(),
                     "expf" => "exp".to_string(),
                     "exp2f" => "exp2".to_string(),
                     "logf" => "log".to_string(),
                     "log2f" => "log2".to_string(),
+                    "powf" => "pow".to_string(),
+                    "floorf" => "floor".to_string(),
+                    "ceilf" => "ceil".to_string(),
+                    "roundf" => "round".to_string(),
+                    "truncf" => "trunc".to_string(),
                     "fma" | "fmaf" => "mad".to_string(),
+                    // Bitcasts
+                    "build_f32_to_bits" => "asuint".to_string(),
+                    "build_f32_from_bits" => "asfloat".to_string(),
                     // Vector math
                     "build_dot2" | "build_dot3" | "build_dot4" => "dot".to_string(),
                     "build_normalize2" | "build_normalize3" | "build_normalize4" => {
@@ -1120,17 +1207,17 @@ impl HlslBackend {
                         "lerp".to_string()
                     }
                     // Shader math
-                    "build_clampf" | "build_clamp3" => "clamp".to_string(),
+                    "build_clampf" | "build_clamp3" | "build_clamp_i32" | "build_clamp_u32" => {
+                        "clamp".to_string()
+                    }
                     "build_smoothstep" => "smoothstep".to_string(),
                     "build_fract" => "frac".to_string(),
                     "build_step" => "step".to_string(),
                     // Min/max
-                    "build_min_f64" | "build_min_f32" | "build_min_i32" | "build_min_i64" => {
-                        "min".to_string()
-                    }
-                    "build_max_f64" | "build_max_f32" | "build_max_i32" | "build_max_i64" => {
-                        "max".to_string()
-                    }
+                    "fmin" | "fminf" | "build_min_f64" | "build_min_f32" | "build_min_i32"
+                    | "build_min_i64" | "build_min_u32" => "min".to_string(),
+                    "fmax" | "fmaxf" | "build_max_f64" | "build_max_f32" | "build_max_i32"
+                    | "build_max_i64" | "build_max_u32" => "max".to_string(),
                     // Texture sampling
                     "texture_sample" | "build_texture_sample" => "tex2D".to_string(),
                     // Vector constructors (mapped by aggregate, but handle if called as function)
@@ -1649,56 +1736,7 @@ impl HlslBackend {
             MirRValue::BinaryOp { op, left, right } => {
                 let l = self.compute_value_to_hlsl(left, &func.locals, bindings);
                 let r = self.compute_value_to_hlsl(right, &func.locals, bindings);
-                if matches!(
-                    op,
-                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping
-                ) {
-                    let sym = match op {
-                        BinOp::AddWrapping => "+",
-                        BinOp::SubWrapping => "-",
-                        BinOp::MulWrapping => "*",
-                        _ => unreachable!(),
-                    };
-                    let is_signed_int = match left {
-                        MirValue::Local(id) => func
-                            .locals
-                            .get(id.0 as usize)
-                            .is_some_and(|loc| matches!(loc.ty, MirType::Int(_, true))),
-                        MirValue::Const(MirConst::Int(_, _)) => true,
-                        _ => false,
-                    };
-                    return Ok(if is_signed_int {
-                        format!("asint((asuint({l}) {sym} asuint({r})))")
-                    } else {
-                        format!("({l} {sym} {r})")
-                    });
-                }
-                let sym = match op {
-                    BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
-                        "+"
-                    }
-                    BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
-                        "-"
-                    }
-                    BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
-                        "*"
-                    }
-                    BinOp::Div => "/",
-                    BinOp::Rem => "%",
-                    BinOp::Eq => "==",
-                    BinOp::Ne => "!=",
-                    BinOp::Lt => "<",
-                    BinOp::Le => "<=",
-                    BinOp::Gt => ">",
-                    BinOp::Ge => ">=",
-                    BinOp::BitAnd => "&",
-                    BinOp::BitOr => "|",
-                    BinOp::BitXor => "^",
-                    BinOp::Shl => "<<",
-                    BinOp::Shr => ">>",
-                    BinOp::Pow => return Ok(format!("pow({l}, {r})")),
-                };
-                Ok(format!("({l} {sym} {r})"))
+                self.emit_binop_hlsl(*op, left, right, l, r, &func.locals)
             }
             MirRValue::UnaryOp { op, operand } => {
                 let v = self.compute_value_to_hlsl(operand, &func.locals, bindings);
@@ -1708,10 +1746,9 @@ impl HlslBackend {
                     UnaryOp::BitNot => format!("(~{v})"),
                 })
             }
-            MirRValue::Cast { value, ty, .. } => {
+            MirRValue::Cast { kind, value, ty } => {
                 let v = self.compute_value_to_hlsl(value, &func.locals, bindings);
-                let t = self.type_to_hlsl(ty);
-                Ok(format!("({t})({v})"))
+                Ok(self.emit_cast_hlsl(*kind, value, v, ty, &func.locals))
             }
             MirRValue::FieldAccess {
                 base, field_name, ..
@@ -1750,10 +1787,14 @@ impl HlslBackend {
                         "build_vec4" => Ok(format!("float4({})", ops.join(", "))),
                         _ => Ok(format!("{{ {} }}", ops.join(", "))),
                     },
-                    _ => Ok("0".to_string()),
+                    other => Err(CodegenError::Unsupported(format!(
+                        "aggregate kind `{other:?}` is not supported in HLSL compute shaders"
+                    ))),
                 }
             }
-            _ => Ok("0".to_string()),
+            other => Err(CodegenError::Unsupported(format!(
+                "rvalue `{other:?}` is not supported in HLSL compute shaders"
+            ))),
         }
     }
 

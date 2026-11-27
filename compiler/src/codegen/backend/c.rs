@@ -5083,7 +5083,7 @@ impl CBackend {
                         }
                     };
                     if let Some(bits) = int_bits(left) {
-                        let op_str = self.binop_to_c(*op);
+                        let op_str = self.binop_to_c(*op)?;
                         return Ok(format!("({} {} (({}) & {}))", l, op_str, r, bits - 1));
                     }
                 }
@@ -5096,7 +5096,7 @@ impl CBackend {
                 {
                     "-"
                 } else {
-                    self.binop_to_c(*op)
+                    self.binop_to_c(*op)?
                 };
                 format!("({} {} {})", l, op_str, r)
             }
@@ -5167,9 +5167,41 @@ impl CBackend {
                     format!("(({}){}({}))", t, helper, v)
                 }
             }
-            MirRValue::Cast { kind: _, value, ty } => {
+            MirRValue::Cast { kind, value, ty } => {
                 let v = self.value_to_c(value, locals);
                 let t = self.type_to_c(ty);
+                if matches!(kind, CastKind::Transmute) {
+                    let from_ty = match value {
+                        MirValue::Local(id) => locals.get(id.0 as usize).map(|l| &l.ty),
+                        MirValue::Const(MirConst::Float(_, fty))
+                        | MirValue::Const(MirConst::Int(_, fty))
+                        | MirValue::Const(MirConst::Uint(_, fty)) => Some(fty),
+                        _ => None,
+                    };
+                    match (from_ty, ty) {
+                        (Some(MirType::Float(FloatSize::F32)), MirType::Int(IntSize::I32, _)) => {
+                            return Ok(format!(
+                                "(({t})(((union {{ float _f; uint32_t _u; }}){{ ._f = (float)({v}) }})._u))"
+                            ));
+                        }
+                        (Some(MirType::Int(IntSize::I32, _)), MirType::Float(FloatSize::F32)) => {
+                            return Ok(format!(
+                                "(((union {{ uint32_t _u; float _f; }}){{ ._u = (uint32_t)({v}) }})._f)"
+                            ));
+                        }
+                        (Some(MirType::Float(FloatSize::F64)), MirType::Int(IntSize::I64, _)) => {
+                            return Ok(format!(
+                                "(({t})(((union {{ double _f; uint64_t _u; }}){{ ._f = (double)({v}) }})._u))"
+                            ));
+                        }
+                        (Some(MirType::Int(IntSize::I64, _)), MirType::Float(FloatSize::F64)) => {
+                            return Ok(format!(
+                                "(((union {{ uint64_t _u; double _f; }}){{ ._u = (uint64_t)({v}) }})._f)"
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 format!("(({}){})", t, v)
             }
             MirRValue::Aggregate { kind, operands } => {
@@ -5956,26 +5988,38 @@ impl CBackend {
         Ok(())
     }
 
-    fn binop_to_c(&self, op: BinOp) -> &'static str {
+    fn binop_to_c(&self, op: BinOp) -> CodegenResult<&'static str> {
         match op {
-            BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => "+",
-            BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => "-",
-            BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => "*",
-            BinOp::Div => "/",
-            BinOp::Rem => "%",
-            BinOp::BitAnd => "&",
-            BinOp::BitOr => "|",
-            BinOp::BitXor => "^",
-            BinOp::Shl => "<<",
-            BinOp::Shr => ">>",
-            BinOp::Eq => "==",
-            BinOp::Ne => "!=",
-            BinOp::Lt => "<",
-            BinOp::Le => "<=",
-            BinOp::Gt => ">",
-            BinOp::Ge => ">=",
-            // Pow needs special handling with pow() function call, not an operator
-            BinOp::Pow => "/* pow */+",
+            BinOp::Add => Ok("+"),
+            BinOp::Sub => Ok("-"),
+            BinOp::Mul => Ok("*"),
+            BinOp::Div => Ok("/"),
+            BinOp::Rem => Ok("%"),
+            BinOp::BitAnd => Ok("&"),
+            BinOp::BitOr => Ok("|"),
+            BinOp::BitXor => Ok("^"),
+            BinOp::Shl => Ok("<<"),
+            BinOp::Shr => Ok(">>"),
+            BinOp::Eq => Ok("=="),
+            BinOp::Ne => Ok("!="),
+            BinOp::Lt => Ok("<"),
+            BinOp::Le => Ok("<="),
+            BinOp::Gt => Ok(">"),
+            BinOp::Ge => Ok(">="),
+            BinOp::Pow => Err(CodegenError::Internal(
+                "BinOp::Pow must be lowered via build_det_pow before binop_to_c".to_string(),
+            )),
+            BinOp::AddChecked
+            | BinOp::SubChecked
+            | BinOp::MulChecked
+            | BinOp::AddWrapping
+            | BinOp::SubWrapping
+            | BinOp::MulWrapping
+            | BinOp::AddSaturating
+            | BinOp::SubSaturating
+            | BinOp::MulSaturating => Err(CodegenError::Unsupported(format!(
+                "explicit MIR arithmetic operator `{op:?}` reached raw C binop lowering"
+            ))),
         }
     }
 

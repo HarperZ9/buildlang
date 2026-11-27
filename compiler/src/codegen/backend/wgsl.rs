@@ -567,16 +567,56 @@ impl WgslBackend {
                     .filter(|t| matches!(t, MirType::Int(IntSize::I32, _)));
                 let l = self.value_to_wgsl_typed(left, l_expected, &func.locals, bindings)?;
                 let r = self.value_to_wgsl_typed(right, r_expected, &func.locals, bindings)?;
+                let left_ty = Self::infer_value_type(left, &func.locals);
+                let right_ty = Self::infer_value_type(right, &func.locals);
+                let is_int = left_ty
+                    .as_ref()
+                    .or(right_ty.as_ref())
+                    .is_some_and(MirType::is_integer);
+                match op {
+                    BinOp::AddChecked
+                    | BinOp::SubChecked
+                    | BinOp::MulChecked
+                    | BinOp::AddSaturating
+                    | BinOp::SubSaturating
+                    | BinOp::MulSaturating => {
+                        return Err(CodegenError::Unsupported(format!(
+                            "MIR operator `{op:?}` is not supported in WGSL shaders"
+                        )));
+                    }
+                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping => {
+                        if !is_int {
+                            return Err(CodegenError::Unsupported(format!(
+                                "wrapping operator `{op:?}` requires integer operands in WGSL"
+                            )));
+                        }
+                        let sym = match op {
+                            BinOp::AddWrapping => "+",
+                            BinOp::SubWrapping => "-",
+                            BinOp::MulWrapping => "*",
+                            _ => unreachable!(),
+                        };
+                        return Ok(format!("({l} {sym} {r})"));
+                    }
+                    BinOp::Pow => {
+                        if is_int {
+                            return Err(CodegenError::Unsupported(
+                                "integer `Pow` is not supported in WGSL shaders".to_string(),
+                            ));
+                        }
+                        return Ok(format!("pow({l}, {r})"));
+                    }
+                    BinOp::Shl | BinOp::Shr => {
+                        let mask = Self::shift_mask(left_ty.as_ref());
+                        let sym = if matches!(op, BinOp::Shl) { "<<" } else { ">>" };
+                        return Ok(format!("({l} {sym} (u32({r}) & {mask}u))"));
+                    }
+                    _ => {}
+                }
                 let sym = match op {
-                    BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
-                        "+"
-                    }
-                    BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
-                        "-"
-                    }
-                    BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
-                        "*"
-                    }
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
                     BinOp::Div => "/",
                     BinOp::Rem => "%",
                     BinOp::Eq => "==",
@@ -588,9 +628,18 @@ impl WgslBackend {
                     BinOp::BitAnd => "&",
                     BinOp::BitOr => "|",
                     BinOp::BitXor => "^",
-                    BinOp::Shl => "<<",
-                    BinOp::Shr => ">>",
-                    BinOp::Pow => return Ok(format!("pow({l}, {r})")),
+                    BinOp::Shl
+                    | BinOp::Shr
+                    | BinOp::Pow
+                    | BinOp::AddChecked
+                    | BinOp::SubChecked
+                    | BinOp::MulChecked
+                    | BinOp::AddWrapping
+                    | BinOp::SubWrapping
+                    | BinOp::MulWrapping
+                    | BinOp::AddSaturating
+                    | BinOp::SubSaturating
+                    | BinOp::MulSaturating => unreachable!(),
                 };
                 Ok(format!("({l} {sym} {r})"))
             }
@@ -602,9 +651,20 @@ impl WgslBackend {
                     UnaryOp::BitNot => format!("(~{v})"),
                 })
             }
-            MirRValue::Cast { value, ty, .. } => {
+            MirRValue::Cast { kind, value, ty } => {
                 let v = self.value_to_wgsl(value, &func.locals, bindings)?;
                 let t = self.type_to_wgsl(ty)?;
+                if matches!(kind, CastKind::Transmute) {
+                    let from_ty = Self::infer_value_type(value, &func.locals);
+                    let is_float_int_reinterp = matches!(
+                        (from_ty.as_ref(), ty),
+                        (Some(MirType::Float(_)), MirType::Int(..))
+                            | (Some(MirType::Int(..)), MirType::Float(_))
+                    );
+                    if is_float_int_reinterp {
+                        return Ok(format!("bitcast<{t}>({v})"));
+                    }
+                }
                 Ok(format!("{t}({v})"))
             }
             MirRValue::FieldAccess {
@@ -719,10 +779,14 @@ impl WgslBackend {
             "cosf" => "cos",
             "tanf" => "tan",
             "expf" => "exp",
+            "exp2f" => "exp2",
             "logf" => "log",
+            "log2f" => "log2",
             "powf" => "pow",
             "floorf" => "floor",
             "ceilf" => "ceil",
+            "roundf" => "round",
+            "truncf" => "trunc",
             "fmaf" => "fma",
             "build_dot2" | "build_dot3" | "build_dot4" => "dot",
             "build_normalize2" | "build_normalize3" | "build_normalize4" => "normalize",
@@ -730,12 +794,16 @@ impl WgslBackend {
             "build_cross" => "cross",
             "build_reflect3" => "reflect",
             "build_mix" | "lerp" | "build_lerp2" | "build_lerp3" | "build_lerp4" => "mix",
-            "build_clampf" | "build_clamp3" => "clamp",
+            "build_clampf" | "build_clamp3" | "build_clamp_i32" | "build_clamp_u32" => "clamp",
             "build_smoothstep" => "smoothstep",
             "build_fract" => "fract",
             "build_step" => "step",
-            "build_min_f32" | "build_min_i32" => "min",
-            "build_max_f32" | "build_max_i32" => "max",
+            "fmin" | "fminf" | "build_min_f32" | "build_min_f64" | "build_min_i32"
+            | "build_min_i64" | "build_min_u32" => "min",
+            "fmax" | "fmaxf" | "build_max_f32" | "build_max_f64" | "build_max_i32"
+            | "build_max_i64" | "build_max_u32" => "max",
+            "build_f32_to_bits" => "bitcast<u32>",
+            "build_f32_from_bits" => "bitcast<f32>",
             "build_vec2_new" => "vec2<f32>",
             "build_vec3_new" => "vec3<f32>",
             "build_vec4_new" => "vec4<f32>",
@@ -747,6 +815,29 @@ impl WgslBackend {
             arg_strs.push(self.value_to_wgsl(a, locals, bindings)?);
         }
         Ok(format!("{mapped}({})", arg_strs.join(", ")))
+    }
+
+    fn infer_value_type(value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
+        match value {
+            MirValue::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()),
+            MirValue::Const(c) => match c {
+                MirConst::Bool(_) => Some(MirType::Bool),
+                MirConst::Int(_, ty) | MirConst::Uint(_, ty) | MirConst::Float(_, ty) => {
+                    Some(ty.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn shift_mask(ty: Option<&MirType>) -> u32 {
+        match ty {
+            Some(MirType::Int(IntSize::I8, _)) => 7,
+            Some(MirType::Int(IntSize::I16, _)) => 15,
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, _)) => 63,
+            _ => 31,
+        }
     }
 
     fn value_to_wgsl(
