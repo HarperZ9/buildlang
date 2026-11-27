@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: Rauch-Tung-Striebel (RTS) backward Kalman smoother kernel.
+// Computes RTS smoother gain C_k = P_k * F^T * P_{k+1|k}^{-1}, updates smoothed state
+// estimate x_{k|N}, and computes positive-definite smoothed covariance P_{k|N}.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn kalman_rts_smoother_gpu(
+    f_trans: f32,
+    eps: f32,
+    x_filt_buf: &[f32],
+    p_filt_buf: &[f32],
+    x_pred_next_buf: &[f32],
+    p_pred_next_buf: &[f32],
+    x_smooth_next_buf: &[f32],
+    p_smooth_next_buf: &[f32],
+    c_gain_out: &mut [f32],
+    x_smooth_out: &mut [f32],
+    p_smooth_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let pf: f32 = p_filt_buf[i];
+    let pp: f32 = p_pred_next_buf[i] + eps;
+    let ps: f32 = p_smooth_next_buf[i];
+
+    let c_gain: f32 = (pf * f_trans) / pp;
+    let x_smooth: f32 = x_filt_buf[i] + c_gain * (x_smooth_next_buf[i] - x_pred_next_buf[i]);
+    let mut p_smooth: f32 = pf + c_gain * c_gain * (ps - pp);
+    if p_smooth < eps {
+        p_smooth = eps;
+    }
+
+    c_gain_out[i] = c_gain;
+    x_smooth_out[i] = x_smooth;
+    p_smooth_out[i] = p_smooth;
+}

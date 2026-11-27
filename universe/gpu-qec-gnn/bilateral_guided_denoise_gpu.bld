@@ -1,0 +1,52 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: Edge-stopping A-Trous joint bilateral GI denoiser kernel.
+// Combines center and 4-tap cross taps weighted by luminance, normal-dot, and depth
+// edge-stopping functions to suppress Monte Carlo path-tracing variance while keeping edges.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn bilateral_guided_denoise_gpu(
+    inv_sig_l: f32,
+    inv_sig_z: f32,
+    c_lum_buf: &[f32],
+    c_z_buf: &[f32],
+    t0_lum_buf: &[f32],
+    t0_z_buf: &[f32],
+    t0_ndot_buf: &[f32],
+    t1_lum_buf: &[f32],
+    t1_z_buf: &[f32],
+    t1_ndot_buf: &[f32],
+    t2_lum_buf: &[f32],
+    t2_z_buf: &[f32],
+    t2_ndot_buf: &[f32],
+    denoise_out: &mut [f32],
+    w_sum_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let cl: f32 = c_lum_buf[i];
+    let cz: f32 = c_z_buf[i];
+
+    let dl0: f32 = (t0_lum_buf[i] - cl) * inv_sig_l;
+    let dz0: f32 = (t0_z_buf[i] - cz) * inv_sig_z;
+    let n0: f32 = t0_ndot_buf[i];
+    let e0: f32 = dl0 * dl0 + dz0 * dz0;
+    let w0: f32 = (n0 * n0 * n0 * n0) / (1.0 + e0 + 0.5 * e0 * e0);
+
+    let dl1: f32 = (t1_lum_buf[i] - cl) * inv_sig_l;
+    let dz1: f32 = (t1_z_buf[i] - cz) * inv_sig_z;
+    let n1: f32 = t1_ndot_buf[i];
+    let e1: f32 = dl1 * dl1 + dz1 * dz1;
+    let w1: f32 = (n1 * n1 * n1 * n1) / (1.0 + e1 + 0.5 * e1 * e1);
+
+    let dl2: f32 = (t2_lum_buf[i] - cl) * inv_sig_l;
+    let dz2: f32 = (t2_z_buf[i] - cz) * inv_sig_z;
+    let n2: f32 = t2_ndot_buf[i];
+    let e2: f32 = dl2 * dl2 + dz2 * dz2;
+    let w2: f32 = (n2 * n2 * n2 * n2) / (1.0 + e2 + 0.5 * e2 * e2);
+
+    let w_sum: f32 = 1.0 + w0 + w1 + w2;
+    let acc: f32 = cl + w0 * t0_lum_buf[i] + w1 * t1_lum_buf[i] + w2 * t2_lum_buf[i];
+
+    denoise_out[i] = acc / w_sum;
+    w_sum_out[i] = w_sum;
+}

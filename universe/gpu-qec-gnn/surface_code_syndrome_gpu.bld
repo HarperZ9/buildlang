@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: Surface-Code Quantum Error Correction (QEC) syndrome decoder kernel.
+// Evaluates 4-qubit X and Z stabilizer plaquette parities over bit-packed data qubits,
+// detects measurement defects across rounds, and emits greedy Pauli correction masks.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn surface_code_syndrome_gpu(
+    mask_plaq: u32,
+    q_n_buf: &[u32],
+    q_s_buf: &[u32],
+    q_e_buf: &[u32],
+    q_w_buf: &[u32],
+    prev_syn_buf: &[u32],
+    syn_out: &mut [u32],
+    defect_out: &mut [u32],
+    corr_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let qn: u32 = q_n_buf[i] & mask_plaq;
+    let qs: u32 = q_s_buf[i] & mask_plaq;
+    let qe: u32 = q_e_buf[i] & mask_plaq;
+    let qw: u32 = q_w_buf[i] & mask_plaq;
+
+    let syn: u32 = qn ^ qs ^ qe ^ qw;
+    let defect: u32 = syn ^ (prev_syn_buf[i] & mask_plaq);
+
+    // Greedy local minimum-weight pair flag when adjacent defect bits collide
+    let pair_e: u32 = defect & (defect >> 1);
+    let pair_s: u32 = defect & (defect >> 4);
+    let corr_mask: u32 = (pair_e | pair_s) ^ defect;
+
+    syn_out[i] = syn;
+    defect_out[i] = defect;
+    corr_out[i] = corr_mask;
+}

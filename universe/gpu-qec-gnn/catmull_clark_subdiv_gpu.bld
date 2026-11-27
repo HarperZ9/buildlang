@@ -1,0 +1,34 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: Catmull-Clark quad-mesh subdivision limit-vertex stencil kernel.
+// Evaluates face-point average F, edge-midpoint average R, and valence-n Catmull-Clark
+// vertex smoothing rule V_new = (F + 2*R + (n - 3)*V) / n in 3D coordinates.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn catmull_clark_subdiv_gpu(
+    valence: f32,
+    vx_buf: &[f32],
+    vy_buf: &[f32],
+    vz_buf: &[f32],
+    fx_buf: &[f32],
+    fy_buf: &[f32],
+    fz_buf: &[f32],
+    rx_buf: &[f32],
+    ry_buf: &[f32],
+    rz_buf: &[f32],
+    nx_out: &mut [f32],
+    ny_out: &mut [f32],
+    nz_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let inv_n: f32 = 1.0 / (valence + 0.000001);
+    let w_v: f32 = valence - 3.0;
+
+    let nx: f32 = (fx_buf[i] + 2.0 * rx_buf[i] + w_v * vx_buf[i]) * inv_n;
+    let ny: f32 = (fy_buf[i] + 2.0 * ry_buf[i] + w_v * vy_buf[i]) * inv_n;
+    let nz: f32 = (fz_buf[i] + 2.0 * rz_buf[i] + w_v * vz_buf[i]) * inv_n;
+
+    nx_out[i] = nx;
+    ny_out[i] = ny;
+    nz_out[i] = nz;
+}

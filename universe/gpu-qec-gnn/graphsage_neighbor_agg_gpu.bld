@@ -1,0 +1,56 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// QEC-GNN GPU 480-Pack: GraphSAGE neighbor attention aggregation and L2-norm kernel.
+// Computes attention-weighted neighborhood message pooling over three sampled neighbors,
+// fuses with self-node projection via ReLU activation, and normalizes embedding norm.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn graphsage_neighbor_agg_gpu(
+    w_self: f32,
+    w_nbr: f32,
+    bias: f32,
+    eps: f32,
+    h_self_buf: &[f32],
+    h_n0_buf: &[f32],
+    h_n1_buf: &[f32],
+    h_n2_buf: &[f32],
+    a0_buf: &[f32],
+    a1_buf: &[f32],
+    a2_buf: &[f32],
+    h_out: &mut [f32],
+    attn_sum_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut e0: f32 = a0_buf[i];
+    if e0 < 0.0 {
+        e0 = 0.2 * e0;
+    }
+    let mut e1: f32 = a1_buf[i];
+    if e1 < 0.0 {
+        e1 = 0.2 * e1;
+    }
+    let mut e2: f32 = a2_buf[i];
+    if e2 < 0.0 {
+        e2 = 0.2 * e2;
+    }
+
+    let w0: f32 = 1.0 / (1.0 + e0 * e0 + 0.5 * e0 * e0 * e0 * e0);
+    let w1: f32 = 1.0 / (1.0 + e1 * e1 + 0.5 * e1 * e1 * e1 * e1);
+    let w2: f32 = 1.0 / (1.0 + e2 * e2 + 0.5 * e2 * e2 * e2 * e2);
+    let w_sum: f32 = w0 + w1 + w2 + eps;
+    let inv_w: f32 = 1.0 / w_sum;
+
+    let agg: f32 = (w0 * h_n0_buf[i] + w1 * h_n1_buf[i] + w2 * h_n2_buf[i]) * inv_w;
+    let mut pre: f32 = w_self * h_self_buf[i] + w_nbr * agg + bias;
+    if pre < 0.0 {
+        pre = 0.0;
+    }
+
+    let n2: f32 = pre * pre + agg * agg + eps;
+    let mut norm: f32 = 0.5 * (n2 + 1.0);
+    norm = 0.5 * (norm + n2 / norm);
+    norm = 0.5 * (norm + n2 / norm);
+
+    h_out[i] = pre / (norm + eps);
+    attn_sum_out[i] = w_sum;
+}
