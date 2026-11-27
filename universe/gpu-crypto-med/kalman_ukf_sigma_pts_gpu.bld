@@ -1,0 +1,49 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Crypto-Med GPU 360-Pack: Unscented Kalman Filter (UKF) sigma-point propagation kernel.
+// Generates three symmetric sigma points via Newton-Raphson std-dev, propagates each
+// through nonlinear quadratic dynamics, and reconstructs posterior mean and variance.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn kalman_ukf_sigma_pts_gpu(
+    dt: f32,
+    drag_k: f32,
+    q_proc: f32,
+    w_m0: f32,
+    w_c0: f32,
+    w_i: f32,
+    gamma_scale: f32,
+    x_mean_buf: &[f32],
+    p_var_buf: &[f32],
+    u_ctrl_buf: &[f32],
+    mean_out: &mut [f32],
+    var_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let xm: f32 = x_mean_buf[i];
+    let pv: f32 = p_var_buf[i] + 0.000001;
+    let u: f32 = u_ctrl_buf[i];
+
+    let mut sd: f32 = 0.5 * (pv + 1.0);
+    sd = 0.5 * (sd + pv / sd);
+    sd = 0.5 * (sd + pv / sd);
+    sd = 0.5 * (sd + pv / sd);
+
+    let step: f32 = gamma_scale * sd;
+    let s0: f32 = xm;
+    let s1: f32 = xm + step;
+    let s2: f32 = xm - step;
+
+    let y0: f32 = s0 + dt * (u - drag_k * s0 * s0);
+    let y1: f32 = s1 + dt * (u - drag_k * s1 * s1);
+    let y2: f32 = s2 + dt * (u - drag_k * s2 * s2);
+
+    let y_mean: f32 = w_m0 * y0 + w_i * y1 + w_i * y2;
+    let d0: f32 = y0 - y_mean;
+    let d1: f32 = y1 - y_mean;
+    let d2: f32 = y2 - y_mean;
+    let y_var: f32 = w_c0 * d0 * d0 + w_i * (d1 * d1 + d2 * d2) + q_proc;
+
+    mean_out[i] = y_mean;
+    var_out[i] = y_var;
+}
