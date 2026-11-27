@@ -1,0 +1,189 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 53L - Author Idea B6: Bio-Sensor Quantum & Thermal Physical Limits
+// Part 1: Dark-adapted retinal rod Hecht-Shlaer-Pirenne (1942) Poisson photon-detection
+//         threshold (5-7 absorbed photons at 60% detection probability).
+// Part 2: Weber-Fechner logarithmic sensory compression across 6 decades (constant JND).
+// Part 3: Cochlear stereocilia thermal-Brownian displacement floor at 310 K (~2.07 nm).
+// Part 4: Planted zero-noise / sub-thermal impossible-sensitivity claim rejected fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 128.0;
+    let p6: f64 = 1.388888888888889e-3 + u * 1.984126984126984e-4;
+    let p5: f64 = 8.333333333333333e-3 + u * p6;
+    let p4: f64 = 4.1666666666666664e-2 + u * p5;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * p4)));
+    let mut i: i32 = 0;
+    while i < 7 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+fn det_ln(x: f64) -> f64 {
+    let mut v: f64 = x;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.69314718055994530942;
+    while v > 1.4142135623730951 {
+        v = v * 0.5;
+        k = k + 1;
+    }
+    while v < 0.7071067811865476 {
+        v = v * 2.0;
+        k = k - 1;
+    }
+    let y: f64 = (v - 1.0) / (v + 1.0);
+    let y2: f64 = y * y;
+    let mut term: f64 = y;
+    let mut sum: f64 = y;
+    let mut n: i32 = 1;
+    while n < 12 {
+        term = term * y2;
+        sum = sum + term / ((2 * n + 1) as f64);
+        n = n + 1;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut s: f64 = x;
+    let mut sc: f64 = 1.0;
+    while s < 0.25 {
+        s = s * 4.0;
+        sc = sc * 0.5;
+    }
+    while s >= 4.0 {
+        s = s * 0.25;
+        sc = sc * 2.0;
+    }
+    let mut g: f64 = 1.0;
+    let mut i: i32 = 0;
+    while i < 12 {
+        g = 0.5 * (g + s / g);
+        i = i + 1;
+    }
+    g * sc
+}
+
+// Poisson survival probability P(X >= k_thresh | mean = lam)
+fn poisson_detect_prob(lam: f64, k_thresh: i32) -> f64 {
+    let mut term: f64 = 1.0;
+    let mut sum: f64 = 1.0;
+    let mut k: i32 = 1;
+    while k < k_thresh {
+        term = term * lam / (k as f64);
+        sum = sum + term;
+        k = k + 1;
+    }
+    1.0 - det_exp(-lam) * sum
+}
+
+// Audit claimed mechanical displacement sensitivity against thermal Brownian floor
+fn audit_sensor_claim(temp_k: f64, stiffness_n_m: f64, claimed_disp_nm: f64) -> i32 {
+    if temp_k <= 0.0 || stiffness_n_m <= 0.0 || claimed_disp_nm <= 0.0 {
+        return 1;
+    }
+    let kb: f64 = 1.380649e-23;
+    let x_rms_nm: f64 = det_sqrt((kb * temp_k) / stiffness_n_m) * 1.0e9;
+    // Reject single-shot sub-thermal claims below 0.1 * x_rms as physically impossible without averaging
+    if claimed_disp_nm < 0.1 * x_rms_nm {
+        return 2;
+    }
+    0
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Hecht-Shlaer-Pirenne (1942) Dark-Adapted Retinal Rod Threshold (K=6 photons, 60% detect)
+    let mut lo: f64 = 1.0;
+    let mut hi: f64 = 15.0;
+    let mut it: i32 = 0;
+    while it < 60 {
+        let mid: f64 = 0.5 * (lo + hi);
+        if poisson_detect_prob(mid, 6) < 0.60 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        it = it + 1;
+    }
+    let n_60: f64 = 0.5 * (lo + hi);
+    let p_chk: f64 = poisson_detect_prob(n_60, 6);
+    if n_60 >= 5.0 && n_60 <= 7.0 && abs_f64(p_chk - 0.60) < 1.0e-12 {
+        println!(
+            "[PASS] retinal_rod_poisson n60_photons={:.9} p_detect={:.12}",
+            n_60, p_chk
+        );
+    } else {
+        println!("[FAIL] retinal_rod_poisson n60={:.6} p={:.9}", n_60, p_chk);
+        failures = failures + 1;
+    }
+
+    // 2. Weber-Fechner Sensory Compression Across 6 Decades (Weber fraction c_w = 0.05)
+    let c_w: f64 = 0.05;
+    let expected_jnd: f64 = det_ln(1.0 + c_w);
+    let mut max_jnd_err: f64 = 0.0;
+    let mut intensity: f64 = 1.0;
+    let mut dec: i32 = 0;
+    while dec < 6 {
+        let s1: f64 = det_ln(intensity);
+        let s2: f64 = det_ln(intensity * (1.0 + c_w));
+        let err: f64 = abs_f64((s2 - s1) - expected_jnd);
+        if err > max_jnd_err {
+            max_jnd_err = err;
+        }
+        intensity = intensity * 10.0;
+        dec = dec + 1;
+    }
+    if max_jnd_err <= 1.0e-12 {
+        println!(
+            "[PASS] weber_fechner_6decades jnd={:.9} max_err={:.3e}",
+            expected_jnd, max_jnd_err
+        );
+    } else {
+        println!("[FAIL] weber_fechner_6decades max_err={:.3e}", max_jnd_err);
+        failures = failures + 1;
+    }
+
+    // 3. Cochlear Stereocilia Thermal-Brownian Displacement Floor (T=310 K, k=1e-3 N/m)
+    let kb: f64 = 1.380649e-23;
+    let temp_k: f64 = 310.0;
+    let k_bundle: f64 = 1.0e-3;
+    let x_rms_nm: f64 = det_sqrt((kb * temp_k) / k_bundle) * 1.0e9;
+    if x_rms_nm > 1.5 && x_rms_nm < 3.0 && audit_sensor_claim(temp_k, k_bundle, x_rms_nm) == 0 {
+        println!("[PASS] cochlea_brownian_floor x_rms_nm={:.9}", x_rms_nm);
+    } else {
+        println!("[FAIL] cochlea_brownian_floor x_rms_nm={:.6}", x_rms_nm);
+        failures = failures + 1;
+    }
+
+    // 4. Planted Control: Zero-Noise & Sub-Thermal Impossible Sensitivity Claims Rejected
+    let c_zero_t: i32 = audit_sensor_claim(0.0, k_bundle, 1.0);
+    let c_sub_th: i32 = audit_sensor_claim(temp_k, k_bundle, 0.01);
+    if c_zero_t == 1 && c_sub_th == 2 {
+        println!("[PASS] planted_ctrl_impossible_sensor caught zero_t_code=1 sub_thermal_code=2");
+    } else {
+        println!("[FAIL] planted_ctrl_impossible_sensor missed c1={} c2={}", c_zero_t, c_sub_th);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    let checksum: f64 = n_60 + expected_jnd + x_rms_nm;
+    println!(
+        "[METRICS_B6] elapsed_ms={:.4} n60={:.9} x_rms_nm={:.9} checksum={:.9} failures={}",
+        elapsed_ms, n_60, x_rms_nm, checksum, failures
+    );
+}

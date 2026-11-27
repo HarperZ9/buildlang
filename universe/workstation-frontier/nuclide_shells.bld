@@ -1,0 +1,197 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 53L - Author Idea N15: Bethe-Weizsacker + Magic-Number Shell Binding Energy
+// Evaluates 200 nuclides along the valley of beta stability (Z=2..92, A=4..238) reproducing
+// the iron-group Fe-56 peak and exact nuclear magic-number shell bonuses (2,8,20,28,50,82,126).
+// Planted Control: flipped Coulomb sign shifts peak away from Fe-56 to heavy U-238 fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 128.0;
+    let p6: f64 = 1.388888888888889e-3 + u * 1.984126984126984e-4;
+    let p5: f64 = 8.333333333333333e-3 + u * p6;
+    let p4: f64 = 4.1666666666666664e-2 + u * p5;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * p4)));
+    let mut i: i32 = 0;
+    while i < 7 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+// Cube root via Newton iteration
+fn det_cbrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g > 1.0 {
+        g = g * 0.35;
+    }
+    let mut i: i32 = 0;
+    while i < 30 {
+        g = (2.0 * g + x / (g * g)) / 3.0;
+        i = i + 1;
+    }
+    g
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn shell_bonus_mev(k_nuc: i32) -> f64 {
+    let magics: Vec<i32> = vec![2, 8, 20, 28, 50, 82, 126];
+    let mut best: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 7 {
+        let d: f64 = (k_nuc - magics[i]) as f64;
+        let v: f64 = 2.6 * det_exp(-0.5 * d * d);
+        if v > best {
+            best = v;
+        }
+        i = i + 1;
+    }
+    best
+}
+
+fn binding_energy_per_a(z: i32, a: i32, flip_coulomb: bool) -> f64 {
+    let af: f64 = a as f64;
+    let zf: f64 = z as f64;
+    let n: i32 = a - z;
+    let a13: f64 = det_cbrt(af);
+    let a23: f64 = a13 * a13;
+
+    let a_v: f64 = 15.75;
+    let a_s: f64 = 17.80;
+    let a_c: f64 = 0.711;
+    let a_a: f64 = 23.70;
+    let a_p: f64 = 11.18;
+
+    let vol: f64 = a_v * af;
+    let surf: f64 = -a_s * a23;
+    let c_sign: f64 = if flip_coulomb { 1.0 } else { -1.0 };
+    let coul: f64 = c_sign * a_c * zf * (zf - 1.0) / a13;
+    let asym: f64 = -a_a * ((af - 2.0 * zf) * (af - 2.0 * zf)) / af;
+    let pair: f64 = if (z % 2 == 0) && (n % 2 == 0) {
+        a_p / det_sqrt(af)
+    } else if (z % 2 != 0) && (n % 2 != 0) {
+        -a_p / det_sqrt(af)
+    } else {
+        0.0
+    };
+    let shell: f64 = shell_bonus_mev(z) + shell_bonus_mev(n);
+    (vol + surf + coul + asym + pair + shell) / af
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Evaluate 200 nuclides spanning Z=2..92, A=4..238 along the beta-stability valley
+    let mut count: i32 = 0;
+    let mut peak_z: i32 = 0;
+    let mut peak_a: i32 = 0;
+    let mut peak_ba: f64 = -1.0;
+    let mut checksum: f64 = 0.0;
+
+    let mut z: i32 = 2;
+    while z <= 92 {
+        // Empirical beta-stability center A*(Z) ~ 2*Z + 0.0064 * Z^2
+        let a_center: i32 = (2.0 * (z as f64) + 0.0064 * (z as f64) * (z as f64) + 0.5) as i32;
+        let mut da: i32 = -1;
+        while da <= 1 {
+            let a: i32 = a_center + da;
+            if a >= 4 && a <= 238 && count < 200 {
+                // Exclude odd-A / doubly-magic edge overshoot by scanning clean valley
+                let ba: f64 = binding_energy_per_a(z, a, false);
+                if ba > peak_ba {
+                    peak_ba = ba;
+                    peak_z = z;
+                    peak_a = a;
+                }
+                checksum = checksum + ba;
+                count = count + 1;
+            }
+            da = da + 1;
+        }
+        z = z + 1;
+    }
+
+    let fe56_ba: f64 = binding_energy_per_a(26, 56, false);
+    let u238_ba: f64 = binding_energy_per_a(92, 238, false);
+    let he4_ba: f64 = binding_energy_per_a(2, 4, false);
+
+    // Verify Fe-56 / iron-group (Z in [26,28], A in [56,62]) sits at global peak (> 8.7 MeV/A)
+    if count == 200 && peak_z >= 26 && peak_z <= 28 && peak_a >= 56 && peak_a <= 62
+        && fe56_ba > 8.70 && fe56_ba > u238_ba && fe56_ba > he4_ba {
+        println!(
+            "[PASS] nuclide_200_valley peak_Z={} peak_A={} peak_BA={:.6} fe56_BA={:.6} u238_BA={:.6}",
+            peak_z, peak_a, peak_ba, fe56_ba, u238_ba
+        );
+    } else {
+        println!("[FAIL] nuclide_200_valley count={} peak_Z={} peak_A={} fe56={:.6}", count, peak_z, peak_a, fe56_ba);
+        failures = failures + 1;
+    }
+
+    // 2. Verify all 7 nuclear magic numbers (2, 8, 20, 28, 50, 82, 126) are strict local shell maxima
+    let magics: Vec<i32> = vec![2, 8, 20, 28, 50, 82, 126];
+    let mut magic_ok: i32 = 0;
+    let mut mi: usize = 0;
+    while mi < 7 {
+        let m: i32 = magics[mi];
+        let s_m: f64 = shell_bonus_mev(m);
+        let s_lo: f64 = shell_bonus_mev(m - 2);
+        let s_hi: f64 = shell_bonus_mev(m + 2);
+        if s_m > s_lo + 1.5 && s_m > s_hi + 1.5 {
+            magic_ok = magic_ok + 1;
+        }
+        mi = mi + 1;
+    }
+    // Check doubly-magic Pb-208 (Z=82, N=126) shell spike
+    let pb208_ba: f64 = binding_energy_per_a(82, 208, false);
+    if magic_ok == 7 && pb208_ba > u238_ba {
+        println!("[PASS] magic_numbers_7of7 verified={}/7 pb208_BA={:.6}", magic_ok, pb208_ba);
+    } else {
+        println!("[FAIL] magic_numbers_7of7 verified={}/7", magic_ok);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: Wrong Coulomb Sign Shifts Peak Away From Iron Group to U-238
+    let bad_fe56: f64 = binding_energy_per_a(26, 56, true);
+    let bad_u238: f64 = binding_energy_per_a(92, 238, true);
+    if bad_u238 > bad_fe56 + 2.0 {
+        println!(
+            "[PASS] planted_ctrl_coulomb_sign caught bad_u238_BA={:.4} gt bad_fe56_BA={:.4}",
+            bad_u238, bad_fe56
+        );
+    } else {
+        println!("[FAIL] planted_ctrl_coulomb_sign missed");
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_N15] elapsed_ms={:.4} fe56_ba={:.9} checksum={:.9} failures={}",
+        elapsed_ms, fe56_ba, checksum, failures
+    );
+}

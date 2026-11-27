@@ -1,0 +1,209 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 54C (E18): Declarative 5-Stage BuildLang Fail-Closed DAG Pipeline Runner
+// (Gather -> Decompose -> Verify -> Receipt -> Catalogue).
+// Proves exact topological execution on clean run, fail-closed halt when stage 3
+// (Verify) fails (downstream_executed == 0), and cycle detection fail-closed.
+
+fn fnv1a_mix(h: u64, v: u64) -> u64 {
+    let x: u64 = h ^ v;
+    x.wrapping_mul(1099511628211)
+}
+
+struct DagOutcome {
+    ok: i32,
+    cycle_detected: i32,
+    executed_count: i32,
+    downstream_executed: i32,
+    failed_stage: i32,
+    order_code: i64,
+    final_digest: u64,
+}
+
+// Run 5-stage DAG: edges stored as 5x5 flattened adjacency matrix adj[u*5 + v] == 1 means u -> v.
+// fail_stage_idx = -1 for clean run, or 0..4 to inject a planted failure in that stage.
+fn run_dag(adj: &Vec<i32>, fail_stage_idx: i32) -> DagOutcome {
+    let n: usize = 5;
+    let mut indeg: Vec<i32> = Vec::new();
+    let mut visited: Vec<i32> = Vec::new();
+    let mut stage_ok: Vec<i32> = Vec::new();
+    let mut digests: Vec<u64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        indeg.push(0);
+        visited.push(0);
+        stage_ok.push(0);
+        digests.push(0);
+        i = i + 1;
+    }
+
+    let mut u: usize = 0;
+    while u < n {
+        let mut v: usize = 0;
+        while v < n {
+            if adj[u * n + v] != 0 {
+                indeg[v] = indeg[v] + 1;
+            }
+            v = v + 1;
+        }
+        u = u + 1;
+    }
+
+    // Kahn topological ordering (deterministic lowest-index tie break)
+    let mut order: Vec<usize> = Vec::new();
+    let mut step: usize = 0;
+    while step < n {
+        let mut chosen: i32 = -1;
+        let mut c: usize = 0;
+        while c < n {
+            if visited[c] == 0 && indeg[c] == 0 {
+                chosen = c as i32;
+                c = n;
+            } else {
+                c = c + 1;
+            }
+        }
+        if chosen < 0 {
+            return DagOutcome {
+                ok: 0,
+                cycle_detected: 1,
+                executed_count: 0,
+                downstream_executed: 0,
+                failed_stage: -2,
+                order_code: 0,
+                final_digest: 0,
+            };
+        }
+        let cu: usize = chosen as usize;
+        visited[cu] = 1;
+        order.push(cu);
+        let mut v: usize = 0;
+        while v < n {
+            if adj[cu * n + v] != 0 {
+                indeg[v] = indeg[v] - 1;
+            }
+            v = v + 1;
+        }
+        step = step + 1;
+    }
+
+    // Execute stages strictly in topological order; fail-closed halts all downstream nodes immediately
+    let mut exec_cnt: i32 = 0;
+    let mut downstream_exec: i32 = 0;
+    let mut failed_at: i32 = -1;
+    let mut order_code: i64 = 0;
+    let mut halted: i32 = 0;
+
+    let mut idx: usize = 0;
+    while idx < n {
+        let st: usize = order[idx];
+        if halted != 0 {
+            // Must not execute any downstream node after failure
+            idx = idx + 1;
+        } else {
+            // Check all predecessors succeeded
+            let mut deps_ok: i32 = 1;
+            let mut d_hash: u64 = fnv1a_mix(14695981039346656037, (st + 101) as u64);
+            let mut p: usize = 0;
+            while p < n {
+                if adj[p * n + st] != 0 {
+                    if stage_ok[p] == 0 {
+                        deps_ok = 0;
+                    }
+                    d_hash = fnv1a_mix(d_hash, digests[p]);
+                }
+                p = p + 1;
+            }
+            if deps_ok == 0 {
+                halted = 1;
+                idx = idx + 1;
+            } else {
+                exec_cnt = exec_cnt + 1;
+                order_code = order_code * 10 + ((st + 1) as i64);
+                if fail_stage_idx >= 0 && (st as i32) > fail_stage_idx {
+                    downstream_exec = downstream_exec + 1;
+                }
+                if (st as i32) == fail_stage_idx {
+                    stage_ok[st] = 0;
+                    failed_at = st as i32;
+                    halted = 1;
+                } else {
+                    stage_ok[st] = 1;
+                    digests[st] = fnv1a_mix(d_hash, 0x51a9e001 + (st as u64));
+                }
+                idx = idx + 1;
+            }
+        }
+    }
+
+    DagOutcome {
+        ok: if halted == 0 && exec_cnt == 5 { 1 } else { 0 },
+        cycle_detected: 0,
+        executed_count: exec_cnt,
+        downstream_executed: downstream_exec,
+        failed_stage: failed_at,
+        order_code: order_code,
+        final_digest: digests[4],
+    }
+}
+
+fn build_linear_dag(add_cycle: i32) -> Vec<i32> {
+    let mut adj: Vec<i32> = Vec::new();
+    let mut i: usize = 0;
+    while i < 25 {
+        adj.push(0);
+        i = i + 1;
+    }
+    // 0:Gather -> 1:Decompose -> 2:Verify -> 3:Receipt -> 4:Catalogue
+    adj[0 * 5 + 1] = 1;
+    adj[1 * 5 + 2] = 1;
+    adj[2 * 5 + 3] = 1;
+    adj[3 * 5 + 4] = 1;
+    if add_cycle != 0 {
+        adj[4 * 5 + 0] = 1;
+    }
+    adj
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+    let clean_adj: Vec<i32> = build_linear_dag(0);
+    let cyclic_adj: Vec<i32> = build_linear_dag(1);
+
+    let r_clean: DagOutcome = run_dag(&clean_adj, -1);
+    let r_fail3: DagOutcome = run_dag(&clean_adj, 2); // Stage 3 (0-indexed 2 = Verify) fails
+    let r_cycle: DagOutcome = run_dag(&cyclic_adj, -1);
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if r_clean.ok != 1 || r_clean.executed_count != 5 || r_clean.order_code != 12345 {
+        failures = failures + 1;
+    }
+    if r_fail3.ok != 0 || r_fail3.executed_count != 3 || r_fail3.downstream_executed != 0 || r_fail3.failed_stage != 2 {
+        failures = failures + 1;
+    }
+    if r_cycle.ok != 0 || r_cycle.cycle_detected != 1 || r_cycle.executed_count != 0 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "DAG_PIPELINE status={} failures={} elapsed_ms={:.4} clean_exec={} clean_order={}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        r_clean.executed_count,
+        r_clean.order_code
+    );
+    let p2: String = format!(
+        "clean_digest={} fail3_exec={} fail3_downstream={} fail3_stage={} cycle_caught={}",
+        r_clean.final_digest,
+        r_fail3.executed_count,
+        r_fail3.downstream_executed,
+        r_fail3.failed_stage,
+        r_cycle.cycle_detected
+    );
+    println!("{} {}", p1, p2);
+}
