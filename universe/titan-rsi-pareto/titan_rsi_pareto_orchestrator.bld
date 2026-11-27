@@ -1,0 +1,278 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 149B (OPT-092; F1, N29, J13, N42, A14, N44, A18, N46, N49, N50, N53):
+// Pure-BuildLang Oracle-Gated Recursive Self-Improvement (RSI) Pareto Compute Allocator
+//   Models 100 cycles of oracle-gated multi-domain RSI across 8 specialist lanes with
+//   marginal-gain-per-joule Pareto allocation and a hard fail-closed Anti-Goodhart Rollback
+//   Valve that rejects unverified or proxy-drifting self-edits with zero regressions.
+
+fn fnv1a_byte(h: u64, b: u64) -> u64 {
+    ((h ^ (b & 255u64)) * 16777619u64) & 4294967295u64
+}
+
+fn lane_init_cap(l: i32) -> f64 {
+    if l == 0 { return 0.42; }
+    if l == 1 { return 0.48; }
+    if l == 2 { return 0.40; }
+    if l == 3 { return 0.38; }
+    if l == 4 { return 0.45; }
+    if l == 5 { return 0.44; }
+    if l == 6 { return 0.36; }
+    0.46
+}
+
+fn lane_ceiling(l: i32) -> f64 {
+    if l == 0 { return 1.80; }
+    if l == 1 { return 1.95; }
+    if l == 2 { return 1.75; }
+    if l == 3 { return 1.90; }
+    if l == 4 { return 1.70; }
+    if l == 5 { return 1.85; }
+    if l == 6 { return 1.88; }
+    1.78
+}
+
+fn lane_joule_base(l: i32) -> f64 {
+    if l == 0 { return 2.40; }
+    if l == 1 { return 3.10; }
+    if l == 2 { return 2.10; }
+    if l == 3 { return 2.80; }
+    if l == 4 { return 1.90; }
+    if l == 5 { return 2.50; }
+    if l == 6 { return 2.60; }
+    2.20
+}
+
+fn lane_base_gain(l: i32) -> f64 {
+    if l == 0 { return 0.052; }
+    if l == 1 { return 0.064; }
+    if l == 2 { return 0.048; }
+    if l == 3 { return 0.061; }
+    if l == 4 { return 0.043; }
+    if l == 5 { return 0.055; }
+    if l == 6 { return 0.058; }
+    0.049
+}
+
+// Fail-closed Anti-Goodhart Rollback Valve:
+//   Returns  1 ONLY when budget > 0, cost > 0, oracle verified (oracle_ok == 1),
+//   oracle_delta > 0.0, and proxy_drift <= max_drift.
+//   Returns -201 on non-positive budget/cost, -101 on oracle failure/regression,
+//   and -102 on proxy-drift breach.
+fn anti_goodhart_valve(
+    oracle_ok: i32,
+    oracle_delta: f64,
+    proxy_drift: f64,
+    max_drift: f64,
+    rem_budget: f64,
+    cost: f64,
+) -> i32 {
+    if rem_budget <= 0.0 || cost <= 0.0 {
+        return -201;
+    }
+    if oracle_ok == 0 || oracle_delta <= 0.0 {
+        return -101;
+    }
+    if proxy_drift > max_drift {
+        return -102;
+    }
+    1
+}
+
+fn sum_caps(caps: &Vec<f64>) -> f64 {
+    let mut s: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 8 {
+        s = s + caps[i];
+        i = i + 1;
+    }
+    s
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+    let n_cycles: i32 = 100;
+    let n_lanes: i32 = 8;
+    let n_cands: i32 = 32;
+    let cycle_budget: f64 = 6.0;
+    let max_drift: f64 = 0.05;
+    let audit_cost: f64 = 0.15;
+
+    let mut caps: Vec<f64> = Vec::new();
+    let mut l_i: i32 = 0;
+    while l_i < n_lanes {
+        caps.push(lane_init_cap(l_i));
+        l_i = l_i + 1;
+    }
+
+    let initial_score: f64 = sum_caps(&caps);
+    let mut prev_score: f64 = initial_score;
+    let mut accepted_edits: i32 = 0;
+    let mut goodhart_traps_total: i32 = 0;
+    let mut goodhart_traps_blocked: i32 = 0;
+    let mut regressions: i32 = 0;
+    let mut total_joules: f64 = 0.0;
+    let mut total_evals: i32 = 0;
+    let mut pareto_hash: u64 = 2166136261u64;
+
+    let mut cyc: i32 = 0;
+    while cyc < n_cycles {
+        let mut rem_budget: f64 = cycle_budget;
+        let mut step_in_cycle: i32 = 0;
+        while step_in_cycle < 2 {
+            let cur_sum: f64 = sum_caps(&caps);
+            let mean_cap: f64 = cur_sum * 0.125;
+            let syn: f64 = 1.0 + 0.12 * (mean_cap - 0.42);
+
+            let mut best_lane: i32 = -1;
+            let mut best_k: i32 = 0;
+            let mut best_ratio: f64 = -1.0;
+            let mut best_gain: f64 = 0.0;
+            let mut best_cost: f64 = 0.0;
+
+            let mut l: i32 = 0;
+            while l < n_lanes {
+                let cap_l: f64 = caps[l as usize];
+                let ceil_l: f64 = lane_ceiling(l);
+                let mut headroom: f64 = ceil_l - cap_l;
+                if headroom < 0.0 {
+                    headroom = 0.0;
+                }
+                let j_base: f64 = lane_joule_base(l);
+                let g_base: f64 = lane_base_gain(l);
+
+                let mut k: i32 = 0;
+                while k < n_cands {
+                    total_evals = total_evals + 1;
+                    let kf: f64 = k as f64;
+                    let cost: f64 = j_base * (0.75 + 0.025 * kf);
+                    if cost <= rem_budget && headroom > 0.0001 {
+                        let phase: f64 = ((cyc + l * 3 + k) % 7) as f64;
+                        let profile: f64 = 0.80 + 0.015 * kf - 0.00035 * kf * kf + 0.004 * phase;
+                        let est_gain: f64 = g_base * headroom * syn * profile;
+                        let ratio: f64 = est_gain / cost;
+                        if ratio > best_ratio {
+                            best_ratio = ratio;
+                            best_lane = l;
+                            best_k = k;
+                            best_gain = est_gain;
+                            best_cost = cost;
+                        }
+                    }
+                    k = k + 1;
+                }
+                l = l + 1;
+            }
+
+            if best_lane >= 0 {
+                let trap_tag: i32 = (cyc * 7 + best_lane + step_in_cycle * 3) % 5;
+                let is_goodhart_trap: bool = trap_tag == 0;
+                let oracle_ok: i32 = if is_goodhart_trap { 0 } else { 1 };
+                let oracle_delta: f64 = if is_goodhart_trap { -0.018 } else { best_gain };
+                let proxy_drift: f64 = if is_goodhart_trap { 0.24 } else { 0.012 };
+
+                if is_goodhart_trap {
+                    goodhart_traps_total = goodhart_traps_total + 1;
+                }
+
+                let verdict: i32 = anti_goodhart_valve(
+                    oracle_ok,
+                    oracle_delta,
+                    proxy_drift,
+                    max_drift,
+                    rem_budget,
+                    best_cost,
+                );
+                if verdict == 1 {
+                    let idx: usize = best_lane as usize;
+                    let mut next_cap: f64 = caps[idx] + oracle_delta;
+                    let ceil_b: f64 = lane_ceiling(best_lane);
+                    if next_cap > ceil_b {
+                        next_cap = ceil_b;
+                    }
+                    caps[idx] = next_cap;
+                    rem_budget = rem_budget - best_cost;
+                    total_joules = total_joules + best_cost;
+                    accepted_edits = accepted_edits + 1;
+                    pareto_hash = fnv1a_byte(pareto_hash, ((best_lane * 32 + best_k) & 255) as u64);
+                } else {
+                    if is_goodhart_trap {
+                        goodhart_traps_blocked = goodhart_traps_blocked + 1;
+                    }
+                    let mut charge: f64 = audit_cost;
+                    if charge > rem_budget {
+                        charge = rem_budget;
+                    }
+                    rem_budget = rem_budget - charge;
+                    total_joules = total_joules + charge;
+                    pareto_hash = fnv1a_byte(pareto_hash, (200 + best_lane) as u64);
+                }
+
+                let post_score: f64 = sum_caps(&caps);
+                if post_score + 0.000000000001 < prev_score {
+                    regressions = regressions + 1;
+                }
+                prev_score = post_score;
+            }
+            step_in_cycle = step_in_cycle + 1;
+        }
+        cyc = cyc + 1;
+    }
+
+    let final_score: f64 = sum_caps(&caps);
+    let compound_gain_x: f64 = final_score / initial_score;
+    let net_gain: f64 = final_score - initial_score;
+    let gain_per_joule: f64 = net_gain / total_joules;
+    let monotonic_ok: bool = (regressions == 0) && (final_score > initial_score);
+
+    // Planted Fail-Closed Controls (2 in-binary + 3rd forged cert in verifier)
+    // Control 1: Goodhart self-edit (oracle fail + proxy drift breach) rolled back with 0.0 state drift
+    let saved_c0: f64 = caps[0];
+    let v_ctrl1_oracle: i32 = anti_goodhart_valve(0, -0.05, 0.30, max_drift, 5.0, 2.0);
+    let v_ctrl1_drift: i32 = anti_goodhart_valve(1, 0.02, 0.18, max_drift, 5.0, 2.0);
+    if v_ctrl1_oracle == 1 || v_ctrl1_drift == 1 {
+        caps[0] = caps[0] + 1.0;
+    }
+    let ctrl1_goodhart_rolled_back: bool =
+        (v_ctrl1_oracle == -101) && (v_ctrl1_drift == -102) && (caps[0] == saved_c0);
+
+    // Control 2: Non-positive energy budget trapped fail-closed (-201)
+    let v_ctrl2_zero: i32 = anti_goodhart_valve(1, 0.05, 0.01, max_drift, 0.0, 2.0);
+    let v_ctrl2_neg: i32 = anti_goodhart_valve(1, 0.05, 0.01, max_drift, -3.5, 2.0);
+    let ctrl2_nonpos_budget_trapped: bool = (v_ctrl2_zero == -201) && (v_ctrl2_neg == -201);
+
+    let elapsed_ns: i64 = clock_ns() - t0;
+
+    let mut failures: i32 = 0;
+    if !monotonic_ok || regressions != 0 {
+        failures = failures + 1;
+    }
+    if goodhart_traps_total <= 0 || goodhart_traps_blocked != goodhart_traps_total {
+        failures = failures + 1;
+    }
+    if accepted_edits < 100 || compound_gain_x < 2.0 {
+        failures = failures + 1;
+    }
+    if !ctrl1_goodhart_rolled_back || !ctrl2_nonpos_budget_trapped {
+        failures = failures + 1;
+    }
+
+    println!(
+        "METRIC initial_score={:.12} final_score={:.12} compound_gain_x={:.12} net_gain={:.12}",
+        initial_score, final_score, compound_gain_x, net_gain
+    );
+    println!(
+        "METRIC total_joules={:.12} gain_per_joule={:.12} accepted_edits={} total_evals={}",
+        total_joules, gain_per_joule, accepted_edits, total_evals
+    );
+    println!(
+        "METRIC goodhart_traps_total={} goodhart_traps_blocked={} regressions={} monotonic_ok={}",
+        goodhart_traps_total, goodhart_traps_blocked, regressions, monotonic_ok
+    );
+    println!(
+        "METRIC pareto_hash={} ctrl1_goodhart_rolled_back={} ctrl2_nonpos_budget_trapped={} elapsed_ns={}",
+        pareto_hash, ctrl1_goodhart_rolled_back, ctrl2_nonpos_budget_trapped, elapsed_ns
+    );
+    println!("SUMMARY failures={}", failures);
+}

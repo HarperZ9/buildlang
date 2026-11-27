@@ -1,0 +1,66 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Astro-Robotics GPU 440-Pack: Robotic arm cyclic-coordinate-descent (CCD) IK kernel.
+// Computes joint-to-effector and joint-to-target 3D vectors, evaluates bounded rotation
+// increment with joint-angle limits, and updates rotated end-effector coordinates.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn inverse_kinematics_ccd_gpu(
+    damping: f32,
+    theta_min: f32,
+    theta_max: f32,
+    jx_buf: &[f32],
+    jy_buf: &[f32],
+    ex_buf: &[f32],
+    ey_buf: &[f32],
+    tx_buf: &[f32],
+    ty_buf: &[f32],
+    theta_prev_buf: &[f32],
+    theta_out: &mut [f32],
+    ex_out: &mut [f32],
+    ey_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let jx: f32 = jx_buf[i];
+    let jy: f32 = jy_buf[i];
+    let vx: f32 = ex_buf[i] - jx;
+    let vy: f32 = ey_buf[i] - jy;
+    let wx: f32 = tx_buf[i] - jx;
+    let wy: f32 = ty_buf[i] - jy;
+
+    let v2: f32 = vx * vx + vy * vy + 0.000001;
+    let w2: f32 = wx * wx + wy * wy + 0.000001;
+    let prod: f32 = v2 * w2;
+    let mut denom: f32 = 0.5 * (prod + 1.0);
+    denom = 0.5 * (denom + prod / denom);
+    denom = 0.5 * (denom + prod / denom);
+    let inv_d: f32 = 1.0 / (denom + 0.000001);
+
+    let cos_a: f32 = (vx * wx + vy * wy) * inv_d;
+    let sin_a: f32 = (vx * wy - vy * wx) * inv_d;
+
+    let mut d_theta: f32 = damping * sin_a / (1.0 + 0.25 * (1.0 - cos_a));
+    if d_theta > 0.5 {
+        d_theta = 0.5;
+    }
+    if d_theta < -0.5 {
+        d_theta = -0.5;
+    }
+
+    let mut theta_new: f32 = theta_prev_buf[i] + d_theta;
+    if theta_new < theta_min {
+        theta_new = theta_min;
+    }
+    if theta_new > theta_max {
+        theta_new = theta_max;
+    }
+
+    let step: f32 = theta_new - theta_prev_buf[i];
+    let s2: f32 = step * step;
+    let c_step: f32 = 1.0 - 0.5 * s2 + 0.04166667 * s2 * s2;
+    let s_step: f32 = step * (1.0 - 0.16666667 * s2);
+
+    theta_out[i] = theta_new;
+    ex_out[i] = jx + vx * c_step - vy * s_step;
+    ey_out[i] = jy + vx * s_step + vy * c_step;
+}

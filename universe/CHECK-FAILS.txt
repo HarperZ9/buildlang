@@ -4,6 +4,16 @@
 # fails when a line here stops being true or a file fails that is not listed, so a fix to the
 # compiler or to a module has to remove its line.
 #
+# State on 2026-11-27 (Wave 66B) with buildc 1.15.0: 279 of 405 files pass and 126 fail
+# (1 lex, 7 parse, 118 types). Wave 66B burned CHECK-FAILS down from 135 to 126
+# (+9 newly green: delta/lib.bld, field-tensor/lib.bld, oracle/decomposition.bld,
+# oracle/forecasting.bld, oracle/neural.bld, photon/color_grading.bld,
+# photon/deferred.bld, photon/gpu_driven.bld, and prism/lib.bld) via real
+# compiler, typechecker, MIR, stdlib (core::atomic, stdlib/math, stdlib/test),
+# and C-runtime upgrades (Arc/Rc refcounting, Vec<[T; N]>, iter chain/step_by/
+# find/for_each/nested-zip/enumerate-rev, HashMap::get Option binding, Mat4.m/
+# Mat3.m virtual projection, generic forward predeclaration, and selective use
+# pruning), with 0 edits to universe/*.bld and 0 regressions across all 405 files.
 # State on 2026-11-27 with buildc 1.15.0: 141 of 276 files pass and 135 fail
 # (1 lex, 7 parse, 127 types). Wave 42F burned CHECK-FAILS down from 150 to 135
 # (+15 newly green: build.bld, foundation/collections.bld, foundation/error.bld,
@@ -47,7 +57,6 @@ chromatic/lib.bld types
 cli/lib.bld types
 config/lib.bld types
 debug/lib.bld parse
-delta/lib.bld types
 docs/lib.bld types
 entangle/lib.bld parse
 entropy/lib.bld types
@@ -56,7 +65,6 @@ examples/full_universe.bld types
 examples/graphics_pipeline.bld types
 examples/sync_platform.bld types
 examples/trading_bot.bld types
-field-tensor/lib.bld types
 fmt/lib.bld types
 forge/lib.bld types
 foundation/cli.bld types
@@ -93,23 +101,17 @@ nova/lib.bld types
 oracle/automl.bld types
 oracle/causal.bld types
 oracle/changepoint.bld types
-oracle/decomposition.bld types
 oracle/features.bld types
-oracle/forecasting.bld types
 oracle/lib.bld types
-oracle/neural.bld types
 photon/animation.bld types
 photon/antialiasing.bld types
 photon/atmosphere.bld types
 photon/cloth.bld types
-photon/color_grading.bld types
 photon/culling.bld types
 photon/debug_visualization.bld types
 photon/decals.bld types
-photon/deferred.bld types
 photon/foliage.bld types
 photon/gpu_culling.bld types
-photon/gpu_driven.bld types
 photon/gpu_driven_rendering.bld types
 photon/hair_fur.bld types
 photon/indirect_lighting.bld types
@@ -140,7 +142,6 @@ photon/water.bld types
 photon/water_ocean.bld types
 pkg/lib.bld types
 prism/dof.bld types
-prism/lib.bld types
 prism/motion_blur.bld types
 prism/ssao.bld types
 prism/ssr.bld types

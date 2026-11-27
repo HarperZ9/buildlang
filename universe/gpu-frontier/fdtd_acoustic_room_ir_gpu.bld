@@ -1,0 +1,44 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: 3D FDTD acoustic room impulse response update kernel.
+// Advances staggered particle velocity and acoustic pressure under Courant stability,
+// applies wall impedance absorption, and computes local acoustic energy density.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn fdtd_acoustic_room_ir_gpu(
+    c_vel: f32,
+    c_pres: f32,
+    absorb: f32,
+    inv_bulk_k: f32,
+    rho_air: f32,
+    p_c_buf: &[f32],
+    p_xp_buf: &[f32],
+    p_yp_buf: &[f32],
+    p_zp_buf: &[f32],
+    vx_buf: &[f32],
+    vy_buf: &[f32],
+    vz_buf: &[f32],
+    vx_m_buf: &[f32],
+    vy_m_buf: &[f32],
+    vz_m_buf: &[f32],
+    wall_mask_buf: &[f32],
+    p_out: &mut [f32],
+    energy_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let pc: f32 = p_c_buf[i];
+    let damp: f32 = 1.0 - absorb * wall_mask_buf[i];
+
+    let vx_new: f32 = (vx_buf[i] - c_vel * (p_xp_buf[i] - pc)) * damp;
+    let vy_new: f32 = (vy_buf[i] - c_vel * (p_yp_buf[i] - pc)) * damp;
+    let vz_new: f32 = (vz_buf[i] - c_vel * (p_zp_buf[i] - pc)) * damp;
+
+    let div_v: f32 = (vx_new - vx_m_buf[i]) + (vy_new - vy_m_buf[i]) + (vz_new - vz_m_buf[i]);
+    let p_new: f32 = (pc - c_pres * div_v) * damp;
+
+    let v2: f32 = vx_new * vx_new + vy_new * vy_new + vz_new * vz_new;
+    let energy: f32 = 0.5 * (p_new * p_new * inv_bulk_k + rho_air * v2);
+
+    p_out[i] = p_new;
+    energy_out[i] = energy;
+}

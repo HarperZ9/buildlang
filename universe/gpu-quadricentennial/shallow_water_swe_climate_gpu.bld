@@ -1,0 +1,53 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: 2D shallow-water Coriolis atmospheric/oceanic PDE kernel.
+// Integrates depth h and momentum velocities (u, v) under gravity pressure gradients,
+// rotating Coriolis forcing, and bottom quadratic drag with positive-depth clamping.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn shallow_water_swe_climate_gpu(
+    dt: f32,
+    inv_dx: f32,
+    grav: f32,
+    f_cor: f32,
+    drag_c: f32,
+    h_c_buf: &[f32],
+    h_xp_buf: &[f32],
+    h_xm_buf: &[f32],
+    h_yp_buf: &[f32],
+    h_ym_buf: &[f32],
+    u_c_buf: &[f32],
+    v_c_buf: &[f32],
+    du_dx_buf: &[f32],
+    dv_dy_buf: &[f32],
+    h_out: &mut [f32],
+    u_out: &mut [f32],
+    v_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let h: f32 = h_c_buf[i];
+    let u: f32 = u_c_buf[i];
+    let v: f32 = v_c_buf[i];
+
+    let dh_dx: f32 = 0.5 * (h_xp_buf[i] - h_xm_buf[i]) * inv_dx;
+    let dh_dy: f32 = 0.5 * (h_yp_buf[i] - h_ym_buf[i]) * inv_dx;
+
+    let speed2: f32 = u * u + v * v + 0.000001;
+    let mut speed: f32 = 0.5 * (speed2 + 1.0);
+    speed = 0.5 * (speed + speed2 / speed);
+    speed = 0.5 * (speed + speed2 / speed);
+    let drag: f32 = drag_c * speed / (h + 0.01);
+
+    let du_dt: f32 = -grav * dh_dx + f_cor * v - drag * u;
+    let dv_dt: f32 = -grav * dh_dy - f_cor * u - drag * v;
+    let dh_dt: f32 = -(h * (du_dx_buf[i] + dv_dy_buf[i]) + u * dh_dx + v * dh_dy);
+
+    let mut h_new: f32 = h + dt * dh_dt;
+    if h_new < 0.001 {
+        h_new = 0.001;
+    }
+
+    h_out[i] = h_new;
+    u_out[i] = u + dt * du_dt;
+    v_out[i] = v + dt * dv_dt;
+}

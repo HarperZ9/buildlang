@@ -1,0 +1,58 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// World-Physics-3D XPBD soft-body and negative-Poisson auxetic constraint projection kernel.
+// Solves compliant distance constraint with Newton-Raphson length norm and applies negative
+// Poisson transverse expansion coupling for auxetic metamaterial mechanics.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn world_xpbd_auxetic_step_compute(
+    inv_dt2: f32,
+    compliance: f32,
+    auxetic_nu: f32,
+    eps: f32,
+    dx_buf: &[f32],
+    dy_buf: &[f32],
+    rest_len_buf: &[f32],
+    w0_buf: &[f32],
+    w1_buf: &[f32],
+    lam_in_buf: &[f32],
+    corr_x_out: &mut [f32],
+    corr_y_out: &mut [f32],
+    lam_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let dx: f32 = dx_buf[i];
+    let dy: f32 = dy_buf[i];
+    let rest_len: f32 = rest_len_buf[i];
+    let w0: f32 = w0_buf[i];
+    let w1: f32 = w1_buf[i];
+    let lam_old: f32 = lam_in_buf[i];
+
+    let len2: f32 = dx * dx + dy * dy + eps;
+    let mut dist: f32 = 0.5 * (len2 + 1.0);
+    dist = 0.5 * (dist + len2 / dist);
+    dist = 0.5 * (dist + len2 / dist);
+    dist = 0.5 * (dist + len2 / dist);
+    dist = 0.5 * (dist + len2 / dist);
+
+    let inv_dist: f32 = 1.0 / (dist + eps);
+    let nx: f32 = dx * inv_dist;
+    let ny: f32 = dy * inv_dist;
+
+    let c_val: f32 = dist - rest_len;
+    let alpha_tilde: f32 = compliance * inv_dt2;
+    let denom: f32 = w0 + w1 + alpha_tilde + eps;
+    let dlam: f32 = -(c_val + alpha_tilde * lam_old) / denom;
+    let lam_new: f32 = lam_old + dlam;
+
+    let axial_step: f32 = w0 * dlam;
+    let strain: f32 = c_val / (rest_len + eps);
+    let aux_lat: f32 = -auxetic_nu * strain * w0;
+
+    let cx: f32 = axial_step * nx - aux_lat * ny;
+    let cy: f32 = axial_step * ny + aux_lat * nx;
+
+    corr_x_out[i] = cx;
+    corr_y_out[i] = cy;
+    lam_out[i] = lam_new;
+}

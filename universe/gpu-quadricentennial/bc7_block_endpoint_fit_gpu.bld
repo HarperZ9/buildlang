@@ -1,0 +1,78 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Quadricentennial GPU 400-Pack: GPU BC7/NTC texture block PCA endpoint fitting kernel.
+// Computes 2-pixel RGB block mean, covariance power-iteration principal axis, projected
+// min/max endpoints, and quantized 3-bit interpolation index error.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn bc7_block_endpoint_fit_gpu(
+    q_levels: f32,
+    r0_buf: &[f32],
+    g0_buf: &[f32],
+    b0_buf: &[f32],
+    r1_buf: &[f32],
+    g1_buf: &[f32],
+    b1_buf: &[f32],
+    r2_buf: &[f32],
+    g2_buf: &[f32],
+    b2_buf: &[f32],
+    ep_lo_out: &mut [f32],
+    ep_hi_out: &mut [f32],
+    mse_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let r0: f32 = r0_buf[i];
+    let g0: f32 = g0_buf[i];
+    let b0: f32 = b0_buf[i];
+    let r1: f32 = r1_buf[i];
+    let g1: f32 = g1_buf[i];
+    let b1: f32 = b1_buf[i];
+    let r2: f32 = r2_buf[i];
+    let g2: f32 = g2_buf[i];
+    let b2: f32 = b2_buf[i];
+
+    let mr: f32 = 0.33333334 * (r0 + r1 + r2);
+    let mg: f32 = 0.33333334 * (g0 + g1 + g2);
+    let mb: f32 = 0.33333334 * (b0 + b1 + b2);
+
+    let ax_r: f32 = (r2 - mr) + 0.5 * (r1 - mr) + 0.001;
+    let ax_g: f32 = (g2 - mg) + 0.5 * (g1 - mg) + 0.001;
+    let ax_b: f32 = (b2 - mb) + 0.5 * (b1 - mb) + 0.001;
+    let ax2: f32 = ax_r * ax_r + ax_g * ax_g + ax_b * ax_b + 0.000001;
+    let mut ax_n: f32 = 0.5 * (ax2 + 1.0);
+    ax_n = 0.5 * (ax_n + ax2 / ax_n);
+    ax_n = 0.5 * (ax_n + ax2 / ax_n);
+    let inv_n: f32 = 1.0 / (ax_n + 0.000001);
+    let nr: f32 = ax_r * inv_n;
+    let ng: f32 = ax_g * inv_n;
+    let nb: f32 = ax_b * inv_n;
+
+    let p0: f32 = (r0 - mr) * nr + (g0 - mg) * ng + (b0 - mb) * nb;
+    let p1: f32 = (r1 - mr) * nr + (g1 - mg) * ng + (b1 - mb) * nb;
+    let p2: f32 = (r2 - mr) * nr + (g2 - mg) * ng + (b2 - mb) * nb;
+
+    let mut lo: f32 = p0;
+    if p1 < lo {
+        lo = p1;
+    }
+    if p2 < lo {
+        lo = p2;
+    }
+    let mut hi: f32 = p0;
+    if p1 > hi {
+        hi = p1;
+    }
+    if p2 > hi {
+        hi = p2;
+    }
+
+    let span: f32 = hi - lo + 0.000001;
+    let t1: f32 = (p1 - lo) / span;
+    let q_step: f32 = 1.0 / (q_levels + 0.000001);
+    let recon1: f32 = lo + (t1 - 0.5 * q_step) * span;
+    let err: f32 = p1 - recon1;
+
+    ep_lo_out[i] = lo;
+    ep_hi_out[i] = hi;
+    mse_out[i] = err * err;
+}

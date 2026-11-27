@@ -308,10 +308,10 @@ fn main() ~ Console {
 #[test]
 fn planted_control_vec_of_fixed_array_refused() {
     let main = program(
-        "planted-vec-fixed-array",
+        "planted-vec-tuple-array",
         r#"fn main() {
-    let mut v: Vec<[i64; 2]> = Vec::new();
-    v.push([1, 2]);
+    let mut v: Vec<([i64; 2], i64)> = Vec::new();
+    v.push(([1, 2], 3));
 }
 "#,
     );
@@ -319,7 +319,7 @@ fn planted_control_vec_of_fixed_array_refused() {
     let log = text(&out);
     assert!(
         !out.status.success(),
-        "planted control Vec<[i64; 2]> must be refused, got pass:\n{log}"
+        "planted control Vec<([i64; 2], i64)> must be refused, got pass:\n{log}"
     );
 }
 

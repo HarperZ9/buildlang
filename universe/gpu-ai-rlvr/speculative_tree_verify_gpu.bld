@@ -1,0 +1,47 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Titan AI/RLVR 240-Pack: Parallel speculative-decoding tree token verifier GPU kernel.
+// Evaluates exact Leviathan-Chen acceptance ratio min(1, p/q), residual excess mass
+// max(0, p - q), and binary acceptance indicator across parallel draft tree nodes.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn speculative_tree_verify_gpu(
+    eps: f32,
+    p_tok_buf: &[f32],
+    q_tok_buf: &[f32],
+    u_rand_buf: &[f32],
+    parent_ok_buf: &[f32],
+    acc_prob_out: &mut [f32],
+    res_mass_out: &mut [f32],
+    accept_flag_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let p: f32 = p_tok_buf[i];
+    let q: f32 = q_tok_buf[i];
+    let u: f32 = u_rand_buf[i];
+    let p_ok: f32 = parent_ok_buf[i];
+
+    let mut ratio: f32 = p / (q + eps);
+    if ratio > 1.0 {
+        ratio = 1.0;
+    }
+    if ratio < 0.0 {
+        ratio = 0.0;
+    }
+
+    let mut res: f32 = p - q;
+    if res < 0.0 {
+        res = 0.0;
+    }
+
+    let mut flag: f32 = 0.0;
+    if p_ok > 0.5 {
+        if u < ratio {
+            flag = 1.0;
+        }
+    }
+
+    acc_prob_out[i] = ratio;
+    res_mass_out[i] = res;
+    accept_flag_out[i] = flag;
+}

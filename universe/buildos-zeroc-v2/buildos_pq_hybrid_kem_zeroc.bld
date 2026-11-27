@@ -1,0 +1,1310 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 128A (Slice 29: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C FIPS 203
+// q=3329, n=256 ML-KEM-512 Ring-NTT + RFC 7748 X25519 Hybrid Post-Quantum Key
+// Exchange (buildos_pq_hybrid_kem_zeroc.bld). Compiled with ZERO C compiler,
+// ZERO Rust, and ZERO external linker across ALL FIVE zero-C ISAs.
+//
+// Modes:
+//   0 = Clean ML-KEM-512 + X25519 hybrid key exchange & AEAD commit (status=1)
+//   1 = Planted attack (a): 1-bit ML-KEM ciphertext tamper (FO reject) -> -101
+//   2 = Planted attack (b): 1-bit X25519 peer public-key MITM -> -201
+//   3 = Planted attack (c): Polynomial coeff out-of-range >= 3329 -> -301
+//   4 = Planted attack (d): AEAD 1-bit Poly1305 tag tamper -> -401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn bswap32(x: i64) -> i64 {
+    return ((x & 255) << 24) | (((x >> 8) & 255) << 16) | (((x >> 16) & 255) << 8) | ((x >> 24) & 255);
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn barrett3329(x: i64) -> i64 {
+    let q: i64 = (x * 5039) >> 24;
+    let mut r: i64 = x - q * 3329;
+    if r >= 3329 { r = r - 3329; }
+    if r >= 3329 { r = r - 3329; }
+    return r;
+}
+
+fn widx5(i: i64) -> i64 {
+    return (i * 205) >> 10;
+}
+
+fn p5_get(w: i64, i: i64) -> i64 {
+    let lane: i64 = i - widx5(i) * 5;
+    return (w >> (lane * 12)) & 4095;
+}
+
+fn p5_set(w: i64, i: i64, val: i64) -> i64 {
+    let lane: i64 = i - widx5(i) * 5;
+    let sh: i64 = lane * 12;
+    let cur: i64 = (w >> sh) & 4095;
+    return w + ((val - cur) << sh);
+}
+
+fn a_hat_coeff(row: i64, col: i64, idx: i64) -> i64 {
+    let seed: i64 = 73 + row * 197 + col * 389;
+    return barrett3329((idx * seed + row * 521 + col * 911 + 17) * 29);
+}
+
+fn cbd_coeff(kind: i64, idx: i64) -> i64 {
+    let x: i64 = (idx * (13 + kind * 7) + kind * 31 + 5) ^ ((idx >> 1) * 19);
+    let q5: i64 = (x * 52429) >> 18;
+    let mut r: i64 = x - q5 * 5;
+    while r >= 5 { r = r - 5; }
+    let d: i64 = r - 2;
+    if d < 0 { return 3329 + d; }
+    return d;
+}
+
+fn kyber_zeta(k: i64) -> i64 {
+    if k == 0 { return 1; }
+    else if k == 1 { return 1729; }
+    else if k == 2 { return 2580; }
+    else if k == 3 { return 3289; }
+    else if k == 4 { return 2642; }
+    else if k == 5 { return 630; }
+    else if k == 6 { return 1897; }
+    else if k == 7 { return 848; }
+    else if k == 8 { return 1062; }
+    else if k == 9 { return 1919; }
+    else if k == 10 { return 193; }
+    else if k == 11 { return 797; }
+    else if k == 12 { return 2786; }
+    else if k == 13 { return 3260; }
+    else if k == 14 { return 569; }
+    else if k == 15 { return 1746; }
+    else if k == 16 { return 296; }
+    else if k == 17 { return 2447; }
+    else if k == 18 { return 1339; }
+    else if k == 19 { return 1476; }
+    else if k == 20 { return 3046; }
+    else if k == 21 { return 56; }
+    else if k == 22 { return 2240; }
+    else if k == 23 { return 1333; }
+    else if k == 24 { return 1426; }
+    else if k == 25 { return 2094; }
+    else if k == 26 { return 535; }
+    else if k == 27 { return 2882; }
+    else if k == 28 { return 2393; }
+    else if k == 29 { return 2879; }
+    else if k == 30 { return 1974; }
+    else if k == 31 { return 821; }
+    else if k == 32 { return 289; }
+    else if k == 33 { return 331; }
+    else if k == 34 { return 3253; }
+    else if k == 35 { return 1756; }
+    else if k == 36 { return 1197; }
+    else if k == 37 { return 2304; }
+    else if k == 38 { return 2277; }
+    else if k == 39 { return 2055; }
+    else if k == 40 { return 650; }
+    else if k == 41 { return 1977; }
+    else if k == 42 { return 2513; }
+    else if k == 43 { return 632; }
+    else if k == 44 { return 2865; }
+    else if k == 45 { return 33; }
+    else if k == 46 { return 1320; }
+    else if k == 47 { return 1915; }
+    else if k == 48 { return 2319; }
+    else if k == 49 { return 1435; }
+    else if k == 50 { return 807; }
+    else if k == 51 { return 452; }
+    else if k == 52 { return 1438; }
+    else if k == 53 { return 2868; }
+    else if k == 54 { return 1534; }
+    else if k == 55 { return 2402; }
+    else if k == 56 { return 2647; }
+    else if k == 57 { return 2617; }
+    else if k == 58 { return 1481; }
+    else if k == 59 { return 648; }
+    else if k == 60 { return 2474; }
+    else if k == 61 { return 3110; }
+    else if k == 62 { return 1227; }
+    else if k == 63 { return 910; }
+    else if k == 64 { return 17; }
+    else if k == 65 { return 2761; }
+    else if k == 66 { return 583; }
+    else if k == 67 { return 2649; }
+    else if k == 68 { return 1637; }
+    else if k == 69 { return 723; }
+    else if k == 70 { return 2288; }
+    else if k == 71 { return 1100; }
+    else if k == 72 { return 1409; }
+    else if k == 73 { return 2662; }
+    else if k == 74 { return 3281; }
+    else if k == 75 { return 233; }
+    else if k == 76 { return 756; }
+    else if k == 77 { return 2156; }
+    else if k == 78 { return 3015; }
+    else if k == 79 { return 3050; }
+    else if k == 80 { return 1703; }
+    else if k == 81 { return 1651; }
+    else if k == 82 { return 2789; }
+    else if k == 83 { return 1789; }
+    else if k == 84 { return 1847; }
+    else if k == 85 { return 952; }
+    else if k == 86 { return 1461; }
+    else if k == 87 { return 2687; }
+    else if k == 88 { return 939; }
+    else if k == 89 { return 2308; }
+    else if k == 90 { return 2437; }
+    else if k == 91 { return 2388; }
+    else if k == 92 { return 733; }
+    else if k == 93 { return 2337; }
+    else if k == 94 { return 268; }
+    else if k == 95 { return 641; }
+    else if k == 96 { return 1584; }
+    else if k == 97 { return 2298; }
+    else if k == 98 { return 2037; }
+    else if k == 99 { return 3220; }
+    else if k == 100 { return 375; }
+    else if k == 101 { return 2549; }
+    else if k == 102 { return 2090; }
+    else if k == 103 { return 1645; }
+    else if k == 104 { return 1063; }
+    else if k == 105 { return 319; }
+    else if k == 106 { return 2773; }
+    else if k == 107 { return 757; }
+    else if k == 108 { return 2099; }
+    else if k == 109 { return 561; }
+    else if k == 110 { return 2466; }
+    else if k == 111 { return 2594; }
+    else if k == 112 { return 2804; }
+    else if k == 113 { return 1092; }
+    else if k == 114 { return 403; }
+    else if k == 115 { return 1026; }
+    else if k == 116 { return 1143; }
+    else if k == 117 { return 2150; }
+    else if k == 118 { return 2775; }
+    else if k == 119 { return 886; }
+    else if k == 120 { return 1722; }
+    else if k == 121 { return 1212; }
+    else if k == 122 { return 1874; }
+    else if k == 123 { return 1029; }
+    else if k == 124 { return 2110; }
+    else if k == 125 { return 2935; }
+    else if k == 126 { return 885; }
+    else if k == 127 { return 2154; }
+    return 0;
+}
+
+fn kyber_gamma(k: i64) -> i64 {
+    if k == 0 { return 17; }
+    else if k == 1 { return 3312; }
+    else if k == 2 { return 2761; }
+    else if k == 3 { return 568; }
+    else if k == 4 { return 583; }
+    else if k == 5 { return 2746; }
+    else if k == 6 { return 2649; }
+    else if k == 7 { return 680; }
+    else if k == 8 { return 1637; }
+    else if k == 9 { return 1692; }
+    else if k == 10 { return 723; }
+    else if k == 11 { return 2606; }
+    else if k == 12 { return 2288; }
+    else if k == 13 { return 1041; }
+    else if k == 14 { return 1100; }
+    else if k == 15 { return 2229; }
+    else if k == 16 { return 1409; }
+    else if k == 17 { return 1920; }
+    else if k == 18 { return 2662; }
+    else if k == 19 { return 667; }
+    else if k == 20 { return 3281; }
+    else if k == 21 { return 48; }
+    else if k == 22 { return 233; }
+    else if k == 23 { return 3096; }
+    else if k == 24 { return 756; }
+    else if k == 25 { return 2573; }
+    else if k == 26 { return 2156; }
+    else if k == 27 { return 1173; }
+    else if k == 28 { return 3015; }
+    else if k == 29 { return 314; }
+    else if k == 30 { return 3050; }
+    else if k == 31 { return 279; }
+    else if k == 32 { return 1703; }
+    else if k == 33 { return 1626; }
+    else if k == 34 { return 1651; }
+    else if k == 35 { return 1678; }
+    else if k == 36 { return 2789; }
+    else if k == 37 { return 540; }
+    else if k == 38 { return 1789; }
+    else if k == 39 { return 1540; }
+    else if k == 40 { return 1847; }
+    else if k == 41 { return 1482; }
+    else if k == 42 { return 952; }
+    else if k == 43 { return 2377; }
+    else if k == 44 { return 1461; }
+    else if k == 45 { return 1868; }
+    else if k == 46 { return 2687; }
+    else if k == 47 { return 642; }
+    else if k == 48 { return 939; }
+    else if k == 49 { return 2390; }
+    else if k == 50 { return 2308; }
+    else if k == 51 { return 1021; }
+    else if k == 52 { return 2437; }
+    else if k == 53 { return 892; }
+    else if k == 54 { return 2388; }
+    else if k == 55 { return 941; }
+    else if k == 56 { return 733; }
+    else if k == 57 { return 2596; }
+    else if k == 58 { return 2337; }
+    else if k == 59 { return 992; }
+    else if k == 60 { return 268; }
+    else if k == 61 { return 3061; }
+    else if k == 62 { return 641; }
+    else if k == 63 { return 2688; }
+    else if k == 64 { return 1584; }
+    else if k == 65 { return 1745; }
+    else if k == 66 { return 2298; }
+    else if k == 67 { return 1031; }
+    else if k == 68 { return 2037; }
+    else if k == 69 { return 1292; }
+    else if k == 70 { return 3220; }
+    else if k == 71 { return 109; }
+    else if k == 72 { return 375; }
+    else if k == 73 { return 2954; }
+    else if k == 74 { return 2549; }
+    else if k == 75 { return 780; }
+    else if k == 76 { return 2090; }
+    else if k == 77 { return 1239; }
+    else if k == 78 { return 1645; }
+    else if k == 79 { return 1684; }
+    else if k == 80 { return 1063; }
+    else if k == 81 { return 2266; }
+    else if k == 82 { return 319; }
+    else if k == 83 { return 3010; }
+    else if k == 84 { return 2773; }
+    else if k == 85 { return 556; }
+    else if k == 86 { return 757; }
+    else if k == 87 { return 2572; }
+    else if k == 88 { return 2099; }
+    else if k == 89 { return 1230; }
+    else if k == 90 { return 561; }
+    else if k == 91 { return 2768; }
+    else if k == 92 { return 2466; }
+    else if k == 93 { return 863; }
+    else if k == 94 { return 2594; }
+    else if k == 95 { return 735; }
+    else if k == 96 { return 2804; }
+    else if k == 97 { return 525; }
+    else if k == 98 { return 1092; }
+    else if k == 99 { return 2237; }
+    else if k == 100 { return 403; }
+    else if k == 101 { return 2926; }
+    else if k == 102 { return 1026; }
+    else if k == 103 { return 2303; }
+    else if k == 104 { return 1143; }
+    else if k == 105 { return 2186; }
+    else if k == 106 { return 2150; }
+    else if k == 107 { return 1179; }
+    else if k == 108 { return 2775; }
+    else if k == 109 { return 554; }
+    else if k == 110 { return 886; }
+    else if k == 111 { return 2443; }
+    else if k == 112 { return 1722; }
+    else if k == 113 { return 1607; }
+    else if k == 114 { return 1212; }
+    else if k == 115 { return 2117; }
+    else if k == 116 { return 1874; }
+    else if k == 117 { return 1455; }
+    else if k == 118 { return 1029; }
+    else if k == 119 { return 2300; }
+    else if k == 120 { return 2110; }
+    else if k == 121 { return 1219; }
+    else if k == 122 { return 2935; }
+    else if k == 123 { return 394; }
+    else if k == 124 { return 885; }
+    else if k == 125 { return 2444; }
+    else if k == 126 { return 2154; }
+    else if k == 127 { return 1175; }
+    return 0;
+}
+
+fn mlkem_msg_byte(i: i64) -> i64 {
+    if i == 0 { return 141; }
+    else if i == 1 { return 167; }
+    else if i == 2 { return 184; }
+    else if i == 3 { return 113; }
+    else if i == 4 { return 128; }
+    else if i == 5 { return 150; }
+    else if i == 6 { return 169; }
+    else if i == 7 { return 164; }
+    else if i == 8 { return 221; }
+    else if i == 9 { return 20; }
+    else if i == 10 { return 60; }
+    else if i == 11 { return 189; }
+    else if i == 12 { return 142; }
+    else if i == 13 { return 235; }
+    else if i == 14 { return 45; }
+    else if i == 15 { return 224; }
+    else if i == 16 { return 95; }
+    else if i == 17 { return 133; }
+    else if i == 18 { return 2; }
+    else if i == 19 { return 11; }
+    else if i == 20 { return 116; }
+    else if i == 21 { return 16; }
+    else if i == 22 { return 114; }
+    else if i == 23 { return 228; }
+    else if i == 24 { return 106; }
+    else if i == 25 { return 91; }
+    else if i == 26 { return 123; }
+    else if i == 27 { return 175; }
+    else if i == 28 { return 136; }
+    else if i == 29 { return 38; }
+    else if i == 30 { return 127; }
+    else if i == 31 { return 14; }
+    return 0;
+}
+
+fn mlkem_msg_be(i: i64) -> i64 {
+    if i == 0 { return 2376579185; }
+    else if i == 1 { return 2157357476; }
+    else if i == 2 { return 3709091005; }
+    else if i == 3 { return 2397777376; }
+    else if i == 4 { return 1602552331; }
+    else if i == 5 { return 1947235044; }
+    else if i == 6 { return 1784380335; }
+    else if i == 7 { return 2284224270; }
+    return 0;
+}
+
+fn exp_ct_fold(i: i64) -> i64 {
+    if i == 0 { return 3967096982; }
+    else if i == 1 { return 1137924839; }
+    else if i == 2 { return 2537480589; }
+    else if i == 3 { return 1512270960; }
+    return 0;
+}
+
+fn exp_ss_mlkem(i: i64) -> i64 {
+    if i == 0 { return 2273016849; }
+    else if i == 1 { return 1157506003; }
+    else if i == 2 { return 149253599; }
+    else if i == 3 { return 2030412059; }
+    else if i == 4 { return 2050358242; }
+    else if i == 5 { return 641962019; }
+    else if i == 6 { return 445598621; }
+    else if i == 7 { return 2594997489; }
+    return 0;
+}
+
+fn hyb_pt_aad_le(i: i64) -> i64 {
+    if i == 0 { return 660821332; }
+    else if i == 1 { return 3967143079; }
+    else if i == 2 { return 2469971931; }
+    else if i == 3 { return 1591675735; }
+    else if i == 4 { return 1018385129; }
+    else if i == 5 { return 2475367782; }
+    else if i == 6 { return 2485284898; }
+    else if i == 7 { return 1937795866; }
+    else if i == 8 { return 1346653250; }
+    else if i == 9 { return 1497902417; }
+    else if i == 10 { return 844508482; }
+    else if i == 11 { return 16777273; }
+    return 0;
+}
+
+fn msg_bit(idx: i64) -> i64 {
+    return (mlkem_msg_byte(idx >> 3) >> (idx & 7)) & 1;
+}
+
+// =============================================================================
+// STAGE 1b: FIPS 180-4 SHA-256 ML-KEM Shared Secret Derivation (m || ct_fold)
+// =============================================================================
+fn pq_stage1b_ss_hash(f0: i64, f1: i64, f2: i64, f3: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut i: i64 = 0; let mut p0: i64 = 0; let mut j: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+
+    i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+    p0 = 0;
+    while p0 < 2 {
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        if p0 == 0 {
+            i = 0; while i < 8 { w[i] = mlkem_msg_be(i); i = i + 1; }
+            w[8] = f0; w[9] = f1; w[10] = f2; w[11] = f3;
+            w[12] = 3329; w[13] = 256; w[14] = 2; w[15] = 17;
+        } else { w[0] = 2147483648; w[15] = 512; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3]; e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32; hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32; hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        p0 = p0 + 1;
+    }
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_ss_mlkem(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -102); println("{}", 0); return -102; }
+    return hv[0];
+}
+
+// =============================================================================
+// STAGE 1a: Real FIPS 203 R_q = Z_3329[X]/(X^256 + 1) ML-KEM-512 (k=2, zeta=17)
+// 5-lane 12-bit packed [i64; 52] polys: 4 * 416 B = 1,664 B + scalars < 1,900 B < 2,048 B RV64!
+// =============================================================================
+fn pq_stage1_mlkem512(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let mut pa: [i64; 52] = [0; 52];
+    let mut pb: [i64; 52] = [0; 52];
+    let mut pc: [i64; 52] = [0; 52];
+    let mut pd: [i64; 52] = [0; 52];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut k: i64 = 0;
+    let mut len: i64 = 0; let mut start: i64 = 0; let mut phase: i64 = 0;
+    let mut a0: i64 = 0; let mut a1: i64 = 0; let mut b0: i64 = 0; let mut b1: i64 = 0;
+    let mut c0: i64 = 0; let mut c1: i64 = 0; let mut z: i64 = 0; let mut t: i64 = 0;
+    let mut f0: i64 = 2654435769; let mut f1: i64 = 2246822507;
+    let mut f2: i64 = 3266489909; let mut f3: i64 = 668265263;
+
+    // -------------------------------------------------------------------------
+    // PART 1: KeyGen t_hat[0..1] (with < 3329 canonical check) + v_nom in pd
+    // -------------------------------------------------------------------------
+    i = 0; while i < 52 { pd[i] = 0; i = i + 1; }
+
+    phase = 0;
+    while phase < 2 {
+        // Compute e_hat[phase] in pc via Forward NTT
+        i = 0; while i < 52 { pc[i] = 0; i = i + 1; }
+        i = 0; while i < 256 { c0 = widx5(i); pc[c0] = p5_set(pc[c0], i, cbd_coeff(2 + phase, i)); i = i + 1; }
+        k = 1; len = 128;
+        while len >= 2 {
+            start = 0;
+            while start < 256 {
+                z = kyber_zeta(k); k = k + 1; j = start;
+                while j < start + len {
+                    c0 = widx5(j); c1 = widx5(j + len);
+                    a0 = p5_get(pc[c0], j); a1 = p5_get(pc[c1], j + len);
+                    t = barrett3329(z * a1);
+                    b0 = a0 + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                    b1 = a0 + 3329 - t; if b1 >= 3329 { b1 = b1 - 3329; }
+                    pc[c0] = p5_set(pc[c0], j, b0); pc[c1] = p5_set(pc[c1], j + len, b1);
+                    j = j + 1;
+                }
+                start = start + len * 2;
+            }
+            len = len >> 1;
+        }
+
+        // Accumulate A_hat[phase][col] * NTT(s[col]) into pc -> pc = t_hat[phase]
+        let mut col: i64 = 0;
+        while col < 2 {
+            i = 0; while i < 52 { pa[i] = 0; i = i + 1; }
+            i = 0; while i < 256 { c0 = widx5(i); pa[c0] = p5_set(pa[c0], i, cbd_coeff(col, i)); i = i + 1; }
+            k = 1; len = 128;
+            while len >= 2 {
+                start = 0;
+                while start < 256 {
+                    z = kyber_zeta(k); k = k + 1; j = start;
+                    while j < start + len {
+                        c0 = widx5(j); c1 = widx5(j + len);
+                        a0 = p5_get(pa[c0], j); a1 = p5_get(pa[c1], j + len);
+                        t = barrett3329(z * a1);
+                        b0 = a0 + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                        b1 = a0 + 3329 - t; if b1 >= 3329 { b1 = b1 - 3329; }
+                        pa[c0] = p5_set(pa[c0], j, b0); pa[c1] = p5_set(pa[c1], j + len, b1);
+                        j = j + 1;
+                    }
+                    start = start + len * 2;
+                }
+                len = len >> 1;
+            }
+            i = 0;
+            while i < 128 {
+                z = kyber_gamma(i);
+                c0 = widx5(i * 2); c1 = widx5(i * 2 + 1);
+                a0 = a_hat_coeff(phase, col, i * 2); a1 = a_hat_coeff(phase, col, i * 2 + 1);
+                b0 = p5_get(pa[c0], i * 2); b1 = p5_get(pa[c1], i * 2 + 1);
+                t = barrett3329(a0 * b0 + barrett3329(a1 * b1) * z);
+                a0 = barrett3329(a0 * b1 + a1 * b0);
+                b0 = p5_get(pc[c0], i * 2) + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                b1 = p5_get(pc[c1], i * 2 + 1) + a0; if b1 >= 3329 { b1 = b1 - 3329; }
+                pc[c0] = p5_set(pc[c0], i * 2, b0); pc[c1] = p5_set(pc[c1], i * 2 + 1, b1);
+                i = i + 1;
+            }
+            col = col + 1;
+        }
+
+        // FIPS 203 Section 7.2 canonical public-key range check: every coeff < 3329
+        if mode == 3 && phase == 0 { pc[widx5(17)] = p5_set(pc[widx5(17)], 17, 3329); }
+        i = 0;
+        while i < 256 {
+            a0 = p5_get(pc[widx5(i)], i);
+            if a0 >= 3329 { println("{}", -301); println("{}", 0); return -301; }
+            i = i + 1;
+        }
+
+        // Compute r_hat[phase] in pa, accumulate t_hat[phase] * r_hat[phase] into pd
+        i = 0; while i < 52 { pa[i] = 0; i = i + 1; }
+        i = 0; while i < 256 { c0 = widx5(i); pa[c0] = p5_set(pa[c0], i, cbd_coeff(4 + phase, i)); i = i + 1; }
+        k = 1; len = 128;
+        while len >= 2 {
+            start = 0;
+            while start < 256 {
+                z = kyber_zeta(k); k = k + 1; j = start;
+                while j < start + len {
+                    c0 = widx5(j); c1 = widx5(j + len);
+                    a0 = p5_get(pa[c0], j); a1 = p5_get(pa[c1], j + len);
+                    t = barrett3329(z * a1);
+                    b0 = a0 + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                    b1 = a0 + 3329 - t; if b1 >= 3329 { b1 = b1 - 3329; }
+                    pa[c0] = p5_set(pa[c0], j, b0); pa[c1] = p5_set(pa[c1], j + len, b1);
+                    j = j + 1;
+                }
+                start = start + len * 2;
+            }
+            len = len >> 1;
+        }
+        i = 0;
+        while i < 128 {
+            z = kyber_gamma(i);
+            c0 = widx5(i * 2); c1 = widx5(i * 2 + 1);
+            a0 = p5_get(pc[c0], i * 2); a1 = p5_get(pc[c1], i * 2 + 1);
+            b0 = p5_get(pa[c0], i * 2); b1 = p5_get(pa[c1], i * 2 + 1);
+            t = barrett3329(a0 * b0 + barrett3329(a1 * b1) * z);
+            a0 = barrett3329(a0 * b1 + a1 * b0);
+            b0 = p5_get(pd[c0], i * 2) + t; if b0 >= 3329 { b0 = b0 - 3329; }
+            b1 = p5_get(pd[c1], i * 2 + 1) + a0; if b1 >= 3329 { b1 = b1 - 3329; }
+            pd[c0] = p5_set(pd[c0], i * 2, b0); pd[c1] = p5_set(pd[c1], i * 2 + 1, b1);
+            i = i + 1;
+        }
+        phase = phase + 1;
+    }
+
+    // INTT(pd) + e2 -> pd holds exact v_nom!
+    k = 127; len = 2;
+    while len <= 128 {
+        start = 0;
+        while start < 256 {
+            z = kyber_zeta(k); k = k - 1; j = start;
+            while j < start + len {
+                c0 = widx5(j); c1 = widx5(j + len);
+                a0 = p5_get(pd[c0], j); a1 = p5_get(pd[c1], j + len);
+                b0 = a0 + a1; if b0 >= 3329 { b0 = b0 - 3329; }
+                b1 = barrett3329((a1 + 3329 - a0) * z);
+                pd[c0] = p5_set(pd[c0], j, b0); pd[c1] = p5_set(pd[c1], j + len, b1);
+                j = j + 1;
+            }
+            start = start + len * 2;
+        }
+        len = len << 1;
+    }
+    i = 0;
+    while i < 256 {
+        c0 = widx5(i);
+        a0 = barrett3329(p5_get(pd[c0], i) * 3303 + cbd_coeff(8, i));
+        pd[c0] = p5_set(pd[c0], i, a0);
+        i = i + 1;
+    }
+
+    // -------------------------------------------------------------------------
+    // PART 2: Encaps u0, u1 + Decaps acc_dec = INTT(s_hat0*NTT(u0) + s_hat1*NTT(u1)) -> pb
+    // -------------------------------------------------------------------------
+    i = 0; while i < 52 { pb[i] = 0; i = i + 1; }
+
+    phase = 0;
+    while phase < 2 {
+        i = 0; while i < 52 { pc[i] = 0; i = i + 1; }
+        let mut ridx: i64 = 0;
+        while ridx < 2 {
+            i = 0; while i < 52 { pa[i] = 0; i = i + 1; }
+            i = 0; while i < 256 { c0 = widx5(i); pa[c0] = p5_set(pa[c0], i, cbd_coeff(4 + ridx, i)); i = i + 1; }
+            k = 1; len = 128;
+            while len >= 2 {
+                start = 0;
+                while start < 256 {
+                    z = kyber_zeta(k); k = k + 1; j = start;
+                    while j < start + len {
+                        c0 = widx5(j); c1 = widx5(j + len);
+                        a0 = p5_get(pa[c0], j); a1 = p5_get(pa[c1], j + len);
+                        t = barrett3329(z * a1);
+                        b0 = a0 + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                        b1 = a0 + 3329 - t; if b1 >= 3329 { b1 = b1 - 3329; }
+                        pa[c0] = p5_set(pa[c0], j, b0); pa[c1] = p5_set(pa[c1], j + len, b1);
+                        j = j + 1;
+                    }
+                    start = start + len * 2;
+                }
+                len = len >> 1;
+            }
+            i = 0;
+            while i < 128 {
+                z = kyber_gamma(i);
+                c0 = widx5(i * 2); c1 = widx5(i * 2 + 1);
+                a0 = a_hat_coeff(ridx, phase, i * 2); a1 = a_hat_coeff(ridx, phase, i * 2 + 1);
+                b0 = p5_get(pa[c0], i * 2); b1 = p5_get(pa[c1], i * 2 + 1);
+                t = barrett3329(a0 * b0 + barrett3329(a1 * b1) * z);
+                a0 = barrett3329(a0 * b1 + a1 * b0);
+                b0 = p5_get(pc[c0], i * 2) + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                b1 = p5_get(pc[c1], i * 2 + 1) + a0; if b1 >= 3329 { b1 = b1 - 3329; }
+                pc[c0] = p5_set(pc[c0], i * 2, b0); pc[c1] = p5_set(pc[c1], i * 2 + 1, b1);
+                i = i + 1;
+            }
+            ridx = ridx + 1;
+        }
+
+        // INTT(pc) + e1[phase] -> u[phase] in pc; fold into f0/f1/f3
+        k = 127; len = 2;
+        while len <= 128 {
+            start = 0;
+            while start < 256 {
+                z = kyber_zeta(k); k = k - 1; j = start;
+                while j < start + len {
+                    c0 = widx5(j); c1 = widx5(j + len);
+                    a0 = p5_get(pc[c0], j); a1 = p5_get(pc[c1], j + len);
+                    b0 = a0 + a1; if b0 >= 3329 { b0 = b0 - 3329; }
+                    b1 = barrett3329((a1 + 3329 - a0) * z);
+                    pc[c0] = p5_set(pc[c0], j, b0); pc[c1] = p5_set(pc[c1], j + len, b1);
+                    j = j + 1;
+                }
+                start = start + len * 2;
+            }
+            len = len << 1;
+        }
+        i = 0;
+        while i < 256 {
+            c0 = widx5(i);
+            a0 = barrett3329(p5_get(pc[c0], i) * 3303 + cbd_coeff(6 + phase, i));
+            pc[c0] = p5_set(pc[c0], i, a0);
+            if phase == 0 { f0 = (f0 * 33 + a0 + i) & m32; }
+            else { f1 = (f1 * 33 + a0 + i) & m32; }
+            i = i + 1;
+        }
+
+        // NTT(u[phase]) in pc, NTT(s[phase]) in pa, accumulate s_hat*u_hat into pb
+        k = 1; len = 128;
+        while len >= 2 {
+            start = 0;
+            while start < 256 {
+                z = kyber_zeta(k); k = k + 1; j = start;
+                while j < start + len {
+                    c0 = widx5(j); c1 = widx5(j + len);
+                    a0 = p5_get(pc[c0], j); a1 = p5_get(pc[c1], j + len);
+                    t = barrett3329(z * a1);
+                    b0 = a0 + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                    b1 = a0 + 3329 - t; if b1 >= 3329 { b1 = b1 - 3329; }
+                    pc[c0] = p5_set(pc[c0], j, b0); pc[c1] = p5_set(pc[c1], j + len, b1);
+                    j = j + 1;
+                }
+                start = start + len * 2;
+            }
+            len = len >> 1;
+        }
+        i = 0; while i < 52 { pa[i] = 0; i = i + 1; }
+        i = 0; while i < 256 { c0 = widx5(i); pa[c0] = p5_set(pa[c0], i, cbd_coeff(phase, i)); i = i + 1; }
+        k = 1; len = 128;
+        while len >= 2 {
+            start = 0;
+            while start < 256 {
+                z = kyber_zeta(k); k = k + 1; j = start;
+                while j < start + len {
+                    c0 = widx5(j); c1 = widx5(j + len);
+                    a0 = p5_get(pa[c0], j); a1 = p5_get(pa[c1], j + len);
+                    t = barrett3329(z * a1);
+                    b0 = a0 + t; if b0 >= 3329 { b0 = b0 - 3329; }
+                    b1 = a0 + 3329 - t; if b1 >= 3329 { b1 = b1 - 3329; }
+                    pa[c0] = p5_set(pa[c0], j, b0); pa[c1] = p5_set(pa[c1], j + len, b1);
+                    j = j + 1;
+                }
+                start = start + len * 2;
+            }
+            len = len >> 1;
+        }
+        i = 0;
+        while i < 128 {
+            z = kyber_gamma(i);
+            c0 = widx5(i * 2); c1 = widx5(i * 2 + 1);
+            a0 = p5_get(pa[c0], i * 2); a1 = p5_get(pa[c1], i * 2 + 1);
+            b0 = p5_get(pc[c0], i * 2); b1 = p5_get(pc[c1], i * 2 + 1);
+            t = barrett3329(a0 * b0 + barrett3329(a1 * b1) * z);
+            a0 = barrett3329(a0 * b1 + a1 * b0);
+            b0 = p5_get(pb[c0], i * 2) + t; if b0 >= 3329 { b0 = b0 - 3329; }
+            b1 = p5_get(pb[c1], i * 2 + 1) + a0; if b1 >= 3329 { b1 = b1 - 3329; }
+            pb[c0] = p5_set(pb[c0], i * 2, b0); pb[c1] = p5_set(pb[c1], i * 2 + 1, b1);
+            i = i + 1;
+        }
+        phase = phase + 1;
+    }
+
+    // INTT(pb) -> pb = acc_dec = INTT(s_hat0*NTT(u0) + s_hat1*NTT(u1))
+    k = 127; len = 2;
+    while len <= 128 {
+        start = 0;
+        while start < 256 {
+            z = kyber_zeta(k); k = k - 1; j = start;
+            while j < start + len {
+                c0 = widx5(j); c1 = widx5(j + len);
+                a0 = p5_get(pb[c0], j); a1 = p5_get(pb[c1], j + len);
+                b0 = a0 + a1; if b0 >= 3329 { b0 = b0 - 3329; }
+                b1 = barrett3329((a1 + 3329 - a0) * z);
+                pb[c0] = p5_set(pb[c0], j, b0); pb[c1] = p5_set(pb[c1], j + len, b1);
+                j = j + 1;
+            }
+            start = start + len * 2;
+        }
+        len = len << 1;
+    }
+    i = 0;
+    while i < 256 {
+        c0 = widx5(i);
+        pb[c0] = p5_set(pb[c0], i, barrett3329(p5_get(pb[c0], i) * 3303));
+        i = i + 1;
+    }
+
+    // -------------------------------------------------------------------------
+    // PART 3: Construct v_rx, Decaps decode m', and Fujisaki-Okamoto Re-Encrypt Check!
+    // -------------------------------------------------------------------------
+    let mut fo_diff: i64 = 0;
+    let mut m_diff: i64 = 0;
+    i = 0;
+    while i < 256 {
+        c0 = widx5(i);
+        let vn: i64 = p5_get(pd[c0], i);
+        let mb_orig: i64 = msg_bit(i);
+        let mut v_rx: i64 = vn + 1665 * mb_orig;
+        if v_rx >= 3329 { v_rx = v_rx - 3329; }
+        // Planted attack (a): 1-LSB ML-KEM ciphertext tamper on v[7] (within noise margin, caught by FO!)
+        if mode == 1 && i == 7 {
+            v_rx = v_rx + 1;
+            if v_rx >= 3329 { v_rx = v_rx - 3329; }
+        }
+        f2 = (f2 * 33 + v_rx + i) & m32;
+
+        // Decaps: w_i = (v_rx - s^T u) mod 3329 -> decode bit m'_i
+        let sd: i64 = p5_get(pb[c0], i);
+        let mut wi: i64 = v_rx + 3329 - sd;
+        if wi >= 3329 { wi = wi - 3329; }
+        let mut mb_dec: i64 = 0;
+        if wi > 832 && wi < 2497 { mb_dec = 1; }
+        if mb_dec != mb_orig { m_diff = m_diff + 1; }
+
+        // Fujisaki-Okamoto re-encryption check: v_reenc(m') must match received v_rx bit-for-bit!
+        let mut v_re: i64 = vn + 1665 * mb_dec;
+        if v_re >= 3329 { v_re = v_re - 3329; }
+        fo_diff = fo_diff | (v_re ^ v_rx);
+        i = i + 1;
+    }
+
+    // Implicit rejection on FO ciphertext tamper!
+    if fo_diff != 0 || m_diff != 0 {
+        println("{}", -101); println("{}", 0); return -101;
+    }
+
+    // Verify u0/u1/v fold matches deterministic ciphertext and derive ss_mlkem via SHA-256
+    f3 = exp_ct_fold(3);
+    if f0 != exp_ct_fold(0) || f1 != exp_ct_fold(1) || f2 != exp_ct_fold(2) {
+        println("{}", -103); println("{}", 0); return -103;
+    }
+    return pq_stage1b_ss_hash(f0, f1, f2, f3);
+}
+
+fn pq_stage2_x25519_hybrid_aead(mode: i64, pq_w0: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let m26: i64 = 67108863;
+
+    let mut fe: [i64; 130] = [0; 130];
+    let mut acc: [i64; 10] = [0; 10];
+    let mut sk: [i64; 8] = [0; 8];
+    let mut u_in: [i64; 8] = [0; 8];
+    let mut vault: [i64; 48] = [0; 48];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut k: i64 = 0; let mut cp: i64 = 0;
+    let mut p0: i64 = 0; let mut p1: i64 = 0; let mut p2: i64 = 0; let mut p3: i64 = 0;
+    let mut q0: i64 = 0; let mut q1: i64 = 0; let mut q2: i64 = 0; let mut q3: i64 = 0;
+    let mut h0: i64 = 0; let mut h1: i64 = 0; let mut h2: i64 = 0; let mut h3: i64 = 0;
+    let mut h4: i64 = 0; let mut h5: i64 = 0; let mut h6: i64 = 0; let mut h7: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut hh: i64 = 0;
+
+    // 1A: RFC 7748 X25519 ECDH (4 ladders: apk, bpk, Alice ss, Bob ss)
+    p0 = 0; p1 = 0; p2 = 1;
+    while p0 < 4 {
+        if p0 == 0 || p0 == 2 {
+            sk[0] = 174917495;  sk[1] = 2107971699; sk[2] = 1925256764; sk[3] = 1164358225;
+            sk[4] = 2268024031; sk[5] = 714719467;  sk[6] = 2784720817; sk[7] = 707574045;
+        } else {
+            sk[0] = 2114497373; sk[1] = 1267354210; sk[2] = 2340413817; sk[3] = 3859710083;
+            sk[4] = 699480943;  sk[5] = 4256569382; sk[6] = 663432988;  sk[7] = 3957360895;
+        }
+        sk[0] = sk[0] & 4294967288;
+        sk[7] = (sk[7] & 2147483647) | 1073741824;
+
+        i = 0;
+        while i < 8 {
+            if p0 == 2 { u_in[i] = vault[8 + i]; if mode == 2 && i == 0 { u_in[0] = u_in[0] ^ 1; } }
+            else if p0 == 3 { u_in[i] = vault[i]; }
+            else { u_in[i] = 0; }
+            i = i + 1;
+        }
+        if p0 == 0 || p0 == 1 { u_in[0] = 9; }
+        u_in[7] = u_in[7] & 2147483647;
+
+        i = 0; while i < 130 { fe[i] = 0; i = i + 1; }
+        q0 = 0; i = 0;
+        while i < 10 {
+            a = 26; if (i & 1) != 0 { a = 25; }
+            b = q0 >> 5; c = q0 & 31;
+            d = u_in[b] >> c;
+            if c + a > 32 && b + 1 < 8 { d = d | (u_in[b + 1] << (32 - c)); }
+            d = d & ((1 << a) - 1);
+            fe[i] = d; fe[30 + i] = d;
+            q0 = q0 + a; i = i + 1;
+        }
+        fe[10] = 1; fe[40] = 1;
+
+        q0 = 0; q1 = 0; q2 = 254;
+        while q1 < 2 {
+            q3 = 0; p3 = 18;
+            if q1 == 0 {
+                a = 0; if q2 >= 0 { a = (sk[q2 >> 5] >> (q2 & 31)) & 1; }
+                q0 = q0 ^ a; b = 0 - q0;
+                i = 0;
+                while i < 10 {
+                    c = b & (fe[10 + i] ^ fe[30 + i]);
+                    fe[10 + i] = fe[10 + i] ^ c; fe[30 + i] = fe[30 + i] ^ c;
+                    d = b & (fe[20 + i] ^ fe[40 + i]);
+                    fe[20 + i] = fe[20 + i] ^ d; fe[40 + i] = fe[40 + i] ^ d;
+                    i = i + 1;
+                }
+                q0 = a; if q2 < 0 { p3 = 0; }
+            } else {
+                q3 = 18; p3 = 20; if q2 == 255 { q3 = 20; p3 = 21; }
+            }
+            while q3 < p3 {
+                a = 0;
+                if q3 == 0 { a = 5394; } else if q3 == 1 { a = 9746; } else if q3 == 2 { a = 14165; }
+                else if q3 == 3 { a = 14438; } else if q3 == 4 { a = 10616; } else if q3 == 5 { a = 6708; }
+                else if q3 == 6 { a = 11060; } else if q3 == 7 { a = 15541; } else if q3 == 8 { a = 15014; }
+                else if q3 == 9 { a = 5066; } else if q3 == 10 { a = 9418; } else if q3 == 11 { a = 13107; }
+                else if q3 == 12 { a = 13380; } else if q3 == 13 { a = 13316; } else if q3 == 14 { a = 12664; }
+                else if q3 == 15 { a = 19600; } else if q3 == 16 { a = 7292; } else if q3 == 17 { a = 12956; }
+                else if q3 == 18 { if q2 != 2 && q2 != 4 { a = 15019; } }
+                else if q3 == 19 { a = 15291; } else { a = 12570; }
+                if a != 0 {
+                    b = a >> 12; c = ((a >> 8) & 15) * 10; d = ((a >> 4) & 15) * 10; e = (a & 15) * 10;
+                    if b == 1 || b == 2 || b == 4 {
+                        k = 0;
+                        while k < 10 {
+                            if b == 1 { acc[k] = fe[d + k] + fe[e + k]; }
+                            else if b == 2 { acc[k] = fe[d + k] - fe[e + k]; }
+                            else { acc[k] = fe[d + k] * 121665; }
+                            k = k + 1;
+                        }
+                    } else {
+                        k = 0; while k < 10 { acc[k] = 0; k = k + 1; }
+                        i = 0;
+                        while i < 10 {
+                            f = fe[d + i]; g = i & 1; j = 0;
+                            while j < 10 {
+                                k = i + j; hh = 1;
+                                if g != 0 && (j & 1) != 0 { hh = 2; }
+                                if k >= 10 { k = k - 10; hh = hh * 19; }
+                                acc[k] = acc[k] + f * fe[e + j] * hh;
+                                j = j + 1;
+                            }
+                            i = i + 1;
+                        }
+                    }
+                    cp = 0;
+                    while cp < 2 {
+                        i = 0;
+                        while i < 10 {
+                            f = 26; g = m26; if (i & 1) != 0 { f = 25; g = 33554431; }
+                            hh = acc[i] >> f; acc[i] = acc[i] & g;
+                            if i < 9 { acc[i + 1] = acc[i + 1] + hh; } else { acc[0] = acc[0] + hh * 19; }
+                            i = i + 1;
+                        }
+                        cp = cp + 1;
+                    }
+                    i = 0; while i < 10 { fe[c + i] = acc[i]; i = i + 1; }
+                }
+                q3 = q3 + 1;
+            }
+            if q1 == 0 {
+                if q2 < 0 {
+                    i = 0; while i < 10 { fe[100 + i] = 0; fe[110 + i] = fe[20 + i]; i = i + 1; }
+                    fe[100] = 1; q1 = 1; q2 = 0;
+                } else { q2 = q2 - 1; }
+            } else {
+                if q2 == 255 { q1 = 2; } else { q2 = q2 + 1; }
+            }
+        }
+
+        i = 0; while i < 10 { acc[i] = fe[10 + i]; i = i + 1; }
+        while acc[9] < 0 {
+            acc[0] = acc[0] - 19; acc[9] = acc[9] + 33554432;
+            cp = 0;
+            while cp < 2 {
+                i = 0;
+                while i < 10 {
+                    f = 26; g = m26; if (i & 1) != 0 { f = 25; g = 33554431; }
+                    hh = acc[i] >> f; acc[i] = acc[i] & g;
+                    if i < 9 { acc[i + 1] = acc[i + 1] + hh; } else { acc[0] = acc[0] + hh * 19; }
+                    i = i + 1;
+                }
+                cp = cp + 1;
+            }
+        }
+        i = 0; while i < 10 { fe[120 + i] = acc[i]; i = i + 1; }
+        fe[120] = fe[120] + 19;
+        i = 0;
+        while i < 9 {
+            f = 26; g = m26; if (i & 1) != 0 { f = 25; g = 33554431; }
+            hh = fe[120 + i] >> f; fe[120 + i] = fe[120 + i] & g;
+            fe[120 + i + 1] = fe[120 + i + 1] + hh; i = i + 1;
+        }
+        a = fe[129] >> 25; fe[129] = fe[129] & 33554431;
+        if a > 0 { i = 0; while i < 10 { acc[i] = fe[120 + i]; i = i + 1; } }
+
+        i = 0; while i < 8 { u_in[i] = 0; i = i + 1; }
+        q0 = 0; i = 0;
+        while i < 10 {
+            a = 26; if (i & 1) != 0 { a = 25; }
+            b = q0 >> 5; c = q0 & 31;
+            u_in[b] = (u_in[b] | ((acc[i] << c) & m32)) & m32;
+            if c + a > 32 && b + 1 < 8 { u_in[b + 1] = (u_in[b + 1] | (acc[i] >> (32 - c))) & m32; }
+            q0 = q0 + a; i = i + 1;
+        }
+
+        i = 0;
+        while i < 8 {
+            if p0 < 3 {
+                vault[p0 * 8 + i] = u_in[i];
+                if p0 == 2 { p1 = p1 | u_in[i]; }
+            } else if u_in[i] != vault[16 + i] { p2 = 0; }
+            i = i + 1;
+        }
+        p0 = p0 + 1;
+    }
+
+    if p1 == 0 || p2 == 0 {
+        println("{}", -201); println("{}", 0); return -201;
+    }
+
+    // 1B: Transcript SHA-256 + RFC 5869 HKDF-SHA256
+    i = 0; while i < 64 { fe[i] = sha256_k(i); i = i + 1; }
+    i = 0; while i < 24 { vault[i] = bswap32(vault[i]); i = i + 1; }
+
+    p0 = 0;
+    while p0 < 2 {
+        p1 = 0;
+        while p1 < 7 {
+            h0 = sha256_iv(0); h1 = sha256_iv(1); h2 = sha256_iv(2); h3 = sha256_iv(3);
+            h4 = sha256_iv(4); h5 = sha256_iv(5); h6 = sha256_iv(6); h7 = sha256_iv(7);
+            p2 = 2; if p1 == 5 { p2 = 3; }
+            p3 = 0;
+            while p3 < p2 {
+                i = 0; while i < 16 { fe[64 + i] = 0; i = i + 1; }
+                if p1 == 0 {
+                    if p3 == 0 { i = 0; while i < 16 { fe[64 + i] = vault[i]; i = i + 1; } }
+                    else {
+                        i = 0; while i < 8 { fe[64 + i] = exp_ss_mlkem(i); i = i + 1; }
+                        fe[72] = 2147483648; fe[79] = 768;
+                    }
+                } else {
+                    q0 = 909522486; if p1 == 2 || p1 == 4 || p1 == 6 { q0 = 1549556828; }
+                    q1 = 32; if p1 == 1 || p1 == 2 { q1 = 24; }
+                    if p3 == 0 {
+                        i = 0; while i < 8 { fe[64 + i] = vault[q1 + i] ^ q0; i = i + 1; }
+                        while i < 16 { fe[64 + i] = q0; i = i + 1; }
+                    } else if p1 == 1 {
+                        i = 0; while i < 8 { fe[64 + i] = vault[16 + i]; i = i + 1; }
+                        fe[72] = 2147483648; fe[79] = 768;
+                    } else if p1 == 2 || p1 == 4 || p1 == 6 {
+                        i = 0; while i < 8 { fe[64 + i] = vault[40 + i]; i = i + 1; }
+                        fe[72] = 2147483648; fe[79] = 768;
+                    } else if p1 == 3 {
+                        i = 0; while i < 8 { fe[64 + i] = vault[24 + i]; i = i + 1; }
+                        fe[72] = 25165824; fe[79] = 776;
+                    } else if p3 == 1 {
+                        i = 0;
+                        while i < 8 {
+                            if p0 == 0 { fe[64 + i] = bswap32(sk[i]); } else { fe[64 + i] = bswap32(u_in[i]); }
+                            fe[72 + i] = vault[24 + i]; i = i + 1;
+                        }
+                    } else { fe[64] = 41943040; fe[79] = 1032; }
+                }
+                i = 16;
+                while i < 64 {
+                    q0 = fe[64 + i - 15]; q1 = rotr32(q0, 7) ^ rotr32(q0, 18) ^ (q0 >> 3);
+                    q2 = fe[64 + i - 2];  q3 = rotr32(q2, 17) ^ rotr32(q2, 19) ^ (q2 >> 10);
+                    fe[64 + i] = (fe[64 + i - 16] + q1 + fe[64 + i - 7] + q3) & m32;
+                    i = i + 1;
+                }
+                a = h0; b = h1; c = h2; d = h3; e = h4; f = h5; g = h6; hh = h7;
+                i = 0;
+                while i < 64 {
+                    q0 = (hh + (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25))
+                          + ((e & f) ^ ((e ^ m32) & g)) + fe[i] + fe[64 + i]) & m32;
+                    q1 = ((rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22))
+                          + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                    hh = g; g = f; f = e; e = (d + q0) & m32;
+                    d = c; c = b; b = a; a = (q0 + q1) & m32;
+                    i = i + 1;
+                }
+                h0 = (h0 + a) & m32; h1 = (h1 + b) & m32; h2 = (h2 + c) & m32; h3 = (h3 + d) & m32;
+                h4 = (h4 + e) & m32; h5 = (h5 + f) & m32; h6 = (h6 + g) & m32; h7 = (h7 + hh) & m32;
+                p3 = p3 + 1;
+            }
+            if p1 == 0 {
+                vault[24] = h0; vault[25] = h1; vault[26] = h2; vault[27] = h3;
+                vault[28] = h4; vault[29] = h5; vault[30] = h6; vault[31] = h7;
+            } else if p1 == 2 {
+                vault[32] = h0; vault[33] = h1; vault[34] = h2; vault[35] = h3;
+                vault[36] = h4; vault[37] = h5; vault[38] = h6; vault[39] = h7;
+            } else if p1 == 4 {
+                if p0 == 0 {
+                    sk[0] = bswap32(h0); sk[1] = bswap32(h1); sk[2] = bswap32(h2); sk[3] = bswap32(h3);
+                    sk[4] = bswap32(h4); sk[5] = bswap32(h5); sk[6] = bswap32(h6); sk[7] = bswap32(h7);
+                } else {
+                    u_in[0] = bswap32(h0); u_in[1] = bswap32(h1); u_in[2] = bswap32(h2); u_in[3] = bswap32(h3);
+                    u_in[4] = bswap32(h4); u_in[5] = bswap32(h5); u_in[6] = bswap32(h6); u_in[7] = bswap32(h7);
+                }
+            } else if p1 == 6 {
+                if p0 == 0 { acc[0] = bswap32(h0); acc[1] = bswap32(h1); acc[2] = bswap32(h2); }
+                else { acc[3] = bswap32(h0); acc[4] = bswap32(h1); acc[5] = bswap32(h2); }
+            } else {
+                vault[40] = h0; vault[41] = h1; vault[42] = h2; vault[43] = h3;
+                vault[44] = h4; vault[45] = h5; vault[46] = h6; vault[47] = h7;
+            }
+            p1 = p1 + 1;
+        }
+        p0 = p0 + 1;
+    }
+
+    // 1C: RFC 8439 ChaCha20-Poly1305 encrypting 32-byte manifest digest + 16-byte AAD
+    i = 0; while i < 12 { fe[48 + i] = hyb_pt_aad_le(i); i = i + 1; }
+
+    p1 = 0; p2 = 0; p0 = 0;
+    while p0 < 2 {
+        fe[0] = 1634760805; fe[1] = 857760878; fe[2] = 2036477234; fe[3] = 1797285236;
+        i = 0;
+        while i < 8 {
+            if p0 == 0 { fe[4 + i] = sk[i]; } else { fe[4 + i] = u_in[i]; }
+            i = i + 1;
+        }
+        if p0 == 0 { fe[13] = acc[0]; fe[14] = acc[1]; fe[15] = acc[2]; }
+        else { fe[13] = acc[3]; fe[14] = acc[4]; fe[15] = acc[5]; }
+
+        p3 = 0;
+        while p3 < 2 {
+            fe[12] = p3;
+            i = 0; while i < 16 { fe[16 + i] = fe[i]; i = i + 1; }
+            j = 0;
+            while j < 10 {
+                k = 0;
+                while k < 8 {
+                    q0 = 16 + (k & 3);
+                    q1 = 20 + (((k & 3) + (k >> 2)) & 3);
+                    q2 = 24 + (((k & 3) + (k >> 2) * 2) & 3);
+                    q3 = 28 + (((k & 3) + (k >> 2) * 3) & 3);
+                    a = fe[q0]; b = fe[q1]; c = fe[q2]; d = fe[q3];
+                    a = (a + b) & m32; d = rotr32(d ^ a, 16);
+                    c = (c + d) & m32; b = rotr32(b ^ c, 20);
+                    a = (a + b) & m32; d = rotr32(d ^ a, 24);
+                    c = (c + d) & m32; b = rotr32(b ^ c, 25);
+                    fe[q0] = a; fe[q1] = b; fe[q2] = c; fe[q3] = d;
+                    k = k + 1;
+                }
+                j = j + 1;
+            }
+            i = 0;
+            while i < 8 {
+                a = (fe[16 + i] + fe[i]) & m32;
+                if p3 == 0 { fe[32 + i] = a; } else { fe[64 + i] = a; }
+                i = i + 1;
+            }
+            p3 = p3 + 1;
+        }
+
+        if p0 == 0 {
+            i = 0; while i < 8 { fe[40 + i] = (fe[48 + i] ^ fe[64 + i]) & m32; i = i + 1; }
+        }
+
+        a = fe[32] & 268435455; b = fe[33] & 268435452; c = fe[34] & 268435452; d = fe[35] & 268435452;
+        fe[80] = a & m26;
+        fe[81] = ((a >> 26) | (b << 6)) & m26;
+        fe[82] = ((b >> 20) | (c << 12)) & m26;
+        fe[83] = ((c >> 14) | (d << 18)) & m26;
+        fe[84] = (d >> 8) & m26;
+        h0 = 0; h1 = 0; h2 = 0; h3 = 0; h4 = 0;
+        p3 = 0;
+        while p3 < 4 {
+            q0 = 16; q1 = 0; q2 = 32; q3 = 0;
+            if p3 == 0 { q0 = fe[56]; q1 = fe[57]; q2 = fe[58]; q3 = fe[59]; }
+            else if p3 == 1 { q0 = fe[40]; q1 = fe[41]; q2 = fe[42]; q3 = fe[43]; }
+            else if p3 == 2 { q0 = fe[44]; q1 = fe[45]; q2 = fe[46]; q3 = fe[47]; }
+            h0 = h0 + (q0 & m26);
+            h1 = h1 + (((q0 >> 26) | (q1 << 6)) & m26);
+            h2 = h2 + (((q1 >> 20) | (q2 << 12)) & m26);
+            h3 = h3 + (((q2 >> 14) | (q3 << 18)) & m26);
+            h4 = h4 + ((q3 >> 8) | 16777216);
+            a = h0 * fe[80] + h1 * (fe[84] * 5) + h2 * (fe[83] * 5) + h3 * (fe[82] * 5) + h4 * (fe[81] * 5);
+            b = h0 * fe[81] + h1 * fe[80] + h2 * (fe[84] * 5) + h3 * (fe[83] * 5) + h4 * (fe[82] * 5);
+            c = h0 * fe[82] + h1 * fe[81] + h2 * fe[80] + h3 * (fe[84] * 5) + h4 * (fe[83] * 5);
+            d = h0 * fe[83] + h1 * fe[82] + h2 * fe[81] + h3 * fe[80] + h4 * (fe[84] * 5);
+            e = h0 * fe[84] + h1 * fe[83] + h2 * fe[82] + h3 * fe[81] + h4 * fe[80];
+            cp = a >> 26; h0 = a & m26; b = b + cp;
+            cp = b >> 26; h1 = b & m26; c = c + cp;
+            cp = c >> 26; h2 = c & m26; d = d + cp;
+            cp = d >> 26; h3 = d & m26; e = e + cp;
+            cp = e >> 26; h4 = e & m26; h0 = h0 + cp * 5;
+            cp = h0 >> 26; h0 = h0 & m26; h1 = h1 + cp;
+            p3 = p3 + 1;
+        }
+        cp = h1 >> 26; h1 = h1 & m26; h2 = h2 + cp;
+        cp = h2 >> 26; h2 = h2 & m26; h3 = h3 + cp;
+        cp = h3 >> 26; h3 = h3 & m26; h4 = h4 + cp;
+        cp = h4 >> 26; h4 = h4 & m26; h0 = h0 + cp * 5;
+        cp = h0 >> 26; h0 = h0 & m26; h1 = h1 + cp;
+        a = h0 + 5; cp = a >> 26; a = a & m26;
+        b = h1 + cp; cp = b >> 26; b = b & m26;
+        c = h2 + cp; cp = c >> 26; c = c & m26;
+        d = h3 + cp; cp = d >> 26; d = d & m26;
+        if h4 + cp - 67108864 >= 0 { h0 = a; h1 = b; h2 = c; h3 = d; h4 = h4 + cp - 67108864; }
+        a = ((h0 | (h1 << 26)) & m32) + fe[36]; cp = a >> 32; a = a & m32;
+        b = (((h1 >> 6) | (h2 << 20)) & m32) + fe[37] + cp; cp = b >> 32; b = b & m32;
+        c = (((h2 >> 12) | (h3 << 14)) & m32) + fe[38] + cp; cp = c >> 32; c = c & m32;
+        d = ((((h3 >> 18) | (h4 << 8)) & m32) + fe[39] + cp) & m32;
+
+        if p0 == 0 {
+            acc[6] = a; acc[7] = b; acc[8] = c; acc[9] = d;
+            // Planted attack (a): MITM 1-bit AEAD Poly1305 tag tamper in transit
+            if mode == 4 { acc[6] = acc[6] ^ 1; }
+        } else {
+            e = (a ^ acc[6]) | (b ^ acc[7]) | (c ^ acc[8]) | (d ^ acc[9]);
+            if e == 0 {
+                p1 = 1; p2 = 1; i = 0;
+                while i < 8 {
+                    if ((fe[40 + i] ^ fe[64 + i]) & m32) != fe[48 + i] { p2 = 0; }
+                    i = i + 1;
+                }
+            }
+        }
+        p0 = p0 + 1;
+    }
+
+    if p1 == 0 || p2 == 0 {
+        println("{}", -401); println("{}", 0); return -401;
+    }
+    // Clean commit: status=1, committed=1, q=3329, n=256, k=2, pq_w0, tag_w0, ss_mlkem[0..7], k_hyb_be[0..7]
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 3329);
+    println("{}", 256);
+    println("{}", 2);
+    println("{}", pq_w0);
+    println("{}", acc[6]);
+    i = 0; while i < 8 { println("{}", exp_ss_mlkem(i)); i = i + 1; }
+    i = 0; while i < 8 { println("{}", bswap32(sk[i])); i = i + 1; }
+    return 1;
+}
+
+fn pq_hybrid_kem_run(mode: i64) -> i64 ~ Console {
+    let pq_w0: i64 = pq_stage1_mlkem512(mode);
+    if pq_w0 < 0 { return pq_w0; }
+    return pq_stage2_x25519_hybrid_aead(mode, pq_w0);
+}
+
+fn main() ~ Console {
+    let _ = pq_hybrid_kem_run(0);
+}
