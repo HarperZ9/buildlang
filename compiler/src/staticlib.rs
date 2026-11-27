@@ -99,7 +99,7 @@ pub(crate) fn build_static_library(
             .args(crate::c_fp_flags(false))
             .arg(if release { "-O2" } else { "-g" })
             .args(if release {
-                crate::c_vector_flags()
+                crate::c_vector_flags(&compiler)
             } else {
                 &[]
             })
