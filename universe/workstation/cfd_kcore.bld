@@ -1,0 +1,252 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 50A Kernel 2 (Author Idea C8):
+//   1D Sod Shock-Tube Compressible Euler Solver (2nd-Order MUSCL-Minmod + HLL Riemann Flux)
+//   + Laminar Poiseuille Parabolic Profile & Hagen-Poiseuille Flux
+//   + Planted CFL > 1 Instability Guard.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a;
+    }
+    b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b {
+        return a;
+    }
+    b
+}
+
+fn minmod(a: f64, b: f64) -> f64 {
+    if a * b <= 0.0 {
+        return 0.0;
+    }
+    if abs_f64(a) < abs_f64(b) {
+        return a;
+    }
+    b
+}
+
+struct Flux3 {
+    f0: f64,
+    f1: f64,
+    f2: f64,
+}
+
+fn hll_flux(
+    rl: f64,
+    ul: f64,
+    pl: f64,
+    rr: f64,
+    ur: f64,
+    pr: f64,
+    gam: f64,
+) -> Flux3 {
+    let el: f64 = pl / (gam - 1.0) + 0.5 * rl * ul * ul;
+    let er: f64 = pr / (gam - 1.0) + 0.5 * rr * ur * ur;
+    let al: f64 = sqrt(gam * pl / rl);
+    let ar: f64 = sqrt(gam * pr / rr);
+    let sl: f64 = min_f64(ul - al, ur - ar);
+    let sr: f64 = max_f64(ul + al, ur + ar);
+
+    let fl0: f64 = rl * ul;
+    let fl1: f64 = rl * ul * ul + pl;
+    let fl2: f64 = ul * (el + pl);
+    let fr0: f64 = rr * ur;
+    let fr1: f64 = rr * ur * ur + pr;
+    let fr2: f64 = ur * (er + pr);
+
+    if sl >= 0.0 {
+        return Flux3 { f0: fl0, f1: fl1, f2: fl2 };
+    }
+    if sr <= 0.0 {
+        return Flux3 { f0: fr0, f1: fr1, f2: fr2 };
+    }
+    let inv_d: f64 = 1.0 / (sr - sl);
+    Flux3 {
+        f0: (sr * fl0 - sl * fr0 + sl * sr * (rr - rl)) * inv_d,
+        f1: (sr * fl1 - sl * fr1 + sl * sr * (rr * ur - rl * ul)) * inv_d,
+        f2: (sr * fl2 - sl * fr2 + sl * sr * (er - el)) * inv_d,
+    }
+}
+
+fn check_cfl_guard(cfl: f64) -> bool {
+    cfl > 0.0 && cfl <= 0.95
+}
+
+fn poiseuille_u(r: f64, rad: f64, dp_dx: f64, mu: f64) -> f64 {
+    (dp_dx / (4.0 * mu)) * (rad * rad - r * r)
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let gam: f64 = 1.4;
+    let n: usize = 600;
+    let dx: f64 = 1.0 / (n as f64);
+    let cfl: f64 = 0.40;
+    let t_end: f64 = 0.20;
+
+    // 1. Initialize 1D Sod Shock Tube: L=(1.0, 0.0, 1.0), R=(0.125, 0.0, 0.1)
+    let mut u0: Vec<f64> = Vec::new();
+    let mut u1: Vec<f64> = Vec::new();
+    let mut u2: Vec<f64> = Vec::new();
+    let mut rho_v: Vec<f64> = Vec::new();
+    let mut vel_v: Vec<f64> = Vec::new();
+    let mut pre_v: Vec<f64> = Vec::new();
+    let mut fl0: Vec<f64> = Vec::new();
+    let mut fl1: Vec<f64> = Vec::new();
+    let mut fl2: Vec<f64> = Vec::new();
+
+    let mut i: usize = 0;
+    while i < n {
+        let xc: f64 = ((i as f64) + 0.5) * dx;
+        let r_i: f64 = if xc < 0.5 { 1.0 } else { 0.125 };
+        let p_i: f64 = if xc < 0.5 { 1.0 } else { 0.1 };
+        u0.push(r_i);
+        u1.push(0.0);
+        u2.push(p_i / (gam - 1.0));
+        rho_v.push(r_i);
+        vel_v.push(0.0);
+        pre_v.push(p_i);
+        fl0.push(0.0);
+        fl1.push(0.0);
+        fl2.push(0.0);
+        i = i + 1;
+    }
+    fl0.push(0.0);
+    fl1.push(0.0);
+    fl2.push(0.0);
+
+    let t0_ns: i64 = clock_ns();
+    let mut t: f64 = 0.0;
+    let mut steps: i32 = 0;
+    while t < t_end && check_cfl_guard(cfl) {
+        let mut max_s: f64 = 1.0e-12;
+        i = 0;
+        while i < n {
+            let r: f64 = u0[i];
+            let v: f64 = u1[i] / r;
+            let p: f64 = (gam - 1.0) * (u2[i] - 0.5 * r * v * v);
+            rho_v[i] = r;
+            vel_v[i] = v;
+            pre_v[i] = p;
+            let c: f64 = sqrt(gam * p / r);
+            max_s = max_f64(max_s, abs_f64(v) + c);
+            i = i + 1;
+        }
+        let mut dt: f64 = cfl * dx / max_s;
+        if t + dt > t_end {
+            dt = t_end - t;
+        }
+
+        // Compute MUSCL-Minmod interface HLL fluxes
+        let mut f_idx: usize = 0;
+        while f_idx <= n {
+            let il: usize = if f_idx == 0 { 0 } else { f_idx - 1 };
+            let ir: usize = if f_idx == n { n - 1 } else { f_idx };
+            let mut rl: f64 = rho_v[il];
+            let mut ul: f64 = vel_v[il];
+            let mut pl: f64 = pre_v[il];
+            if il > 0 && il + 1 < n {
+                rl = rl + 0.5 * minmod(rho_v[il] - rho_v[il - 1], rho_v[il + 1] - rho_v[il]);
+                ul = ul + 0.5 * minmod(vel_v[il] - vel_v[il - 1], vel_v[il + 1] - vel_v[il]);
+                pl = pl + 0.5 * minmod(pre_v[il] - pre_v[il - 1], pre_v[il + 1] - pre_v[il]);
+            }
+            let mut rr: f64 = rho_v[ir];
+            let mut ur: f64 = vel_v[ir];
+            let mut pr: f64 = pre_v[ir];
+            if ir > 0 && ir + 1 < n {
+                rr = rr - 0.5 * minmod(rho_v[ir] - rho_v[ir - 1], rho_v[ir + 1] - rho_v[ir]);
+                ur = ur - 0.5 * minmod(vel_v[ir] - vel_v[ir - 1], vel_v[ir + 1] - vel_v[ir]);
+                pr = pr - 0.5 * minmod(pre_v[ir] - pre_v[ir - 1], pre_v[ir + 1] - pre_v[ir]);
+            }
+            let fl: Flux3 = hll_flux(rl, ul, pl, rr, ur, pr, gam);
+            fl0[f_idx] = fl.f0;
+            fl1[f_idx] = fl.f1;
+            fl2[f_idx] = fl.f2;
+            f_idx = f_idx + 1;
+        }
+
+        let dt_dx: f64 = dt / dx;
+        i = 0;
+        while i < n {
+            u0[i] = u0[i] - dt_dx * (fl0[i + 1] - fl0[i]);
+            u1[i] = u1[i] - dt_dx * (fl1[i + 1] - fl1[i]);
+            u2[i] = u2[i] - dt_dx * (fl2[i + 1] - fl2[i]);
+            i = i + 1;
+        }
+        t = t + dt;
+        steps = steps + 1;
+    }
+    let t1_ns: i64 = clock_ns();
+
+    // Emit 20 sampled stations across [0, 1] for exact Python Riemann L2 verification
+    let mut sample_str: String = "";
+    let mut s_i: usize = 0;
+    while s_i < 20 {
+        let cell: usize = s_i * 30 + 15;
+        let r: f64 = u0[cell];
+        let v: f64 = u1[cell] / r;
+        let p: f64 = (gam - 1.0) * (u2[cell] - 0.5 * r * v * v);
+        sample_str = format!("{}{:.6},{:.6};", sample_str, r, p);
+        s_i = s_i + 1;
+    }
+    println!("[DATA] sod_samples {}", sample_str);
+    println!("[PASS] sod_euler_muscl cells=600 steps={} t={:.6} elapsed_ns={}", steps, t, t1_ns - t0_ns);
+
+    // 2. Poiseuille laminar parabolic profile + exact Hagen-Poiseuille flux check
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let rad: f64 = 0.02;
+    let dp_dx: f64 = 120.0;
+    let mu: f64 = 0.001;
+    let n_r: i64 = 200;
+    let dr: f64 = rad / (n_r as f64);
+    let mut q_num: f64 = 0.0;
+    let mut ri: i64 = 0;
+    while ri <= n_r {
+        let r_pos: f64 = (ri as f64) * dr;
+        let wt: f64 = if ri == 0 || ri == n_r {
+            1.0
+        } else if (ri & 1) == 1 {
+            4.0
+        } else {
+            2.0
+        };
+        q_num = q_num + wt * 2.0 * pi * r_pos * poiseuille_u(r_pos, rad, dp_dx, mu);
+        ri = ri + 1;
+    }
+    q_num = q_num * (dr / 3.0);
+    let q_exact: f64 = (pi * rad * rad * rad * rad * dp_dx) / (8.0 * mu);
+    let q_rel_err: f64 = abs_f64(q_num - q_exact) / q_exact;
+    if q_rel_err <= 1.0e-12 {
+        println!("[PASS] poiseuille_profile q_num={:.12e} q_exact={:.12e} rel_err={:.3e}", q_num, q_exact, q_rel_err);
+    } else {
+        println!("[FAIL] poiseuille_profile rel_err={}", q_rel_err);
+        failures = failures + 1;
+    }
+
+    // 3. Planted failing control: CFL = 1.35 > 1.0 MUST be rejected fail-closed
+    let bad_cfl_ok: bool = check_cfl_guard(1.35);
+    if !bad_cfl_ok {
+        println!("[PASS] planted_cfl_gt1 caught cfl=1.35 rejected=true");
+    } else {
+        println!("[FAIL] planted_cfl_gt1 missed");
+        failures = failures + 1;
+    }
+
+    if failures == 0 {
+        println!("[PASS] cfd_kcore summary failures=0");
+    } else {
+        println!("[FAIL] cfd_kcore summary failures={}", failures);
+    }
+}

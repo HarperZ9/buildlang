@@ -1,0 +1,205 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 50A Kernel 1 (Author Ideas B1/N09):
+//   Snell / Paraxial ABCD Ray-Trace + Exact Newton Airy Disk + 2x2 Complex Transfer-Matrix
+//   Method (TMM) 10-Pair Quarter-Wave TiO2/SiO2 Bragg Crystal Mirror (> 99.5% at 550 nm)
+//   + Planted Wrong-Glass-Index Control.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn bessel_j0(x: f64) -> f64 {
+    let h2: f64 = 0.25 * x * x;
+    let mut term: f64 = 1.0;
+    let mut sum: f64 = 1.0;
+    let mut k: i64 = 1;
+    while k <= 30 {
+        let kf: f64 = k as f64;
+        term = -term * h2 / (kf * kf);
+        sum = sum + term;
+        if abs_f64(term) < 1.0e-18 {
+            return sum;
+        }
+        k = k + 1;
+    }
+    sum
+}
+
+fn bessel_j1(x: f64) -> f64 {
+    let half: f64 = 0.5 * x;
+    let h2: f64 = half * half;
+    let mut term: f64 = half;
+    let mut sum: f64 = term;
+    let mut k: i64 = 1;
+    while k <= 30 {
+        let kf: f64 = k as f64;
+        term = -term * h2 / (kf * (kf + 1.0));
+        sum = sum + term;
+        if abs_f64(term) < 1.0e-18 {
+            return sum;
+        }
+        k = k + 1;
+    }
+    sum
+}
+
+fn airy_radius_exact(lambda_nm: f64, f_num: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let mut x: f64 = 3.83;
+    let mut it: i32 = 0;
+    while it < 12 {
+        let f: f64 = bessel_j1(x);
+        let df: f64 = bessel_j0(x) - f / x;
+        x = x - f / df;
+        it = it + 1;
+    }
+    (x / pi) * lambda_nm * f_num
+}
+
+// Paraxial thin-lens ABCD ray trace:
+// [y1, th1] = [[1, d2], [0, 1]] * [[1, 0], [-1/f, 1]] * [[1, d1], [0, 1]] * [y0, th0]
+fn paraxial_image_height(y0: f64, th0: f64, d1: f64, f: f64, d2: f64) -> f64 {
+    let y_lens: f64 = y0 + d1 * th0;
+    let th_after: f64 = th0 - y_lens / f;
+    y_lens + d2 * th_after
+}
+
+// Snell's law sine of refracted angle
+fn snell_sin_theta2(n1: f64, n2: f64, sin_theta1: f64) -> f64 {
+    (n1 / n2) * sin_theta1
+}
+
+// 2x2 Complex Transfer-Matrix Method (TMM) normal-incidence Bragg mirror reflectance.
+// N pairs of alternating quarter-wave (lambda_0 / (4 n)) TiO2 (n_h) / SiO2 (n_l) on substrate n_s.
+fn bragg_tmm_reflectance(
+    n0: f64,
+    n_h: f64,
+    n_l: f64,
+    n_s: f64,
+    n_pairs: i32,
+    lambda0_nm: f64,
+    lambda_nm: f64,
+) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    // Start with identity 2x2 complex matrix M = [[m00, m01], [m10, m11]]
+    let mut m00r: f64 = 1.0;
+    let mut m00i: f64 = 0.0;
+    let mut m01r: f64 = 0.0;
+    let mut m01i: f64 = 0.0;
+    let mut m10r: f64 = 0.0;
+    let mut m10i: f64 = 0.0;
+    let mut m11r: f64 = 1.0;
+    let mut m11i: f64 = 0.0;
+
+    // Quarter-wave optical thickness n*d = lambda0 / 4 -> phase delta = (pi/2) * (lambda0 / lambda)
+    let delta: f64 = 0.5 * pi * (lambda0_nm / lambda_nm);
+    let cd: f64 = cos(delta);
+    let sd: f64 = sin(delta);
+
+    let mut layer: i32 = 0;
+    let total_layers: i32 = n_pairs * 2;
+    while layer < total_layers {
+        let nj: f64 = if (layer & 1) == 0 { n_h } else { n_l };
+        // Layer matrix L = [[cd, -i*sd/nj], [-i*nj*sd, cd]]
+        let l00r: f64 = cd;
+        let l01i: f64 = -sd / nj;
+        let l10i: f64 = -nj * sd;
+        let l11r: f64 = cd;
+
+        // M_new = M * L
+        let n00r: f64 = m00r * l00r - m01i * l10i;
+        let n00i: f64 = m00i * l00r + m01r * l10i;
+        let n01r: f64 = m01r * l11r - m00i * l01i;
+        let n01i: f64 = m01i * l11r + m00r * l01i;
+        let n10r: f64 = m10r * l00r - m11i * l10i;
+        let n10i: f64 = m10i * l00r + m11r * l10i;
+        let n11r: f64 = m11r * l11r - m10i * l01i;
+        let n11i: f64 = m11i * l11r + m10r * l01i;
+
+        m00r = n00r; m00i = n00i;
+        m01r = n01r; m01i = n01i;
+        m10r = n10r; m10i = n10i;
+        m11r = n11r; m11i = n11i;
+        layer = layer + 1;
+    }
+
+    // r = (n0*M00 + n0*ns*M01 - M10 - ns*M11) / (n0*M00 + n0*ns*M01 + M10 + ns*M11)
+    let num_r: f64 = n0 * m00r + n0 * n_s * m01r - m10r - n_s * m11r;
+    let num_i: f64 = n0 * m00i + n0 * n_s * m01i - m10i - n_s * m11i;
+    let den_r: f64 = n0 * m00r + n0 * n_s * m01r + m10r + n_s * m11r;
+    let den_i: f64 = n0 * m00i + n0 * n_s * m01i + m10i + n_s * m11i;
+    (num_r * num_r + num_i * num_i) / (den_r * den_r + den_i * den_i)
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Paraxial thin-lens imaging: f=50 mm, d1=100 mm -> d2=100 mm gives y_img = -y0 regardless of th0
+    let y_img: f64 = paraxial_image_height(3.0, 0.05, 100.0, 50.0, 100.0);
+    let snell_s2: f64 = snell_sin_theta2(1.0, 1.52, 0.5);
+    let airy_r: f64 = airy_radius_exact(550.0, 2.0);
+
+    // 2. 10-pair quarter-wave TiO2 (2.40) / SiO2 (1.46) Bragg mirror on BK7 (1.52) at 550 nm
+    let r_550: f64 = bragg_tmm_reflectance(1.0, 2.40, 1.46, 1.52, 10, 550.0, 550.0);
+    let r_600: f64 = bragg_tmm_reflectance(1.0, 2.40, 1.46, 1.52, 10, 550.0, 600.0);
+    // Exact analytic center-wavelength formula: ((1 - (ns/n0)*(nH/nL)^(2N)) / (1 + ...))^2
+    let ratio: f64 = 2.40 / 1.46;
+    let mut r20: f64 = 1.0;
+    let mut p: i32 = 0;
+    while p < 20 {
+        r20 = r20 * ratio;
+        p = p + 1;
+    }
+    let y_eff: f64 = 1.52 * r20;
+    let r_analytic: f64 = ((1.0 - y_eff) / (1.0 + y_eff)) * ((1.0 - y_eff) / (1.0 + y_eff));
+    let tmm_err: f64 = abs_f64(r_550 - r_analytic);
+
+    if abs_f64(y_img - (-3.0)) <= 1.0e-12
+        && r_550 > 0.995
+        && tmm_err <= 1.0e-12
+        && abs_f64(snell_s2 - 0.5 / 1.52) <= 1.0e-15
+    {
+        println!(
+            "[PASS] optics_kcore_tmm y_img={:.12} airy_r={:.12} r_550={:.15} r_600={:.12} tmm_err={:.3e}",
+            y_img,
+            airy_r,
+            r_550,
+            r_600,
+            tmm_err
+        );
+    } else {
+        println!("[FAIL] optics_kcore_tmm r_550={} tmm_err={}", r_550, tmm_err);
+        failures = failures + 1;
+    }
+
+    // 3. Planted failing control: wrong high-index glass (1.50 instead of TiO2 2.40) destroys stopband
+    let r_bad: f64 = bragg_tmm_reflectance(1.0, 1.50, 1.46, 1.52, 10, 550.0, 550.0);
+    if r_bad < 0.25 && (r_550 - r_bad) > 0.75 {
+        println!("[PASS] planted_wrong_glass_index caught r_bad={:.6} r_good={:.6}", r_bad, r_550);
+    } else {
+        println!("[FAIL] planted_wrong_glass_index missed r_bad={}", r_bad);
+        failures = failures + 1;
+    }
+
+    let t0: i64 = clock_ns();
+    let mut acc: f64 = 0.0;
+    let mut rep: i32 = 0;
+    while rep < 5000 {
+        let wl: f64 = 400.0 + ((rep % 401) as f64);
+        acc = acc + bragg_tmm_reflectance(1.0, 2.40, 1.46, 1.52, 10, 550.0, wl);
+        rep = rep + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] optics_kcore tmm_5k_ns={} acc={:.6}", t1 - t0, acc);
+
+    if failures == 0 {
+        println!("[PASS] optics_kcore summary failures=0");
+    } else {
+        println!("[FAIL] optics_kcore summary failures={}", failures);
+    }
+}
