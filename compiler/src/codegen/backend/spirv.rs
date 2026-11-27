@@ -2285,10 +2285,14 @@ impl SpirvBackend {
             .as_ref()
             .map(|blocks| crate::codegen::analysis::structured_cfg::analyze(blocks));
 
-        // Generate blocks
+        // Generate blocks in strict reverse post-order (RPO) so every dominator
+        // block strictly precedes every block it dominates in the SPIR-V binary
+        // (SPIR-V Spec Section 2.16.1). Structured merge and continue targets are
+        // scheduled in DFS first so RPO places them after their dominating body.
         if let Some(blocks) = &func.blocks {
-            for block in blocks {
-                self.gen_block(block, func)?;
+            let order = Self::spirv_block_emission_order(blocks, self.structured_cfg.as_ref());
+            for block_idx in order {
+                self.gen_block(&blocks[block_idx], func)?;
             }
         } else {
             // Empty function - just emit entry and return
@@ -2304,6 +2308,91 @@ impl SpirvBackend {
 
         self.emit(SpvOp::OpFunctionEnd, &[]);
         Ok(())
+    }
+
+    /// Compute a SPIR-V-valid reverse post-order (RPO) over reachable basic
+    /// blocks starting from `BlockId::ENTRY` (index 0 fallback).
+    ///
+    /// Visiting structured merge targets before branch arms during DFS causes
+    /// post-order reversal to place merge blocks after both selection/loop arms
+    /// while guaranteeing every dominator precedes every dominated block.
+    fn spirv_block_emission_order(
+        blocks: &[MirBlock],
+        structured_cfg: Option<&crate::codegen::analysis::structured_cfg::StructuredCfg>,
+    ) -> Vec<usize> {
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+        let id_to_index = crate::codegen::analysis::cfg::block_id_index(blocks);
+        let entry = id_to_index.get(&BlockId::ENTRY.0).copied().unwrap_or(0);
+
+        fn dfs(
+            u: usize,
+            blocks: &[MirBlock],
+            id_to_index: &std::collections::HashMap<u32, usize>,
+            structured_cfg: Option<&crate::codegen::analysis::structured_cfg::StructuredCfg>,
+            visited: &mut [bool],
+            postorder: &mut Vec<usize>,
+        ) {
+            if u >= blocks.len() || visited[u] {
+                return;
+            }
+            visited[u] = true;
+
+            let mut succs: Vec<usize> = Vec::new();
+            if let Some(cfg) = structured_cfg {
+                match cfg.header(blocks[u].id) {
+                    Some(crate::codegen::analysis::structured_cfg::HeaderKind::Selection {
+                        merge,
+                    }) => {
+                        if let Some(&mi) = id_to_index.get(&merge.0) {
+                            succs.push(mi);
+                        }
+                    }
+                    Some(crate::codegen::analysis::structured_cfg::HeaderKind::Loop {
+                        merge,
+                        continue_target,
+                    }) => {
+                        if let Some(&mi) = id_to_index.get(&merge.0) {
+                            succs.push(mi);
+                        }
+                        if let Some(&ci) = id_to_index.get(&continue_target.0) {
+                            if !succs.contains(&ci) {
+                                succs.push(ci);
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            for s in crate::codegen::analysis::cfg::terminator_successors(
+                &blocks[u].terminator,
+                id_to_index,
+            ) {
+                if !succs.contains(&s) {
+                    succs.push(s);
+                }
+            }
+            for s in succs {
+                if !visited[s] {
+                    dfs(s, blocks, id_to_index, structured_cfg, visited, postorder);
+                }
+            }
+            postorder.push(u);
+        }
+
+        let mut visited = vec![false; blocks.len()];
+        let mut postorder = Vec::with_capacity(blocks.len());
+        dfs(
+            entry,
+            blocks,
+            &id_to_index,
+            structured_cfg,
+            &mut visited,
+            &mut postorder,
+        );
+        postorder.reverse();
+        postorder
     }
 
     /// Generate a basic block.
