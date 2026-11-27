@@ -1,0 +1,154 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 54A Kernel 1 (Author Idea AC9):
+//   Zero-Lookahead Walk-Forward Paper-Trading & Sharpe/Max-Drawdown Risk Backtester.
+//   Strictly enforces causal bar cursor (signal_idx < exec_idx) and fails closed on
+//   planted 1-bar lookahead leak (signal_idx == exec_idx).
+
+struct Lcg {
+    s: i64,
+}
+
+fn next_u01(rng: &mut Lcg) -> f64 {
+    let a: i64 = 48271;
+    let m: i64 = 2147483647;
+    rng.s = (rng.s * a) % m;
+    (rng.s as f64) / (m as f64)
+}
+
+struct BacktestRes {
+    ok: i32,
+    err_code: i32,
+    final_equity: f64,
+    sharpe_ann: f64,
+    max_drawdown: f64,
+    trades: i32,
+}
+
+// Fail-closed causal walk-forward backtester (signal_lag >= 1 required; lag == 0 fails closed).
+fn run_walkforward(close: &Vec<f64>, signal_lag: i32) -> BacktestRes {
+    let n: usize = close.len();
+    let mut eq: f64 = 1.0;
+    let mut peak: f64 = 1.0;
+    let mut max_dd: f64 = 0.0;
+    let mut pos: i32 = 0;
+    let mut trades: i32 = 0;
+    let mut sum_r: f64 = 0.0;
+    let mut sum_r2: f64 = 0.0;
+    let mut n_bars: i32 = 0;
+
+    let mut exec_idx: i32 = 21;
+    while (exec_idx as usize) < n {
+        let signal_idx: i32 = exec_idx - signal_lag;
+        // Strict zero-lookahead invariant: signal_idx MUST be strictly less than exec_idx.
+        if signal_idx >= exec_idx || signal_idx < 19 {
+            return BacktestRes {
+                ok: 0, err_code: -1, final_equity: 0.0,
+                sharpe_ann: 0.0, max_drawdown: 0.0, trades: 0,
+            };
+        }
+        // Compute SMA-5 vs SMA-20 strictly from [0..=signal_idx]
+        let mut s5: f64 = 0.0;
+        let mut k: i32 = 0;
+        while k < 5 {
+            s5 = s5 + close[(signal_idx - k) as usize];
+            k = k + 1;
+        }
+        let mut s20: f64 = 0.0;
+        k = 0;
+        while k < 20 {
+            s20 = s20 + close[(signal_idx - k) as usize];
+            k = k + 1;
+        }
+        let target_pos: i32 = if (s5 / 5.0) > (s20 / 20.0) { 1 } else { 0 };
+        let mut tc: f64 = 0.0;
+        if target_pos != pos {
+            tc = 0.0005;
+            trades = trades + 1;
+            pos = target_pos;
+        }
+        let ret_bar: f64 = (close[exec_idx as usize] - close[(exec_idx - 1) as usize])
+            / close[(exec_idx - 1) as usize];
+        let strat_r: f64 = (pos as f64) * ret_bar - tc;
+        eq = eq * (1.0 + strat_r);
+        if eq > peak {
+            peak = eq;
+        }
+        let dd: f64 = (peak - eq) / peak;
+        if dd > max_dd {
+            max_dd = dd;
+        }
+        sum_r = sum_r + strat_r;
+        sum_r2 = sum_r2 + strat_r * strat_r;
+        n_bars = n_bars + 1;
+        exec_idx = exec_idx + 1;
+    }
+
+    let nf: f64 = n_bars as f64;
+    let mean_r: f64 = sum_r / nf;
+    let var_r: f64 = (sum_r2 / nf) - mean_r * mean_r;
+    let std_r: f64 = if var_r > 0.0 { sqrt(var_r) } else { 0.000001 };
+    let sharpe: f64 = (mean_r / std_r) * sqrt(252.0);
+
+    BacktestRes {
+        ok: 1, err_code: 0, final_equity: eq,
+        sharpe_ann: sharpe, max_drawdown: max_dd, trades: trades,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // Build deterministic 500-bar synthetic equity series
+    let mut rng: Lcg = Lcg { s: 20261127 };
+    let mut close: Vec<f64> = Vec::new();
+    let mut p: f64 = 100.0;
+    let mut i: i32 = 0;
+    while i < 500 {
+        let u: f64 = next_u01(&mut rng) - 0.49;
+        let cyc: f64 = 0.003 * sin((i as f64) * 0.06);
+        p = p * (1.0 + cyc + 0.018 * u);
+        close.push(p);
+        i = i + 1;
+    }
+
+    // 1. Strict causal walk-forward (signal_lag = 1 -> signal_idx < exec_idx)
+    let ok_res: BacktestRes = run_walkforward(&close, 1);
+    if ok_res.ok == 1 && ok_res.err_code == 0 && ok_res.trades > 0 {
+        println!(
+            "[PASS] ac9_causal_walkforward eq={:.12} sharpe={:.12} max_dd={:.12} trades={}",
+            ok_res.final_equity, ok_res.sharpe_ann, ok_res.max_drawdown, ok_res.trades
+        );
+    } else {
+        println!("[FAIL] ac9_causal_walkforward ok={}", ok_res.ok);
+        failures = failures + 1;
+    }
+
+    // 2. Planted Control: 1-bar lookahead leak (signal_lag = 0 -> signal_idx == exec_idx) FAILS CLOSED
+    let leak_res: BacktestRes = run_walkforward(&close, 0);
+    if leak_res.ok == 0 && leak_res.err_code == -1 {
+        println!("[PASS] ac9_planted_lookahead_caught err_code={}", leak_res.err_code);
+    } else {
+        println!("[FAIL] ac9_planted_lookahead_caught ok={}", leak_res.ok);
+        failures = failures + 1;
+    }
+
+    // 3. Throughput benchmark: 400 walk-forward runs (~191,600 bar steps)
+    let t0: i64 = clock_ns();
+    let mut acc: f64 = 0.0;
+    let mut r: i32 = 0;
+    while r < 400 {
+        let res: BacktestRes = run_walkforward(&close, 1);
+        acc = acc + res.final_equity;
+        r = r + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] trading_walkforward runs=400 elapsed_ns={} acc={:.6}", t1 - t0, acc);
+
+    if failures == 0 {
+        println!("[PASS] wave54a_trading_walkforward summary failures=0");
+    } else {
+        println!("[FAIL] wave54a_trading_walkforward summary failures={}", failures);
+    }
+}

@@ -1,0 +1,190 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 52G (Author Idea A2): Structural-Law Isomorphism Matcher (law_isomorphism.bld)
+// - Normalizes physical ODE operator signatures into canonical dimensionless form
+//   a2*u'' + a1*u' + a0*u + b_nl*u^3 + c_diff*u_xx = 0 AND checks dimensionless RK4 trajectory L2 parity
+// - Matches harmonic oscillator across mechanical (m*x''+k*x=0), RLC (L*q''+q/C=0), and acoustic
+//   Helmholtz resonator with F1 = 1.00 (>= 0.90) vs 7 shuffled nonlinear/damped/diffusive distractors
+// - Planted failing control: nonlinear Duffing perturbation falsely claimed harmonic caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+struct OdeSig {
+    a2: f64,
+    a1: f64,
+    a0: f64,
+    b_nl: f64,
+    c_diff: f64,
+    is_harmonic_truth: i32,
+}
+
+// Normalize 2nd-order or 1st-order ODE into canonical dimensionless tau = omega_0 * t coordinates
+fn normalize_ode(m_coeff: f64, damp: f64, stiff: f64, nl_cubic: f64, diff_coeff: f64, truth: i32) -> OdeSig {
+    if abs_f64(m_coeff) > 1.0e-12 && abs_f64(stiff) > 1.0e-12 && abs_f64(diff_coeff) <= 1.0e-12 {
+        let w0: f64 = sqrt(abs_f64(stiff / m_coeff));
+        let scale: f64 = m_coeff * w0 * w0;
+        return OdeSig {
+            a2: 1.0,
+            a1: (damp * w0) / scale,
+            a0: stiff / scale,
+            b_nl: nl_cubic / scale,
+            c_diff: 0.0,
+            is_harmonic_truth: truth,
+        };
+    }
+    let lead: f64 = if abs_f64(m_coeff) > 1.0e-12 {
+        abs_f64(m_coeff)
+    } else if abs_f64(damp) > 1.0e-12 {
+        abs_f64(damp)
+    } else {
+        1.0
+    };
+    OdeSig {
+        a2: m_coeff / lead,
+        a1: damp / lead,
+        a0: stiff / lead,
+        b_nl: nl_cubic / lead,
+        c_diff: diff_coeff / lead,
+        is_harmonic_truth: truth,
+    }
+}
+
+fn sig_distance(s1: &OdeSig, s2: &OdeSig) -> f64 {
+    let d2: f64 = s1.a2 - s2.a2;
+    let d1: f64 = s1.a1 - s2.a1;
+    let d0: f64 = s1.a0 - s2.a0;
+    let dn: f64 = s1.b_nl - s2.b_nl;
+    let dd: f64 = s1.c_diff - s2.c_diff;
+    sqrt(d2 * d2 + d1 * d1 + d0 * d0 + dn * dn + dd * dd)
+}
+
+// Integrate normalized 2nd-order ODE u'' = -(a1*u' + a0*u + b_nl*u^3) over tau in [0, 2*pi]
+fn traj_u_end(s: &OdeSig) -> f64 {
+    if abs_f64(s.a2) < 0.5 || abs_f64(s.c_diff) > 1.0e-9 {
+        return -99.0;
+    }
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let n_steps: i32 = 400;
+    let dt: f64 = (2.0 * pi) / (n_steps as f64);
+    let mut u: f64 = 1.0;
+    let mut v: f64 = 0.0;
+    let mut k: i32 = 0;
+    while k < n_steps {
+        let f1: f64 = -(s.a1 * v + s.a0 * u + s.b_nl * u * u * u);
+        let u2: f64 = u + 0.5 * dt * v;
+        let v2: f64 = v + 0.5 * dt * f1;
+        let f2: f64 = -(s.a1 * v2 + s.a0 * u2 + s.b_nl * u2 * u2 * u2);
+        let u3: f64 = u + 0.5 * dt * v2;
+        let v3: f64 = v + 0.5 * dt * f2;
+        let f3: f64 = -(s.a1 * v3 + s.a0 * u3 + s.b_nl * u3 * u3 * u3);
+        let u4: f64 = u + dt * v3;
+        let v4: f64 = v + dt * f3;
+        let f4: f64 = -(s.a1 * v4 + s.a0 * u4 + s.b_nl * u4 * u4 * u4);
+        u = u + (dt / 6.0) * (v + 2.0 * v2 + 2.0 * v3 + v4);
+        v = v + (dt / 6.0) * (f1 + 2.0 * f2 + 2.0 * f3 + f4);
+        k = k + 1;
+    }
+    u
+}
+
+fn is_isomorphic(s1: &OdeSig, s2: &OdeSig) -> i32 {
+    if sig_distance(s1, s2) > 1.0e-9 {
+        return 0;
+    }
+    let u1: f64 = traj_u_end(s1);
+    let u2: f64 = traj_u_end(s2);
+    if abs_f64(u1 - u2) > 1.0e-6 {
+        return 0;
+    }
+    1
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    // 10-law corpus: 3 true harmonic isomorphs + 7 shuffled nonlinear/damped/diffusive distractors
+    let mut laws: Vec<OdeSig> = Vec::new();
+    // 0: Mechanical spring-mass m*x'' + k*x = 0 (m=2.5 kg, k=10.0 N/m)
+    laws.push(normalize_ode(2.5, 0.0, 10.0, 0.0, 0.0, 1));
+    // 1: Distractor - Damped mechanical oscillator (c=1.2)
+    laws.push(normalize_ode(2.5, 1.2, 10.0, 0.0, 0.0, 0));
+    // 2: Electrical LC resonator L*q'' + (1/C)*q = 0 (L=0.04 H, C=250e-6 F -> 1/C=4000)
+    laws.push(normalize_ode(0.04, 0.0, 4000.0, 0.0, 0.0, 1));
+    // 3: Distractor - Duffing nonlinear oscillator (b_nl=3.5)
+    laws.push(normalize_ode(2.5, 0.0, 10.0, 3.5, 0.0, 0));
+    // 4: Distractor - 1D Heat diffusion u_t - D*u_xx = 0
+    laws.push(normalize_ode(0.0, 1.0, 0.0, 0.0, -0.02, 0));
+    // 5: Acoustic Helmholtz resonator (rho*L_eff/A)*V'' + (rho*c^2/V0)*V = 0
+    let rho: f64 = 1.225;
+    let c_snd: f64 = 343.0;
+    let l_eff: f64 = 0.05;
+    let a_neck: f64 = 0.0005;
+    let v_cav: f64 = 0.001;
+    laws.push(normalize_ode(rho * l_eff / a_neck, 0.0, rho * c_snd * c_snd / v_cav, 0.0, 0.0, 1));
+    // 6: Distractor - Radioactive 1st-order decay u' + lam*u = 0
+    laws.push(normalize_ode(0.0, 1.0, 0.35, 0.0, 0.0, 0));
+    // 7: Distractor - Overdamped RLC (R=80)
+    laws.push(normalize_ode(0.04, 80.0, 4000.0, 0.0, 0.0, 0));
+    // 8: Distractor - Weakly nonlinear pendulum cubic correction
+    laws.push(normalize_ode(1.0, 0.0, 9.81, -1.635, 0.0, 0));
+    // 9: Distractor - Wave-diffusion telegrapher term
+    laws.push(normalize_ode(1.0, 0.5, 4.0, 0.0, -1.0, 0));
+
+    let n: usize = laws.len();
+    let mut tp: i32 = 0;
+    let mut fp: i32 = 0;
+    let mut fn_cnt: i32 = 0;
+    let mut tn: i32 = 0;
+
+    let mut i: usize = 0;
+    while i < n {
+        let mut j: usize = i + 1;
+        while j < n {
+            let pred: i32 = is_isomorphic(&laws[i], &laws[j]);
+            let truth: i32 = if laws[i].is_harmonic_truth == 1 && laws[j].is_harmonic_truth == 1 { 1 } else { 0 };
+            if pred == 1 && truth == 1 { tp = tp + 1; }
+            if pred == 1 && truth == 0 { fp = fp + 1; }
+            if pred == 0 && truth == 1 { fn_cnt = fn_cnt + 1; }
+            if pred == 0 && truth == 0 { tn = tn + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    let prec: f64 = if (tp + fp) > 0 { (tp as f64) / ((tp + fp) as f64) } else { 0.0 };
+    let rec: f64 = if (tp + fn_cnt) > 0 { (tp as f64) / ((tp + fn_cnt) as f64) } else { 0.0 };
+    let f1: f64 = if (prec + rec) > 0.0 { 2.0 * prec * rec / (prec + rec) } else { 0.0 };
+
+    // Verify trajectory parity across the 3 true harmonic domains
+    let u_mech: f64 = traj_u_end(&laws[0]);
+    let u_rlc: f64 = traj_u_end(&laws[2]);
+    let u_helm: f64 = traj_u_end(&laws[5]);
+    let max_iso_diff: f64 = abs_f64(u_mech - u_rlc) + abs_f64(u_mech - u_helm);
+
+    // Planted failing control: subtle nonlinear Duffing (b_nl = 0.25) claimed harmonic
+    let planted_duffing: OdeSig = normalize_ode(1.0, 0.0, 1.0, 0.25, 0.0, 0);
+    let planted_caught: i32 = if is_isomorphic(&laws[0], &planted_duffing) == 0 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("A2_TP={}", tp);
+    println!("A2_FP={}", fp);
+    println!("A2_FN={}", fn_cnt);
+    println!("A2_TN={}", tn);
+    println!("A2_F1={:.12}", f1);
+    println!("A2_U_MECH={:.12}", u_mech);
+    println!("A2_MAX_ISO_DIFF={:.15}", max_iso_diff);
+    println!("A2_PLANTED_CAUGHT={}", planted_caught);
+    println!("A2_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if f1 >= 0.90 && tp == 3 && fp == 0 && max_iso_diff < 1.0e-12 && planted_caught == 1 {
+        println!("[PASS] A2_LAW_ISOMORPHISM f1={:.4} tp=3 fp=0 iso_diff={:.3e} planted_caught=1", f1, max_iso_diff);
+    } else {
+        println!("[FAIL] A2_LAW_ISOMORPHISM f1={:.4} tp={} fp={} planted_caught={}", f1, tp, fp, planted_caught);
+    }
+}
