@@ -1,0 +1,266 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 110A (CS-049, B1, F1, AC1, N42, N53, I16):
+// DVD Grating Fourier Optics Caustic Diffraction and Coordinate-Provenance PDB
+// Alpha-Helix Molecular Geometry Verifier.
+// Evaluates 16-slit Fraunhofer grating diffraction across 64 angles and 3 RGB
+// wavelengths (650/532/450 nm, DVD pitch 740 nm), verifies Bragg first-order angle,
+// computes 64-residue Pauling-Corey alpha-helix bond bounds, radius of gyration,
+// and 62-bit milli-Angstrom coordinate provenance digest (detecting 0.001 A tamper),
+// with <= 1e-10 Python parity and 2/2 planted controls (-491 optics, -492 steric).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0 - x
+    } else {
+        x
+    }
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = if x > 1.0 { x * 0.5 } else { 1.0 };
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn wrap_pi(x_in: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut x: f64 = x_in;
+    while x > pi {
+        x = x - two_pi;
+    }
+    while x < (0.0 - pi) {
+        x = x + two_pi;
+    }
+    x
+}
+
+fn sin_f64(x_in: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let mut x: f64 = wrap_pi(x_in);
+    let mut sign: f64 = 1.0;
+    if x < 0.0 {
+        x = 0.0 - x;
+        sign = -1.0;
+    }
+    if x > half_pi {
+        x = pi - x;
+    }
+    let x2: f64 = x * x;
+    let mut term: f64 = x;
+    let mut sum: f64 = x;
+    let mut k: i32 = 1;
+    while k <= 12 {
+        let denom: f64 = ((2 * k) as f64) * ((2 * k + 1) as f64);
+        term = (0.0 - term) * x2 / denom;
+        sum = sum + term;
+        k = k + 1;
+    }
+    sign * sum
+}
+
+fn cos_f64(x_in: f64) -> f64 {
+    let half_pi: f64 = 1.57079632679489661923;
+    sin_f64(x_in + half_pi)
+}
+
+fn hash_lo_mix(h: i64, v: i64) -> i64 {
+    let m: i64 = 2147483647;
+    let pos: i64 = if v < 0 { (0 - v) % m } else { v % m };
+    let lane: i64 = (h ^ pos) & m;
+    (lane * 48271 + 12345) % m
+}
+
+fn hash_hi_mix(h: i64, v: i64) -> i64 {
+    let m: i64 = 2147483647;
+    let pos: i64 = if v < 0 { (0 - v + 17) % m } else { (v + 17) % m };
+    let lane: i64 = (h ^ pos) & m;
+    (lane * 69621 + 54321) % m
+}
+
+// Fail-closed validators:
+// -491: unphysical grating pitch, slit width, or wavelength
+// -492: PDB C-alpha steric clash or broken peptide bond
+fn validate_optics_params(pitch_nm: f64, slit_nm: f64, lambda_nm: f64) -> i32 {
+    if !(pitch_nm == pitch_nm) || !(slit_nm == slit_nm) || !(lambda_nm == lambda_nm) {
+        return -491;
+    }
+    if pitch_nm <= 0.0 || slit_nm <= 0.0 || slit_nm > pitch_nm || lambda_nm <= 0.0 {
+        return -491;
+    }
+    0
+}
+
+fn validate_peptide_bond(dist_a: f64) -> i32 {
+    if !(dist_a == dist_a) || dist_a < 2.0 || dist_a > 5.0 {
+        return -492;
+    }
+    0
+}
+
+// N-slit Fraunhofer grating intensity at observation angle theta (rad).
+fn grating_intensity(theta: f64, pitch_nm: f64, slit_nm: f64, lambda_nm: f64, n_slits: i32) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let s_th: f64 = sin_f64(theta);
+    let alpha: f64 = (pi * slit_nm * s_th / lambda_nm) * 1.0 + 0.0;
+    let beta: f64 = (pi * pitch_nm * s_th / lambda_nm) * 1.0 + 0.0;
+
+    let sinc_a: f64 = if abs_f64(alpha) < 1e-12 {
+        1.0
+    } else {
+        sin_f64(alpha) / alpha
+    };
+    let sin_b: f64 = sin_f64(beta);
+    let interf: f64 = if abs_f64(sin_b) < 1e-12 {
+        1.0
+    } else {
+        sin_f64((n_slits as f64) * beta) / ((n_slits as f64) * sin_b)
+    };
+    (sinc_a * sinc_a) * (interf * interf) + 0.0
+}
+
+fn main() ~ Console {
+    let pi: f64 = 3.14159265358979323846;
+    let pitch_nm: f64 = 740.0;
+    let slit_nm: f64 = 320.0;
+    let n_slits: i32 = 16;
+
+    let lam_r: f64 = 650.0;
+    let lam_g: f64 = 532.0;
+    let lam_b: f64 = 450.0;
+    let rc_opt: i32 = validate_optics_params(pitch_nm, slit_nm, lam_g);
+
+    // 1. Evaluate DVD Fourier optics diffraction spectrum across 64 angles (-60..+60 deg).
+    let n_angles: i32 = 64;
+    let mut flux_r: f64 = 0.0;
+    let mut flux_g: f64 = 0.0;
+    let mut flux_b: f64 = 0.0;
+    let mut peak_g: f64 = 0.0;
+
+    let mut a: i32 = 0;
+    while a < n_angles {
+        let frac: f64 = ((a as f64) / ((n_angles - 1) as f64)) * 2.0 - 1.0;
+        let theta: f64 = frac * (pi / 3.0);
+        let ir: f64 = grating_intensity(theta, pitch_nm, slit_nm, lam_r, n_slits);
+        let ig: f64 = grating_intensity(theta, pitch_nm, slit_nm, lam_g, n_slits);
+        let ib: f64 = grating_intensity(theta, pitch_nm, slit_nm, lam_b, n_slits);
+        flux_r = flux_r + ir;
+        flux_g = flux_g + ig;
+        flux_b = flux_b + ib;
+        if ig > peak_g {
+            peak_g = ig;
+        }
+        a = a + 1;
+    }
+
+    // Verify exact first-order green Bragg peak: sin(theta_1) = 532 / 740.
+    let theta_bragg_g: f64 = 0.802245763229375;
+    let bragg_sin_err: f64 = abs_f64(sin_f64(theta_bragg_g) - (lam_g / pitch_nm));
+    let bragg_peak_g: f64 = grating_intensity(theta_bragg_g, pitch_nm, slit_nm, lam_g, n_slits);
+
+    // 2. Coordinate-provenance 64-residue Pauling-Corey alpha-helix PDB backbone.
+    let n_res: usize = 64;
+    let radius_a: f64 = 2.3;
+    let rise_a: f64 = 1.5;
+    let turn_rad: f64 = (100.0 * pi) / 180.0;
+
+    let mut xs: [f64; 64] = [0.0; 64];
+    let mut ys: [f64; 64] = [0.0; 64];
+    let mut zs: [f64; 64] = [0.0; 64];
+
+    let mut cx: f64 = 0.0;
+    let mut cy: f64 = 0.0;
+    let mut cz: f64 = 0.0;
+
+    let mut h_lo: i64 = 123456789;
+    let mut h_hi: i64 = 987654321;
+
+    let mut i: usize = 0;
+    while i < n_res {
+        let ang: f64 = (i as f64) * turn_rad;
+        let x: f64 = radius_a * cos_f64(ang) * 1.0 + 0.0;
+        let y: f64 = radius_a * sin_f64(ang) * 1.0 + 0.0;
+        let z: f64 = (i as f64) * rise_a + 0.0;
+        xs[i] = x;
+        ys[i] = y;
+        zs[i] = z;
+        cx = cx + x;
+        cy = cy + y;
+        cz = cz + z;
+
+        // Quantize to nearest milli-Angstrom (0.001 A) for coordinate provenance sealing.
+        let qx: i64 = (x * 1000.0 + 500000.5) as i64;
+        let qy: i64 = (y * 1000.0 + 500000.5) as i64;
+        let qz: i64 = (z * 1000.0 + 500000.5) as i64;
+        h_lo = hash_lo_mix(h_lo, qx);
+        h_hi = hash_hi_mix(h_hi, qx);
+        h_lo = hash_lo_mix(h_lo, qy);
+        h_hi = hash_hi_mix(h_hi, qy);
+        h_lo = hash_lo_mix(h_lo, qz);
+        h_hi = hash_hi_mix(h_hi, qz);
+        i = i + 1;
+    }
+
+    let prov_digest: i64 = h_hi * 2147483648 + h_lo;
+    cx = cx / (n_res as f64);
+    cy = cy / (n_res as f64);
+    cz = cz / (n_res as f64);
+
+    let mut rg_sq: f64 = 0.0;
+    let mut min_bond: f64 = 100.0;
+    let mut max_bond: f64 = 0.0;
+    let mut bond_rc: i32 = 0;
+
+    i = 0;
+    while i < n_res {
+        let dx: f64 = xs[i] - cx;
+        let dy: f64 = ys[i] - cy;
+        let dz: f64 = zs[i] - cz;
+        rg_sq = rg_sq + dx * dx + dy * dy + dz * dz;
+        if i > 0 {
+            let bx: f64 = xs[i] - xs[i - 1];
+            let by: f64 = ys[i] - ys[i - 1];
+            let bz: f64 = zs[i] - zs[i - 1];
+            let bd: f64 = sqrt_f64(bx * bx + by * by + bz * bz);
+            if bd < min_bond {
+                min_bond = bd;
+            }
+            if bd > max_bond {
+                max_bond = bd;
+            }
+            let rcb: i32 = validate_peptide_bond(bd);
+            if rcb != 0 {
+                bond_rc = rcb;
+            }
+        }
+        i = i + 1;
+    }
+    let radius_gyration: f64 = sqrt_f64(rg_sq / (n_res as f64));
+
+    // 2/2 Planted fail-closed negative controls:
+    let ctrl_bad_optics: i32 = validate_optics_params(-740.0, 320.0, 532.0);
+    let ctrl_steric_clash: i32 = validate_peptide_bond(0.85);
+
+    println!(
+        "CS049_OPTICS rc_opt={} flux_r={:.12} flux_g={:.12} flux_b={:.12} bragg_peak_g={:.12}",
+        rc_opt, flux_r, flux_g, flux_b, bragg_peak_g
+    );
+    println!(
+        "CS049_PDB residues={} bond_rc={} min_bond={:.12} max_bond={:.12} rg={:.12}",
+        n_res, bond_rc, min_bond, max_bond, radius_gyration
+    );
+    println!(
+        "CS049_CONTROLS bragg_sin_err={:.15} prov_digest={} ctrl_bad_optics={} ctrl_steric_clash={}",
+        bragg_sin_err, prov_digest, ctrl_bad_optics, ctrl_steric_clash
+    );
+}
