@@ -1,0 +1,544 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 153A (Slice 36: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C (t=3, n=5)
+// Shamir Threshold Secret Sharing + Pedersen Verifiable Share Commitments and
+// Proactive Key-Refresh Virtual HSM (buildos_shamir_threshold_hsm_zeroc.bld).
+// Compiled directly by untouched Stage-2 buildc_crypto_stage2.exe (ZERO C,
+// ZERO Rust, ZERO external linker) across x64-pe, x64-elf, rv64-elf,
+// aarch64-elf, and wasm.
+//
+// Modes:
+//   0 = Clean (3,5) Shamir + Pedersen VSS + Proactive Refresh + RFC 6962 Root
+//   1 = Attack (a): Sub-threshold 2/5 reconstruction attempt -> status=-101
+//   2 = Attack (b): Corrupted share failing Pedersen VSS check -> status=-201
+//   3 = Attack (c): Malicious proactive refresh with g(0)!=0 -> status=-301
+//   4 = Attack (d): Duplicate share x-coordinate replay -> status=-401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn exp_hsm_root(i: i64) -> i64 {
+    if i == 0 { return 193719533; }
+    else if i == 1 { return 1955584368; }
+    else if i == 2 { return 2206537743; }
+    else if i == 3 { return 1120104308; }
+    else if i == 4 { return 4208168657; }
+    else if i == 5 { return 1811367366; }
+    else if i == 6 { return 3805334886; }
+    else if i == 7 { return 2563422844; }
+    return 0;
+}
+
+fn fp_add(a: i64, b: i64) -> i64 {
+    let p: i64 = 2147480000 + 3647;
+    let mut s: i64 = a + b;
+    s = (s & p) + (s >> 31);
+    let over: i64 = (s + 1) >> 31;
+    return s - over * p;
+}
+
+fn fp_sub(a: i64, b: i64) -> i64 {
+    let p: i64 = 2147480000 + 3647;
+    return fp_add(a, p - b);
+}
+
+fn fp_mul(a: i64, b: i64) -> i64 {
+    let p: i64 = 2147480000 + 3647;
+    let prod: i64 = a * b;
+    let mut s: i64 = (prod & p) + (prod >> 31);
+    s = (s & p) + (s >> 31);
+    let over: i64 = (s + 1) >> 31;
+    return s - over * p;
+}
+
+fn fp_inv(a: i64) -> i64 {
+    let mut exp: i64 = 2147480000 + 3645;
+    let mut acc: i64 = 1;
+    let mut cur: i64 = a;
+    let mut i: i64 = 0;
+    while i < 31 {
+        let bit: i64 = exp & 1;
+        let prod: i64 = fp_mul(acc, cur);
+        acc = acc + bit * (prod - acc);
+        cur = fp_mul(cur, cur);
+        exp = exp >> 1;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn q_mul(a: i64, b: i64) -> i64 {
+    let q: i64 = 98784247763;
+    let b_lo: i64 = b & 524287;
+    let b_hi: i64 = b >> 19;
+    let t1: i64 = (a * b_hi) % q;
+    let t2: i64 = (t1 << 19) % q;
+    let t3: i64 = (a * b_lo) % q;
+    let sum: i64 = t2 + t3;
+    let over: i64 = (sum + 38654705709) >> 37;
+    return sum - over * q;
+}
+
+fn q_pow(base: i64, exp_in: i64) -> i64 {
+    let mut exp: i64 = exp_in;
+    let mut acc: i64 = 1;
+    let mut cur: i64 = base;
+    let mut i: i64 = 0;
+    while i < 31 {
+        let bit: i64 = exp & 1;
+        let prod: i64 = q_mul(acc, cur);
+        acc = acc + bit * (prod - acc);
+        cur = q_mul(cur, cur);
+        exp = exp >> 1;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn pedersen_commit(v: i64, r: i64) -> i64 {
+    let g: i64 = 34359770408;
+    let h: i64 = 20254375004;
+    return q_mul(q_pow(g, v), q_pow(h, r));
+}
+
+fn eval_poly2(c0: i64, c1: i64, c2: i64, x: i64) -> i64 {
+    let x2: i64 = fp_mul(x, x);
+    return fp_add(c0, fp_add(fp_mul(c1, x), fp_mul(c2, x2)));
+}
+
+fn vss_check_share(x: i64, y: i64, b: i64, c0: i64, c1: i64, c2: i64) -> i64 {
+    let lhs: i64 = pedersen_commit(y, b);
+    let x2: i64 = fp_mul(x, x);
+    let rhs: i64 = q_mul(c0, q_mul(q_pow(c1, x), q_pow(c2, x2)));
+    if lhs == rhs { return 1; }
+    return 0;
+}
+
+fn lagrange_reconstruct(cnt: i64, x0: i64, y0: i64, x1: i64, y1: i64, x2: i64, y2: i64) -> i64 {
+    if cnt < 3 { return -101; }
+    if x0 < 1 || x0 > 5 || x1 < 1 || x1 > 5 || x2 < 1 || x2 > 5 { return -401; }
+    if x0 == x1 || x0 == x2 || x1 == x2 { return -401; }
+    let n0: i64 = fp_mul(fp_sub(0, x1), fp_sub(0, x2));
+    let d0: i64 = fp_mul(fp_sub(x0, x1), fp_sub(x0, x2));
+    let l0: i64 = fp_mul(n0, fp_inv(d0));
+    let n1: i64 = fp_mul(fp_sub(0, x0), fp_sub(0, x2));
+    let d1: i64 = fp_mul(fp_sub(x1, x0), fp_sub(x1, x2));
+    let l1: i64 = fp_mul(n1, fp_inv(d1));
+    let n2: i64 = fp_mul(fp_sub(0, x0), fp_sub(0, x1));
+    let d2: i64 = fp_mul(fp_sub(x2, x0), fp_sub(x2, x1));
+    let l2: i64 = fp_mul(n2, fp_inv(d2));
+    let t0: i64 = fp_mul(y0, l0);
+    let t1: i64 = fp_mul(y1, l1);
+    let t2: i64 = fp_mul(y2, l2);
+    return fp_add(t0, fp_add(t1, t2));
+}
+
+fn hsm_stage1_execute(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let a0: i64 = 1513918951;
+    let a1: i64 = 918273645;
+    let a2: i64 = 1234567891;
+    let r0: i64 = 1876543219;
+    let r1: i64 = 445566778;
+    let r2: i64 = 1998877665;
+    let c0: i64 = pedersen_commit(a0, r0);
+    let c1: i64 = pedersen_commit(a1, r1);
+    let c2: i64 = pedersen_commit(a2, r2);
+    let mut y0: [i64; 5] = [0; 5];
+    let mut b0: [i64; 5] = [0; 5];
+    let mut y1: [i64; 5] = [0; 5];
+    let mut b1: [i64; 5] = [0; 5];
+    let mut dx: [i64; 5] = [0; 5];
+    let mut ex: [i64; 5] = [0; 5];
+    let mut i: i64 = 0;
+    while i < 5 {
+        y0[i] = eval_poly2(a0, a1, a2, i + 1);
+        b0[i] = eval_poly2(r0, r1, r2, i + 1);
+        i = i + 1;
+    }
+    // Attack (b) mode=2: corrupt custodian 3 share by +1 mod p
+    if mode == 2 { y0[2] = fp_add(y0[2], 1); }
+    // Verify Pedersen VSS commitment for all 5 Epoch-0 shares
+    i = 0;
+    while i < 5 {
+        if vss_check_share(i + 1, y0[i], b0[i], c0, c1, c2) == 0 {
+            println("{}", -201); println("{}", 0); return -201;
+        }
+        i = i + 1;
+    }
+    // Attack (a) mode=1: sub-threshold 2/5 reconstruction attempt
+    if mode == 1 {
+        let sub_rc: i64 = lagrange_reconstruct(2, 1, y0[0], 2, y0[1], 0, 0);
+        if sub_rc < 0 {
+            println("{}", sub_rc); println("{}", 0); return sub_rc;
+        }
+    }
+    // Attack (d) mode=4: duplicate share x-coordinate replay {1, 1, 3}
+    if mode == 4 {
+        let dup_rc: i64 = lagrange_reconstruct(3, 1, y0[0], 1, y0[0], 3, y0[2]);
+        if dup_rc < 0 {
+            println("{}", dup_rc); println("{}", 0); return dup_rc;
+        }
+    }
+    // Verify all C(5,3)=10 distinct 3-of-5 Epoch-0 subsets reconstruct exact master secret
+    let mut sub0: i64 = 0;
+    let mut rec0: i64 = 0;
+    let mut j: i64 = 0;
+    let mut k: i64 = 0;
+    i = 0;
+    while i < 3 {
+        j = i + 1;
+        while j < 4 {
+            k = j + 1;
+            while k < 5 {
+                let rv: i64 = lagrange_reconstruct(3, i + 1, y0[i], j + 1, y0[j], k + 1, y0[k]);
+                if rv != a0 {
+                    println("{}", -202); println("{}", 0); return -202;
+                }
+                rec0 = rv;
+                sub0 = sub0 + 1;
+                k = k + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    // Epoch 1 zero-secret proactive share refresh: f'(x) = f(x) + g(x) with g(0)=0
+    let mut g0: i64 = 0;
+    if mode == 3 { g0 = 1337; }
+    let g1: i64 = 654321987;
+    let g2: i64 = 1472583691;
+    let u0: i64 = 0;
+    let u1: i64 = 314159265;
+    let u2: i64 = 271828182;
+    let d0: i64 = pedersen_commit(g0, u0);
+    let d1: i64 = pedersen_commit(g1, u1);
+    let d2: i64 = pedersen_commit(g2, u2);
+    // Zero-secret commitment guard: D_0 must equal 1 mod Q
+    if d0 != 1 {
+        println("{}", -301); println("{}", 0); return -301;
+    }
+    i = 0;
+    while i < 5 {
+        dx[i] = eval_poly2(g0, g1, g2, i + 1);
+        ex[i] = eval_poly2(u0, u1, u2, i + 1);
+        if vss_check_share(i + 1, dx[i], ex[i], d0, d1, d2) == 0 {
+            println("{}", -301); println("{}", 0); return -301;
+        }
+        i = i + 1;
+    }
+    let g0_rec: i64 = lagrange_reconstruct(3, 1, dx[0], 2, dx[1], 3, dx[2]);
+    if g0_rec != 0 {
+        println("{}", -301); println("{}", 0); return -301;
+    }
+    // Homomorphic commitment update and full 5-share rotation
+    let c0p: i64 = q_mul(c0, d0);
+    let c1p: i64 = q_mul(c1, d1);
+    let c2p: i64 = q_mul(c2, d2);
+    if c0p != c0 || c1p == c1 {
+        println("{}", -302); println("{}", 0); return -302;
+    }
+    let mut rotated: i64 = 0;
+    i = 0;
+    while i < 5 {
+        y1[i] = fp_add(y0[i], dx[i]);
+        b1[i] = fp_add(b0[i], ex[i]);
+        if y1[i] == y0[i] {
+            println("{}", -303); println("{}", 0); return -303;
+        }
+        if vss_check_share(i + 1, y1[i], b1[i], c0p, c1p, c2p) == 0 {
+            println("{}", -201); println("{}", 0); return -201;
+        }
+        rotated = rotated + 1;
+        i = i + 1;
+    }
+    // Verify all C(5,3)=10 distinct 3-of-5 Epoch-1 subsets reconstruct unchanged master secret
+    let mut sub1: i64 = 0;
+    let mut rec1: i64 = 0;
+    i = 0;
+    while i < 3 {
+        j = i + 1;
+        while j < 4 {
+            k = j + 1;
+            while k < 5 {
+                let rv: i64 = lagrange_reconstruct(3, i + 1, y1[i], j + 1, y1[j], k + 1, y1[k]);
+                if rv != rec0 {
+                    println("{}", -304); println("{}", 0); return -304;
+                }
+                rec1 = rv;
+                sub1 = sub1 + 1;
+                k = k + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // Compute 4-leaf RFC 6962 HSM Audit Root (live FIPS 180-4 SHA-256)
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut leaves: [i64; 32] = [0; 32];
+    let mut p0: i64 = 0;
+    let mut p1: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut s0: i64 = 0; let mut s1: i64 = 0; let mut t1: i64 = 0; let mut t2: i64 = 0;
+    let qv: i64 = 98784247763;
+    let gv: i64 = 34359770408;
+    let hv_gen: i64 = 20254375004;
+    while p0 < 4 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p1 = 0;
+        while p1 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p1 == 0 {
+                if p0 == 0 {
+                    w[0] = 1213418800; w[1] = 3; w[2] = 5; w[3] = 2147480000 + 3647;
+                    w[4] = (qv >> 32) & m32; w[5] = qv & m32;
+                    w[6] = (gv >> 32) & m32; w[7] = gv & m32;
+                    w[8] = (hv_gen >> 32) & m32; w[9] = hv_gen & m32;
+                    w[10] = (c0 >> 32) & m32; w[11] = c0 & m32;
+                    w[12] = (c1 >> 32) & m32; w[13] = c1 & m32;
+                    w[14] = (c2 >> 32) & m32; w[15] = c2 & m32;
+                } else if p0 == 1 {
+                    w[0] = 1213418801; w[1] = y0[0]; w[2] = y0[1]; w[3] = y0[2];
+                    w[4] = y0[3]; w[5] = y0[4]; w[6] = b0[0]; w[7] = b0[1];
+                    w[8] = b0[2]; w[9] = b0[3]; w[10] = b0[4]; w[11] = 5;
+                    w[12] = sub0; w[13] = rec0; w[14] = 0; w[15] = 1448301360;
+                } else if p0 == 2 {
+                    w[0] = 1213418802; w[1] = (d0 >> 32) & m32; w[2] = d0 & m32;
+                    w[3] = (d1 >> 32) & m32; w[4] = d1 & m32;
+                    w[5] = (d2 >> 32) & m32; w[6] = d2 & m32;
+                    w[7] = (c0p >> 32) & m32; w[8] = c0p & m32;
+                    w[9] = (c1p >> 32) & m32; w[10] = c1p & m32;
+                    w[11] = (c2p >> 32) & m32; w[12] = c2p & m32;
+                    w[13] = g0_rec; w[14] = rotated; w[15] = 1380271665;
+                } else {
+                    w[0] = 1213418803; w[1] = y1[0]; w[2] = y1[1]; w[3] = y1[2];
+                    w[4] = y1[3]; w[5] = y1[4]; w[6] = b1[0]; w[7] = b1[1];
+                    w[8] = b1[2]; w[9] = b1[3]; w[10] = b1[4]; w[11] = rotated;
+                    w[12] = sub1; w[13] = rec1; w[14] = 1; w[15] = 1448301361;
+                }
+            } else { w[0] = 2147483648; w[15] = 512; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p1 = p1 + 1;
+        }
+        // RFC 6962 leaf prefix 0x00 || hash32
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1;
+        while i < 8 {
+            w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32; i = i + 1;
+        }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+        e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+        hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+        hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        i = 0; while i < 8 { leaves[p0 * 8 + i] = hv[i]; i = i + 1; }
+        p0 = p0 + 1;
+    }
+
+    // RFC 6962 interior nodes: step 0 = N01(L0,L1)->leaves[0..7],
+    // step 1 = N23(L2,L3)->leaves[8..15], step 2 = ROOT(N01,N23)->hv[0..7]
+    let mut step: i64 = 0;
+    while step < 3 {
+        let mut loff: i64 = 0;
+        let mut roff: i64 = 8;
+        if step == 1 { loff = 16; roff = 24; }
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p0 = 0;
+        while p0 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p0 == 0 {
+                w[0] = (16777216 | (leaves[loff] >> 8)) & m32;
+                i = 1;
+                while i < 8 {
+                    let lprev: i64 = leaves[loff + i - 1];
+                    let lcur: i64 = leaves[loff + i];
+                    w[i] = (((lprev & 255) << 24) | (lcur >> 8)) & m32; i = i + 1;
+                }
+                w[8] = (((leaves[loff + 7] & 255) << 24) | (leaves[roff] >> 8)) & m32;
+                i = 1;
+                while i < 8 {
+                    let rprev: i64 = leaves[roff + i - 1];
+                    let rcur: i64 = leaves[roff + i];
+                    w[8 + i] = (((rprev & 255) << 24) | (rcur >> 8)) & m32; i = i + 1;
+                }
+            } else { w[0] = (((leaves[roff + 7] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32; i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32; i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p0 = p0 + 1;
+        }
+        if step == 0 { i = 0; while i < 8 { leaves[i] = hv[i]; i = i + 1; } }
+        else if step == 1 { i = 0; while i < 8 { leaves[8 + i] = hv[i]; i = i + 1; } }
+        step = step + 1;
+    }
+
+    j = 1; i = 0;
+    while i < 8 { if hv[i] != exp_hsm_root(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -405); println("{}", 0); return -405; }
+
+    // Clean commit trace (24 i64 values)
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 3);
+    println("{}", 5);
+    println("{}", 2147480000 + 3647);
+    println("{}", 98784247763);
+    println("{}", rec0);
+    println("{}", rec1);
+    println("{}", 5);
+    println("{}", sub0);
+    println("{}", rotated);
+    println("{}", sub1);
+    println("{}", c0);
+    println("{}", c0p);
+    println("{}", c1);
+    println("{}", c1p);
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    return 1;
+}
+
+fn main() ~ Console {
+    let _ = hsm_stage1_execute(0);
+}
