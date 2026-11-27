@@ -1,0 +1,60 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// World-Physics-3D Kasten-Young airmass + Rayleigh/Mie Beer-Lambert spectral sky kernel.
+// Computes spherical-shell optical airmass, evaluates three-band Rayleigh and Mie optical
+// depths with Henyey-Greenstein phase, and emits bounded RGB atmospheric transmittance.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn world_spectral_sky_transmittance_compute(
+    beta_r: f32,
+    beta_g: f32,
+    beta_b: f32,
+    beta_mie: f32,
+    g_mie: f32,
+    cos_z_buf: &[f32],
+    cos_theta_buf: &[f32],
+    alt_scale_buf: &[f32],
+    tr_out: &mut [f32],
+    tg_out: &mut [f32],
+    tb_out: &mut [f32],
+    phase_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let mut cz: f32 = cos_z_buf[i];
+    if cz < 0.02 {
+        cz = 0.02;
+    }
+    if cz > 1.0 {
+        cz = 1.0;
+    }
+
+    let alt_s: f32 = alt_scale_buf[i];
+    let z_proxy: f32 = 1.0 - cz;
+    let ky_term: f32 = 0.15 / (1.0 + 3.885 * cz + 1.253 * cz * cz);
+    let mut airmass: f32 = alt_s / (cz + ky_term + 0.015 * z_proxy * z_proxy);
+    if airmass > 38.0 {
+        airmass = 38.0;
+    }
+
+    let tau_r: f32 = (beta_r + beta_mie) * airmass;
+    let tau_g: f32 = (beta_g + beta_mie) * airmass;
+    let tau_b: f32 = (beta_b + beta_mie) * airmass;
+
+    let tr: f32 = 1.0 / (1.0 + tau_r + 0.5 * tau_r * tau_r + 0.16666667 * tau_r * tau_r * tau_r);
+    let tg: f32 = 1.0 / (1.0 + tau_g + 0.5 * tau_g * tau_g + 0.16666667 * tau_g * tau_g * tau_g);
+    let tb: f32 = 1.0 / (1.0 + tau_b + 0.5 * tau_b * tau_b + 0.16666667 * tau_b * tau_b * tau_b);
+
+    let ct: f32 = cos_theta_buf[i];
+    let g2: f32 = g_mie * g_mie;
+    let hg_den: f32 = 1.0 + g2 - 2.0 * g_mie * ct + 0.0001;
+    let mut hg_sq: f32 = 0.5 * (hg_den + 1.0);
+    hg_sq = 0.5 * (hg_sq + hg_den / hg_sq);
+    hg_sq = 0.5 * (hg_sq + hg_den / hg_sq);
+    hg_sq = 0.5 * (hg_sq + hg_den / hg_sq);
+    let hg_phase: f32 = (1.0 - g2) / (12.566371 * hg_den * hg_sq);
+
+    tr_out[i] = tr;
+    tg_out[i] = tg;
+    tb_out[i] = tb;
+    phase_out[i] = hg_phase;
+}
