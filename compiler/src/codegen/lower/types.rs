@@ -305,7 +305,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     if matches!(
                         type_name,
                         "Vec" | "Array" | "VecDeque" | "Queue" | "HashSet" | "BTreeSet"
-                    ) || (type_name == "Buffer" && self.module.find_type("Buffer").is_none())
+                    ) || (type_name == "Buffer"
+                        && self.module.find_type("Buffer").is_none()
+                        && !self.generic_structs.contains_key("Buffer"))
                     {
                         if let Some(ast::GenericArg::Type(arg_ty)) = generic_args.first() {
                             let mut elem_ty = self.lower_type_from_ast(arg_ty);
@@ -415,7 +417,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 {
                     MirType::Struct(Arc::from("BuildString"))
                 }
-                "Buffer" if self.module.find_type("Buffer").is_none() => {
+                "Buffer"
+                    if self.module.find_type("Buffer").is_none()
+                        && !self.generic_structs.contains_key("Buffer") =>
+                {
                     MirType::Vec(Box::new(MirType::u8()))
                 }
                 "Range" | "RangeInclusive" => MirType::Struct(Arc::from("BuildRange")),
@@ -1541,7 +1546,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Match a parameter's AST type against an argument's lowered type and bind
     /// each generic type parameter found in it (first binding wins).
-    fn bind_type_params(
+    pub(super) fn bind_type_params(
         ast_ty: &ast::Type,
         arg_ty: &MirType,
         names: &[Arc<str>],

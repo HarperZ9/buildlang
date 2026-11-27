@@ -5888,7 +5888,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 b.switch_to_block(exit_bb);
                 return Ok(values::local(v));
             }
-            // `Buffer::zeroed(n)`: zero-initialized byte buffer (`Vec<u8>`).
+            // `Buffer::zeroed(n)`: zero-initialized byte buffer (`Vec<u8>` or `Buffer<u8>`).
             if segs.as_slice() == ["Buffer", "zeroed"]
                 && args.len() == 1
                 && self.module.find_type("Buffer").is_none()
@@ -5938,6 +5938,21 @@ impl<'ctx> MirLowerer<'ctx> {
                 b.assign(i, MirRValue::Use(values::local(ni)));
                 b.goto(cond_bb);
                 b.switch_to_block(exit_bb);
+                if self.generic_structs.contains_key("Buffer") {
+                    let mut subst = HashMap::new();
+                    subst.insert(Arc::from("T"), MirType::u8());
+                    let inst = self.instantiate_generic("Buffer", &subst)?;
+                    let b = self.current_fn.as_mut().unwrap();
+                    let buf_local = b.create_local(MirType::Struct(inst.clone()));
+                    b.assign(
+                        buf_local,
+                        MirRValue::Aggregate {
+                            kind: AggregateKind::Struct(inst),
+                            operands: vec![values::local(v)],
+                        },
+                    );
+                    return Ok(values::local(buf_local));
+                }
                 return Ok(values::local(v));
             }
             // `Vec::with_capacity(n)` / `VecDeque::with_capacity(n)` / `VecDeque::new()` /

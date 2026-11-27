@@ -273,7 +273,11 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Instantiate `base` with `subst` (a struct or an enum).
-    fn instantiate_generic(&mut self, base: &str, subst: &Subst) -> CodegenResult<Arc<str>> {
+    pub(super) fn instantiate_generic(
+        &mut self,
+        base: &str,
+        subst: &Subst,
+    ) -> CodegenResult<Arc<str>> {
         if self.generic_structs.contains_key(base) {
             self.monomorphize_struct(base, subst)
         } else {
@@ -339,8 +343,17 @@ impl<'ctx> MirLowerer<'ctx> {
         if impl_params.is_empty() {
             return Ok(None);
         }
-        let subst = self.infer_subst_from_args(&fndef, &impl_params, args);
-        if subst.is_empty() {
+        // Only infer an instance when every impl type parameter is bound
+        // directly by the call arguments (never silently default unbound
+        // parameters such as `Buffer::new(4)` to `i32`).
+        let mut subst = HashMap::new();
+        for (i, param) in fndef.sig.params.iter().enumerate() {
+            if let Some(arg_expr) = args.get(i) {
+                let arg_ty = self.infer_single_arg_type(arg_expr);
+                Self::bind_type_params(&param.ty, &arg_ty, &impl_params, &mut subst);
+            }
+        }
+        if subst.len() != impl_params.len() {
             return Ok(None);
         }
         self.instantiate_generic(base, &subst).map(Some)
