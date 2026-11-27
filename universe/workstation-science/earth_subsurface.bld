@@ -1,0 +1,256 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 50A Kernel 4 (Author Idea N13):
+//   Bouguer Gravity Anomaly Half-Width Depth/Mass Inversion (buried dense sphere)
+//   + Bare-Earth LiDAR Morphological Ground Filter recovering a 1.5 m earthwork mound under
+//   synthetic forest canopy (> 95% IoU) + Flat-Noise Null Rejection Control (0 false mounds).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a;
+    }
+    b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b {
+        return a;
+    }
+    b
+}
+
+fn splitmix64_next(state: u64) -> u64 {
+    let mut z: u64 = state.wrapping_add(11400714819323198485);
+    z = (z ^ (z >> 30)).wrapping_mul(13787848793156543929);
+    z = (z ^ (z >> 27)).wrapping_mul(10723151780598845931);
+    z ^ (z >> 31)
+}
+
+fn u64_unit(u: u64) -> f64 {
+    ((u >> 11) as f64) / 9007199254740992.0
+}
+
+// Forward Bouguer vertical gravity anomaly (m/s^2) of buried sphere at depth z_m, excess mass dm_kg.
+fn bouguer_sphere_gz(x_m: f64, z_m: f64, dm_kg: f64) -> f64 {
+    let g_const: f64 = 6.67430e-11;
+    let r2: f64 = x_m * x_m + z_m * z_m;
+    let r3: f64 = r2 * sqrt(r2);
+    (g_const * dm_kg * z_m) / r3
+}
+
+// Separable 2D morphological erosion (min filter) of radius rad over w x w grid.
+fn morph_erode_2d(grid: &Vec<f64>, w: usize, rad: usize) -> Vec<f64> {
+    let mut tmp: Vec<f64> = Vec::new();
+    let mut out: Vec<f64> = Vec::new();
+    let n: usize = w * w;
+    let mut idx: usize = 0;
+    while idx < n {
+        tmp.push(0.0);
+        out.push(0.0);
+        idx = idx + 1;
+    }
+    let mut y: usize = 0;
+    while y < w {
+        let mut x: usize = 0;
+        while x < w {
+            let x0: usize = if x > rad { x - rad } else { 0 };
+            let x1: usize = if x + rad < w { x + rad } else { w - 1 };
+            let mut m: f64 = 1.0e300;
+            let mut k: usize = x0;
+            while k <= x1 {
+                m = min_f64(m, grid[y * w + k]);
+                k = k + 1;
+            }
+            tmp[y * w + x] = m;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    y = 0;
+    while y < w {
+        let y0: usize = if y > rad { y - rad } else { 0 };
+        let y1: usize = if y + rad < w { y + rad } else { w - 1 };
+        let mut x: usize = 0;
+        while x < w {
+            let mut m: f64 = 1.0e300;
+            let mut k: usize = y0;
+            while k <= y1 {
+                m = min_f64(m, tmp[k * w + x]);
+                k = k + 1;
+            }
+            out[y * w + x] = m;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    out
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let g_const: f64 = 6.67430e-11;
+
+    // 1. Bouguer gravity anomaly inversion on planted buried dense sphere (z=18.0 m, dM=2.5e6 kg)
+    let z_true: f64 = 18.0;
+    let dm_true: f64 = 2.5e6;
+    let dg_max: f64 = bouguer_sphere_gz(0.0, z_true, dm_true);
+    let half_target: f64 = 0.5 * dg_max;
+
+    // Scan positive x in 0.05 m increments to locate exact half-maximum crossing x_half
+    let mut x_half: f64 = 0.0;
+    let mut x_prev: f64 = 0.0;
+    let mut g_prev: f64 = dg_max;
+    let mut step: i32 = 1;
+    while step <= 1600 {
+        let x_cur: f64 = (step as f64) * 0.05;
+        let g_cur: f64 = bouguer_sphere_gz(x_cur, z_true, dm_true);
+        if g_cur <= half_target && x_half == 0.0 {
+            let frac: f64 = (g_prev - half_target) / (g_prev - g_cur);
+            x_half = x_prev + frac * (x_cur - x_prev);
+        }
+        x_prev = x_cur;
+        g_prev = g_cur;
+        step = step + 1;
+    }
+    // Analytic half-width relation: z = x_half / sqrt(2^(2/3) - 1)
+    let two_23: f64 = exp((2.0 / 3.0) * log(2.0));
+    let z_hat: f64 = x_half / sqrt(two_23 - 1.0);
+    let dm_hat: f64 = (dg_max * z_hat * z_hat) / g_const;
+    let z_rel_err: f64 = abs_f64(z_hat - z_true) / z_true;
+    let dm_rel_err: f64 = abs_f64(dm_hat - dm_true) / dm_true;
+
+    if z_rel_err < 0.002 && dm_rel_err < 0.004 {
+        println!(
+            "[PASS] bouguer_inversion z_hat={:.9} dm_hat={:.3} z_err={:.3e} dm_err={:.3e}",
+            z_hat,
+            dm_hat,
+            z_rel_err,
+            dm_rel_err
+        );
+    } else {
+        println!("[FAIL] bouguer_inversion z_hat={} dm_hat={}", z_hat, dm_hat);
+        failures = failures + 1;
+    }
+
+    // 2. Bare-earth LiDAR morphological ground filter on 64x64 grid (1.5 m earthwork mound under +8 m canopy)
+    let w: usize = 64;
+    let mut dsm: Vec<f64> = Vec::new();
+    let mut flat_dsm: Vec<f64> = Vec::new();
+    let mut true_mound: Vec<i32> = Vec::new();
+    let mut rng: u64 = 42424242;
+    let mut y: usize = 0;
+    while y < w {
+        let mut x: usize = 0;
+        while x < w {
+            rng = splitmix64_next(rng);
+            let micro_noise: f64 = (u64_unit(rng) - 0.5) * 0.08;
+            let dx: f64 = (x as f64) - 32.0;
+            let dy: f64 = (y as f64) - 32.0;
+            let r: f64 = sqrt(dx * dx + dy * dy);
+            let mound_h: f64 = if r <= 12.0 { 1.5 } else { 0.0 };
+            true_mound.push(if r <= 12.0 { 1 } else { 0 });
+
+            // Scatter +6..12 m dense tree canopy hits over 30% of pixels
+            rng = splitmix64_next(rng);
+            let u_can: f64 = u64_unit(rng);
+            let canopy: f64 = if u_can < 0.30 { 6.0 + 6.0 * u_can } else { 0.0 };
+            dsm.push(mound_h + canopy + micro_noise);
+            flat_dsm.push(canopy + micro_noise);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    let t0_ns: i64 = clock_ns();
+    // Radius-2 morphological erosion strips single/small-cluster canopy spikes cleanly to bare earth
+    let bare_mound: Vec<f64> = morph_erode_2d(&dsm, w, 2);
+    let bare_flat: Vec<f64> = morph_erode_2d(&flat_dsm, w, 2);
+    let t1_ns: i64 = clock_ns();
+
+    // Re-expand surviving bare-earth mound core by 2 px dilation? Instead compare eroded bare-earth height > 0.6 m
+    // First dilate bare_mound by 2 px (morphological opening strips canopy while preserving mound radius!)
+    let mut open_mound: Vec<f64> = Vec::new();
+    let mut open_flat: Vec<f64> = Vec::new();
+    let mut idx: usize = 0;
+    while idx < w * w {
+        open_mound.push(0.0);
+        open_flat.push(0.0);
+        idx = idx + 1;
+    }
+    y = 0;
+    while y < w {
+        let y0: usize = if y > 2 { y - 2 } else { 0 };
+        let y1: usize = if y + 2 < w { y + 2 } else { w - 1 };
+        let mut x: usize = 0;
+        while x < w {
+            let x0: usize = if x > 2 { x - 2 } else { 0 };
+            let x1: usize = if x + 2 < w { x + 2 } else { w - 1 };
+            let mut mm: f64 = -1.0e300;
+            let mut mf: f64 = -1.0e300;
+            let mut ky: usize = y0;
+            while ky <= y1 {
+                let mut kx: usize = x0;
+                while kx <= x1 {
+                    mm = max_f64(mm, bare_mound[ky * w + kx]);
+                    mf = max_f64(mf, bare_flat[ky * w + kx]);
+                    kx = kx + 1;
+                }
+                ky = ky + 1;
+            }
+            open_mound[y * w + x] = mm;
+            open_flat[y * w + x] = mf;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    let mut inter: i32 = 0;
+    let mut uni: i32 = 0;
+    let mut false_flat: i32 = 0;
+    idx = 0;
+    while idx < w * w {
+        let pred: i32 = if open_mound[idx] > 0.65 { 1 } else { 0 };
+        let truth: i32 = true_mound[idx];
+        if pred == 1 && truth == 1 {
+            inter = inter + 1;
+        }
+        if pred == 1 || truth == 1 {
+            uni = uni + 1;
+        }
+        if open_flat[idx] > 0.65 {
+            false_flat = false_flat + 1;
+        }
+        idx = idx + 1;
+    }
+    let iou: f64 = (inter as f64) / (uni as f64);
+
+    if iou > 0.95 && false_flat == 0 {
+        println!(
+            "[PASS] lidar_bare_earth_mound iou={:.6} inter={} union={} false_flat={}",
+            iou,
+            inter,
+            uni,
+            false_flat
+        );
+        println!("[PASS] planted_flat_noise_null false_mound_cells=0");
+    } else {
+        println!("[FAIL] lidar_bare_earth_mound iou={} false_flat={}", iou, false_flat);
+        failures = failures + 1;
+    }
+
+    println!("[BENCH] earth_subsurface lidar_morph_ns={}", t1_ns - t0_ns);
+
+    if failures == 0 {
+        println!("[PASS] earth_subsurface summary failures=0");
+    } else {
+        println!("[FAIL] earth_subsurface summary failures={}", failures);
+    }
+}

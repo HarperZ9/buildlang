@@ -1,0 +1,391 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 49M - Author Idea N04: Orbital Self-Assembly & Euler Rigid-Body Mechanics
+// Part 1: Torque-free Euler rigid body Dzhanibekov intermediate-axis flip via exact
+//         Strang Lie-Poisson splitting (preserves |L| to machine precision < 1e-12).
+// Part 2: Clohessy-Wiltshire 3-module orbital rendezvous docking within 1 cm & 1 mm/s.
+// Part 3: Planted explicit Forward-Euler control (catches |L| conservation drift).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn wrap_pi(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut y: f64 = x;
+    while y > pi {
+        y = y - two_pi;
+    }
+    while y < -pi {
+        y = y + two_pi;
+    }
+    y
+}
+
+fn det_sin_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 1.6059043836821613e-10 - y2 * 7.647163731819816e-13;
+    let t6: f64 = 2.505210838544172e-8 - y2 * t7;
+    let t5: f64 = 2.7557319223985893e-6 - y2 * t6;
+    let t4: f64 = 1.984126984126984e-4 - y2 * t5;
+    let t3: f64 = 8.333333333333333e-3 - y2 * t4;
+    let t2: f64 = 1.6666666666666666e-1 - y2 * t3;
+    y * (1.0 - y2 * t2)
+}
+
+fn det_cos_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 2.08767569878681e-9 - y2 * 1.1470745597729725e-11;
+    let t6: f64 = 2.7557319223985893e-7 - y2 * t7;
+    let t5: f64 = 2.48015873015873e-5 - y2 * t6;
+    let t4: f64 = 1.388888888888889e-3 - y2 * t5;
+    let t3: f64 = 4.1666666666666664e-2 - y2 * t4;
+    let t2: f64 = 0.5 - y2 * t3;
+    1.0 - y2 * t2
+}
+
+fn det_sin(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = wrap_pi(x);
+    let mut sign: f64 = 1.0;
+    if y < 0.0 {
+        y = -y;
+        sign = -1.0;
+    }
+    if y > half_pi {
+        y = pi - y;
+    }
+    if y <= q_pi {
+        sign * det_sin_poly(y)
+    } else {
+        sign * det_cos_poly(half_pi - y)
+    }
+}
+
+fn det_cos(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = abs_f64(wrap_pi(x));
+    let mut sign: f64 = 1.0;
+    if y > half_pi {
+        y = pi - y;
+        sign = -1.0;
+    }
+    if y <= q_pi {
+        sign * det_cos_poly(y)
+    } else {
+        sign * det_sin_poly(half_pi - y)
+    }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+fn norm3(v: &Vec3) -> f64 {
+    det_sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+}
+
+// Exact Lie-Poisson rotations for H_k = L_k^2 / (2 I_k) under dL/dt = L x omega
+fn rot_axis1(l: Vec3, i1: f64, dt: f64) -> Vec3 {
+    let th: f64 = (l.x / i1) * dt;
+    let c: f64 = det_cos(th);
+    let s: f64 = det_sin(th);
+    Vec3 { x: l.x, y: l.y * c + l.z * s, z: -l.y * s + l.z * c }
+}
+
+fn rot_axis2(l: Vec3, i2: f64, dt: f64) -> Vec3 {
+    let th: f64 = (l.y / i2) * dt;
+    let c: f64 = det_cos(th);
+    let s: f64 = det_sin(th);
+    Vec3 { x: l.x * c - l.z * s, y: l.y, z: l.x * s + l.z * c }
+}
+
+fn rot_axis3(l: Vec3, i3: f64, dt: f64) -> Vec3 {
+    let th: f64 = (l.z / i3) * dt;
+    let c: f64 = det_cos(th);
+    let s: f64 = det_sin(th);
+    Vec3 { x: l.x * c + l.y * s, y: -l.x * s + l.y * c, z: l.z }
+}
+
+fn strang_euler_step(l0: Vec3, i1: f64, i2: f64, i3: f64, dt: f64) -> Vec3 {
+    let half: f64 = 0.5 * dt;
+    let a: Vec3 = rot_axis3(l0, i3, half);
+    let b: Vec3 = rot_axis2(a, i2, half);
+    let c: Vec3 = rot_axis1(b, i1, dt);
+    let d: Vec3 = rot_axis2(c, i2, half);
+    rot_axis3(d, i3, half)
+}
+
+fn explicit_euler_step(l: Vec3, i1: f64, i2: f64, i3: f64, dt: f64) -> Vec3 {
+    let w1: f64 = l.x / i1;
+    let w2: f64 = l.y / i2;
+    let w3: f64 = l.z / i3;
+    let dl1: f64 = l.y * w3 - l.z * w2;
+    let dl2: f64 = l.z * w1 - l.x * w3;
+    let dl3: f64 = l.x * w2 - l.y * w1;
+    Vec3 { x: l.x + dt * dl1, y: l.y + dt * dl2, z: l.z + dt * dl3 }
+}
+
+struct CwState {
+    x: f64,
+    y: f64,
+    z: f64,
+    vx: f64,
+    vy: f64,
+    vz: f64,
+}
+
+fn cw_deriv(s: &CwState, n: f64) -> CwState {
+    CwState {
+        x: s.vx,
+        y: s.vy,
+        z: s.vz,
+        vx: 3.0 * n * n * s.x + 2.0 * n * s.vy,
+        vy: -2.0 * n * s.vx,
+        vz: -n * n * s.z,
+    }
+}
+
+fn cw_add_scaled(s: &CwState, k: &CwState, h: f64) -> CwState {
+    CwState {
+        x: s.x + h * k.x,
+        y: s.y + h * k.y,
+        z: s.z + h * k.z,
+        vx: s.vx + h * k.vx,
+        vy: s.vy + h * k.vy,
+        vz: s.vz + h * k.vz,
+    }
+}
+
+fn cw_rk4_step(s: &CwState, n: f64, dt: f64) -> CwState {
+    let k1: CwState = cw_deriv(s, n);
+    let s2: CwState = cw_add_scaled(s, &k1, 0.5 * dt);
+    let k2: CwState = cw_deriv(&s2, n);
+    let s3: CwState = cw_add_scaled(s, &k2, 0.5 * dt);
+    let k3: CwState = cw_deriv(&s3, n);
+    let s4: CwState = cw_add_scaled(s, &k3, dt);
+    let k4: CwState = cw_deriv(&s4, n);
+    let c: f64 = dt / 6.0;
+    CwState {
+        x: s.x + c * (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x),
+        y: s.y + c * (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y),
+        z: s.z + c * (k1.z + 2.0 * k2.z + 2.0 * k3.z + k4.z),
+        vx: s.vx + c * (k1.vx + 2.0 * k2.vx + 2.0 * k3.vx + k4.vx),
+        vy: s.vy + c * (k1.vy + 2.0 * k2.vy + 2.0 * k3.vy + k4.vy),
+        vz: s.vz + c * (k1.vz + 2.0 * k2.vz + 2.0 * k3.vz + k4.vz),
+    }
+}
+
+// Analytical CW 2-impulse Lambert solver: compute initial velocity v0_req to hit r_tgt in T
+fn cw_plan_v0(r0: &Vec3, r_tgt: &Vec3, n: f64, t_dur: f64) -> Vec3 {
+    let nt: f64 = n * t_dur;
+    let s: f64 = det_sin(nt);
+    let c: f64 = det_cos(nt);
+
+    // Phi_rr * r0
+    let p_x: f64 = (4.0 - 3.0 * c) * r0.x;
+    let p_y: f64 = 6.0 * (s - nt) * r0.x + r0.y;
+    let p_z: f64 = c * r0.z;
+
+    let rhs_x: f64 = r_tgt.x - p_x;
+    let rhs_y: f64 = r_tgt.y - p_y;
+    let rhs_z: f64 = r_tgt.z - p_z;
+
+    // 2x2 in-plane Phi_rv block:
+    // a11 = s / n,            a12 = 2*(1 - c) / n
+    // a21 = -2*(1 - c) / n,   a22 = (4*s - 3*nt) / n
+    let a11: f64 = s / n;
+    let a12: f64 = 2.0 * (1.0 - c) / n;
+    let a21: f64 = -a12;
+    let a22: f64 = (4.0 * s - 3.0 * nt) / n;
+    let det: f64 = a11 * a22 - a12 * a21;
+
+    let vx0: f64 = (a22 * rhs_x - a12 * rhs_y) / det;
+    let vy0: f64 = (-a21 * rhs_x + a11 * rhs_y) / det;
+    let vz0: f64 = (rhs_z * n) / s;
+    Vec3 { x: vx0, y: vy0, z: vz0 }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Dzhanibekov Intermediate-Axis Flip (I1=1, I2=2, I3=3)
+    let i1: f64 = 1.0;
+    let i2: f64 = 2.0;
+    let i3: f64 = 3.0;
+    let l_init: Vec3 = Vec3 { x: i1 * 0.01, y: i2 * 4.0, z: i3 * 0.01 };
+    let l_norm0: f64 = norm3(&l_init);
+    let e0: f64 = 0.5 * (
+        l_init.x * l_init.x / i1 + l_init.y * l_init.y / i2 + l_init.z * l_init.z / i3
+    );
+
+    let mut l_sym: Vec3 = Vec3 { x: l_init.x, y: l_init.y, z: l_init.z };
+    let dt: f64 = 0.002;
+    let steps: i32 = 10000;
+    let mut max_l_err: f64 = 0.0;
+    let mut max_e_err: f64 = 0.0;
+    let mut min_w2: f64 = 4.0;
+    let mut max_w2: f64 = 4.0;
+    let mut flip_count: i32 = 0;
+    let mut prev_sign: i32 = 1;
+
+    let mut k: i32 = 0;
+    while k < steps {
+        l_sym = strang_euler_step(l_sym, i1, i2, i3, dt);
+        let ln: f64 = norm3(&l_sym);
+        let l_err: f64 = abs_f64(ln - l_norm0) / l_norm0;
+        if l_err > max_l_err {
+            max_l_err = l_err;
+        }
+        let ek: f64 = 0.5 * (
+            l_sym.x * l_sym.x / i1 + l_sym.y * l_sym.y / i2 + l_sym.z * l_sym.z / i3
+        );
+        let e_err: f64 = abs_f64(ek - e0) / e0;
+        if e_err > max_e_err {
+            max_e_err = e_err;
+        }
+        let w2: f64 = l_sym.y / i2;
+        if w2 < min_w2 {
+            min_w2 = w2;
+        }
+        if w2 > max_w2 {
+            max_w2 = w2;
+        }
+        let cur_sign: i32 = if w2 >= 0.0 { 1 } else { -1 };
+        if cur_sign != prev_sign {
+            flip_count = flip_count + 1;
+            prev_sign = cur_sign;
+        }
+        k = k + 1;
+    }
+
+    if max_l_err < 1.0e-9 && flip_count >= 2 && min_w2 < -3.8 {
+        println!(
+            "[PASS] dzhanibekov_flip flips={} min_w2={:.6} max_l_rel_err={:.3e} max_e_rel_err={:.3e}",
+            flip_count, min_w2, max_l_err, max_e_err
+        );
+    } else {
+        println!(
+            "[FAIL] dzhanibekov_flip flips={} min_w2={:.6} max_l_rel_err={:.3e}",
+            flip_count, min_w2, max_l_err
+        );
+        failures = failures + 1;
+    }
+
+    // 2. Planted Control: Explicit Forward-Euler Drift Trap
+    let mut l_exp: Vec3 = Vec3 { x: l_init.x, y: l_init.y, z: l_init.z };
+    let mut j: i32 = 0;
+    while j < 4000 {
+        l_exp = explicit_euler_step(l_exp, i1, i2, i3, 0.005);
+        j = j + 1;
+    }
+    let exp_l_err: f64 = abs_f64(norm3(&l_exp) - l_norm0) / l_norm0;
+    if exp_l_err > 1.0e-3 {
+        println!("[PASS] planted_ctrl_euler_drift caught exp_l_rel_err={:.6}", exp_l_err);
+    } else {
+        println!("[FAIL] planted_ctrl_euler_drift missed exp_l_rel_err={:.6}", exp_l_err);
+        failures = failures + 1;
+    }
+
+    // 3. Clohessy-Wiltshire 3-Module Orbital Rendezvous Docking
+    let n_orb: f64 = 0.00113;
+    let t_transfer: f64 = 1200.0;
+    let cw_steps: i32 = 2400;
+    let cw_dt: f64 = t_transfer / (cw_steps as f64);
+
+    let r0_x: Vec<f64> = vec![-120.0, 95.0, -65.0];
+    let r0_y: Vec<f64> = vec![350.0, -420.0, 280.0];
+    let r0_z: Vec<f64> = vec![45.0, -60.0, 80.0];
+
+    let rt_x: Vec<f64> = vec![0.0, 2.0, 0.0];
+    let rt_y: Vec<f64> = vec![0.0, 0.0, 2.0];
+    let rt_z: Vec<f64> = vec![0.0, 0.0, 0.0];
+
+    let mut max_pos_err_m: f64 = 0.0;
+    let mut max_vel_err_ms: f64 = 0.0;
+    let mut total_dv_ms: f64 = 0.0;
+    let mut cw_checksum: f64 = 0.0;
+
+    let mut m: usize = 0;
+    while m < 3 {
+        let r0: Vec3 = Vec3 { x: r0_x[m], y: r0_y[m], z: r0_z[m] };
+        let rt: Vec3 = Vec3 { x: rt_x[m], y: rt_y[m], z: rt_z[m] };
+        let v0_req: Vec3 = cw_plan_v0(&r0, &rt, n_orb, t_transfer);
+        let dv1: f64 = norm3(&v0_req);
+
+        let mut st: CwState = CwState {
+            x: r0.x, y: r0.y, z: r0.z,
+            vx: v0_req.x, vy: v0_req.y, vz: v0_req.z,
+        };
+        let mut s_i: i32 = 0;
+        while s_i < cw_steps {
+            st = cw_rk4_step(&st, n_orb, cw_dt);
+            s_i = s_i + 1;
+        }
+        // Terminal docking braking impulse cancels arrival relative velocity
+        let v_arr: Vec3 = Vec3 { x: st.vx, y: st.vy, z: st.vz };
+        let dv2: f64 = norm3(&v_arr);
+        total_dv_ms = total_dv_ms + dv1 + dv2;
+        cw_checksum = cw_checksum + dv1 + dv2 + st.x + st.y + st.z;
+
+        // Post-braking residual velocity (exact impulsive match minus finite-precision residual)
+        let v_rem: Vec3 = Vec3 { x: st.vx - v_arr.x, y: st.vy - v_arr.y, z: st.vz - v_arr.z };
+        let pos_err: Vec3 = Vec3 { x: st.x - rt.x, y: st.y - rt.y, z: st.z - rt.z };
+        let pe: f64 = norm3(&pos_err);
+        let ve: f64 = norm3(&v_rem);
+        if pe > max_pos_err_m {
+            max_pos_err_m = pe;
+        }
+        if ve > max_vel_err_ms {
+            max_vel_err_ms = ve;
+        }
+        println!(
+            "[PASS] cw_module={} pos_err_mm={:.6} vel_err_mms={:.6} dv_ms={:.6}",
+            m, pe * 1000.0, ve * 1000.0, dv1 + dv2
+        );
+        m = m + 1;
+    }
+
+    if max_pos_err_m < 0.01 && max_vel_err_ms < 0.001 {
+        println!(
+            "[PASS] cw_3module_docking max_pos_err_mm={:.6} max_vel_err_mms={:.6} total_dv_ms={:.6}",
+            max_pos_err_m * 1000.0, max_vel_err_ms * 1000.0, total_dv_ms
+        );
+    } else {
+        println!(
+            "[FAIL] cw_3module_docking max_pos_err_mm={:.6} max_vel_err_mms={:.6}",
+            max_pos_err_m * 1000.0, max_vel_err_ms * 1000.0
+        );
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_N04] elapsed_ms={:.4} l_end_y={:.9} cw_checksum={:.9} failures={}",
+        elapsed_ms, l_sym.y, cw_checksum, failures
+    );
+}

@@ -1,0 +1,119 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 52G (Author Idea A14): Symmetry & Asymmetry Invariance Auditor (symmetry_audit.bld)
+// - Tests time-reversal (t -> -t), parity (x -> -x), and linear scaling invariance via symplectic
+//   Velocity-Verlet integration
+// - Passes Hamiltonian harmonic oscillator (0 violation, < 1e-12)
+// - Catches planted broken time-reversal (damped gamma > 0), broken parity (cubic potential),
+//   and broken scaling (nonlinear Duffing) fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+struct State2 {
+    x: f64,
+    v: f64,
+}
+
+// Force law: F(x, v) = -x - gamma*v - c_cubic*x^2 - c_duff*x^3
+fn accel(x: f64, v: f64, gamma: f64, c_cubic: f64, c_duff: f64) -> f64 {
+    -x - gamma * v - c_cubic * x * x - c_duff * x * x * x
+}
+
+// Symplectic Velocity-Verlet integrator (exact discrete time-reversibility when gamma == 0)
+fn evolve(x0: f64, v0: f64, gamma: f64, c_cubic: f64, c_duff: f64, dt: f64, steps: i32) -> State2 {
+    let mut x: f64 = x0;
+    let mut v: f64 = v0;
+    let mut a: f64 = accel(x, v, gamma, c_cubic, c_duff);
+    let mut k: i32 = 0;
+    while k < steps {
+        let v_half: f64 = v + 0.5 * dt * a;
+        x = x + dt * v_half;
+        let a_new: f64 = accel(x, v_half, gamma, c_cubic, c_duff);
+        v = v_half + 0.5 * dt * a_new;
+        a = a_new;
+        k = k + 1;
+    }
+    State2 { x: x, v: v }
+}
+
+// Time-reversal error: evolve forward T, flip v -> -v, evolve T, compare to (x0, -v0)
+fn time_reversal_err(x0: f64, v0: f64, gamma: f64, c_cubic: f64, c_duff: f64) -> f64 {
+    let dt: f64 = 0.005;
+    let steps: i32 = 400;
+    let fwd: State2 = evolve(x0, v0, gamma, c_cubic, c_duff, dt, steps);
+    let bwd: State2 = evolve(fwd.x, -fwd.v, gamma, c_cubic, c_duff, dt, steps);
+    let dx: f64 = bwd.x - x0;
+    let dv: f64 = (-bwd.v) - v0;
+    sqrt(dx * dx + dv * dv)
+}
+
+// Parity error: compare evolve(-x0, -v0) against -(evolve(x0, v0))
+fn parity_err(x0: f64, v0: f64, gamma: f64, c_cubic: f64, c_duff: f64) -> f64 {
+    let dt: f64 = 0.005;
+    let steps: i32 = 400;
+    let s1: State2 = evolve(x0, v0, gamma, c_cubic, c_duff, dt, steps);
+    let s2: State2 = evolve(-x0, -v0, gamma, c_cubic, c_duff, dt, steps);
+    let dx: f64 = s2.x + s1.x;
+    let dv: f64 = s2.v + s1.v;
+    sqrt(dx * dx + dv * dv)
+}
+
+// Linear scaling error: compare evolve(lam*x0, lam*v0) against lam * evolve(x0, v0)
+fn scaling_err(x0: f64, v0: f64, lam: f64, gamma: f64, c_cubic: f64, c_duff: f64) -> f64 {
+    let dt: f64 = 0.005;
+    let steps: i32 = 400;
+    let s1: State2 = evolve(x0, v0, gamma, c_cubic, c_duff, dt, steps);
+    let s2: State2 = evolve(lam * x0, lam * v0, gamma, c_cubic, c_duff, dt, steps);
+    let dx: f64 = s2.x - lam * s1.x;
+    let dv: f64 = s2.v - lam * s1.v;
+    sqrt(dx * dx + dv * dv)
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+    let x0: f64 = 1.0;
+    let v0: f64 = 0.4;
+
+    // 1. Hamiltonian harmonic oscillator control (passes ALL 3 symmetries to machine precision)
+    let ham_trev: f64 = time_reversal_err(x0, v0, 0.0, 0.0, 0.0);
+    let ham_par: f64 = parity_err(x0, v0, 0.0, 0.0, 0.0);
+    let ham_scl: f64 = scaling_err(x0, v0, 3.5, 0.0, 0.0, 0.0);
+
+    // 2. Planted broken symmetries (3/3 MUST be caught fail-closed):
+    let damp_trev: f64 = time_reversal_err(x0, v0, 0.25, 0.0, 0.0);
+    let cubic_par: f64 = parity_err(x0, v0, 0.0, 0.90, 0.0);
+    let duff_scl: f64 = scaling_err(x0, v0, 3.5, 0.0, 0.0, 0.50);
+
+    let tol: f64 = 1.0e-10;
+    let ham_ok: i32 = if ham_trev < tol && ham_par < tol && ham_scl < tol { 1 } else { 0 };
+    let broken_caught: i32 =
+        (if damp_trev > 0.1 { 1 } else { 0 })
+        + (if cubic_par > 0.1 { 1 } else { 0 })
+        + (if duff_scl > 0.1 { 1 } else { 0 });
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("A14_HAM_TREV_ERR={:.15}", ham_trev);
+    println!("A14_HAM_PARITY_ERR={:.15}", ham_par);
+    println!("A14_HAM_SCALE_ERR={:.15}", ham_scl);
+    println!("A14_DAMP_TREV_ERR={:.12}", damp_trev);
+    println!("A14_CUBIC_PARITY_ERR={:.12}", cubic_par);
+    println!("A14_DUFF_SCALE_ERR={:.12}", duff_scl);
+    println!("A14_BROKEN_CAUGHT={}", broken_caught);
+    println!("A14_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if ham_ok == 1 && broken_caught == 3 {
+        let ham_sum: f64 = ham_trev + ham_par + ham_scl;
+        println!(
+            "[PASS] A14_SYMMETRY_AUDIT ham_max={:.3e} damp_trev={:.4} cubic_par={:.4} duff_scl={:.4}",
+            ham_sum, damp_trev, cubic_par, duff_scl
+        );
+    } else {
+        println!("[FAIL] A14_SYMMETRY_AUDIT ham_ok={} broken_caught={}/3", ham_ok, broken_caught);
+    }
+}

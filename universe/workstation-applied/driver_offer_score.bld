@@ -1,0 +1,112 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 54A Kernel 3 (Author Idea E28):
+//   WA 2026 TNC Driver Offer Scorer (Seattle $0.66/min + $1.55/mi, Outside $0.39/min + $1.34/mi).
+//   Scores 50 synthetic offers in < 50 ms with net-after-vehicle-cost hourly rate and flags
+//   planted sub-minimum-pay statutory violations fail-closed (zero reverse-engineering).
+
+struct OfferScore {
+    statutory_min_usd: f64,
+    net_usd: f64,
+    net_hourly_usd: f64,
+    violation: i32,
+    shortfall_usd: f64,
+}
+
+// Score one ride offer against WA 2026 TNC statutory floor and $0.38/mi marginal vehicle cost.
+fn score_tnc_offer(
+    in_seattle: i32,
+    pickup_min: f64,
+    pickup_mi: f64,
+    trip_min: f64,
+    trip_mi: f64,
+    offer_usd: f64,
+) -> OfferScore {
+    let rate_min: f64 = if in_seattle == 1 { 0.66 } else { 0.39 };
+    let rate_mi: f64 = if in_seattle == 1 { 1.55 } else { 1.34 };
+    let floor_min: f64 = if in_seattle == 1 { 5.81 } else { 3.37 };
+    let calc_min: f64 = trip_min * rate_min + trip_mi * rate_mi;
+    let stat_min: f64 = if calc_min > floor_min { calc_min } else { floor_min };
+
+    let total_mi: f64 = pickup_mi + trip_mi;
+    let total_min: f64 = pickup_min + trip_min;
+    let cost_per_mi: f64 = 0.38;
+    let net_usd: f64 = offer_usd - total_mi * cost_per_mi;
+    let net_hr: f64 = (net_usd * 60.0) / total_min;
+
+    let mut viol: i32 = 0;
+    let mut shortfall: f64 = 0.0;
+    if offer_usd + 0.005 < stat_min {
+        viol = 1;
+        shortfall = stat_min - offer_usd;
+    }
+
+    OfferScore {
+        statutory_min_usd: stat_min,
+        net_usd: net_usd,
+        net_hourly_usd: net_hr,
+        violation: viol,
+        shortfall_usd: shortfall,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Score 50 synthetic compliant Seattle + WA outside offers in < 50 ms
+    let t0: i64 = clock_ns();
+    let mut viol_cnt: i32 = 0;
+    let mut sum_net: f64 = 0.0;
+    let mut sum_hr: f64 = 0.0;
+    let mut i: i32 = 0;
+    while i < 50 {
+        let in_sea: i32 = if (i & 3) == 0 { 0 } else { 1 };
+        let p_min: f64 = 3.0 + ((i % 6) as f64);
+        let p_mi: f64 = 0.8 + ((i % 5) as f64) * 0.4;
+        let t_min: f64 = 8.0 + ((i % 15) as f64) * 1.5;
+        let t_mi: f64 = 2.0 + ((i % 10) as f64) * 1.1;
+        let rate_min: f64 = if in_sea == 1 { 0.66 } else { 0.39 };
+        let rate_mi: f64 = if in_sea == 1 { 1.55 } else { 1.34 };
+        let floor_min: f64 = if in_sea == 1 { 5.81 } else { 3.37 };
+        let base_min: f64 = t_min * rate_min + t_mi * rate_mi;
+        let stat_min: f64 = if base_min > floor_min { base_min } else { floor_min };
+        let offer: f64 = stat_min + 2.50 + ((i % 4) as f64) * 0.75;
+
+        let sc: OfferScore = score_tnc_offer(in_sea, p_min, p_mi, t_min, t_mi, offer);
+        viol_cnt = viol_cnt + sc.violation;
+        sum_net = sum_net + sc.net_usd;
+        sum_hr = sum_hr + sc.net_hourly_usd;
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1000000.0;
+
+    if viol_cnt == 0 && elapsed_ms < 50.0 {
+        println!(
+            "[PASS] e28_wa_tnc_50_offers viol=0 mean_net={:.12} mean_hr={:.12} elapsed_ns={}",
+            sum_net / 50.0, sum_hr / 50.0, t1 - t0
+        );
+    } else {
+        println!("[FAIL] e28_wa_tnc_50_offers viol={} ms={:.4}", viol_cnt, elapsed_ms);
+        failures = failures + 1;
+    }
+
+    // 2. Planted Control: Seattle sub-minimum-pay offer (12 min, 4.5 mi paying $9.50 < $14.895)
+    let bad: OfferScore = score_tnc_offer(1, 4.0, 1.2, 12.0, 4.5, 9.50);
+    if bad.violation == 1 && bad.shortfall_usd > 5.39 {
+        println!(
+            "[PASS] e28_planted_underpay viol={} stat_min={:.12} shortfall={:.12}",
+            bad.violation, bad.statutory_min_usd, bad.shortfall_usd
+        );
+    } else {
+        println!("[FAIL] e28_planted_underpay viol={}", bad.violation);
+        failures = failures + 1;
+    }
+
+    if failures == 0 {
+        println!("[PASS] wave54a_driver_offer_score summary failures=0");
+    } else {
+        println!("[FAIL] wave54a_driver_offer_score summary failures={}", failures);
+    }
+}

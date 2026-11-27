@@ -1,0 +1,192 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Wave 54J Kernel 1 (Author Idea C7):
+//   Canonical <= 256-Byte Deterministic World+Physics Seed-Genome Serializer.
+//   Packs world + physics priors into an exact 64-byte canonical genome, regenerates
+//   bit-identical 3D heightfield + symplectic particle trajectory hashes across runs,
+//   and verifies a planted 1-bit seed flip invalidates both output hashes.
+
+fn push_u32_le(b: &mut Vec<u64>, v: u64) {
+    b.push(v & 255);
+    b.push((v >> 8) & 255);
+    b.push((v >> 16) & 255);
+    b.push((v >> 24) & 255);
+}
+
+fn read_u32_le(b: &Vec<u64>, off: usize) -> u64 {
+    b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)
+}
+
+fn fnv1a_32_u64(h: u64, v: u64) -> u64 {
+    let mut cur: u64 = h & 4294967295;
+    let mut k: i32 = 0;
+    let mut x: u64 = v;
+    while k < 4 {
+        cur = ((cur ^ (x & 255)) * 16777619) & 4294967295;
+        x = x >> 8;
+        k = k + 1;
+    }
+    cur
+}
+
+struct SeedGenome {
+    world_seed: u64,
+    octaves: u64,
+    amp_mm: u64,
+    gravity_mm_s2: u64,
+    restitution_bp: u64,
+    init_y_mm: u64,
+    init_vy_mm: u64,
+}
+
+// Serialize SeedGenome into canonical 64-byte buffer (strictly <= 256 bytes).
+fn serialize_genome(g: &SeedGenome) -> Vec<u64> {
+    let mut b: Vec<u64> = Vec::new();
+    push_u32_le(&mut b, 1195724337); // "GEN1" LE
+    push_u32_le(&mut b, 1);          // version 1
+    push_u32_le(&mut b, g.world_seed);
+    push_u32_le(&mut b, g.octaves);
+    push_u32_le(&mut b, g.amp_mm);
+    push_u32_le(&mut b, g.gravity_mm_s2);
+    push_u32_le(&mut b, g.restitution_bp);
+    push_u32_le(&mut b, g.init_y_mm);
+    push_u32_le(&mut b, g.init_vy_mm);
+    while b.len() < 64 {
+        b.push(0);
+    }
+    b
+}
+
+struct GenomeDecode {
+    ok: i32,
+    g: SeedGenome,
+}
+
+fn deserialize_genome(b: &Vec<u64>) -> GenomeDecode {
+    if b.len() != 64 || read_u32_le(b, 0) != 1195724337 || read_u32_le(b, 4) != 1 {
+        let z: SeedGenome = SeedGenome {
+            world_seed: 0, octaves: 0, amp_mm: 0, gravity_mm_s2: 0,
+            restitution_bp: 0, init_y_mm: 0, init_vy_mm: 0,
+        };
+        return GenomeDecode { ok: 0, g: z };
+    }
+    GenomeDecode {
+        ok: 1,
+        g: SeedGenome {
+            world_seed: read_u32_le(b, 8),
+            octaves: read_u32_le(b, 12),
+            amp_mm: read_u32_le(b, 16),
+            gravity_mm_s2: read_u32_le(b, 20),
+            restitution_bp: read_u32_le(b, 24),
+            init_y_mm: read_u32_le(b, 28),
+            init_vy_mm: read_u32_le(b, 32),
+        },
+    }
+}
+
+struct WorldHashes {
+    terrain_fnv32: u64,
+    traj_fnv32: u64,
+    final_y_mm: i64,
+}
+
+// Deterministically generate 32x32 heightfield + 200-step integer symplectic trajectory.
+fn generate_world_from_genome(g: &SeedGenome) -> WorldHashes {
+    let mut h_terr: u64 = 2166136261;
+    let mut y: u64 = 0;
+    while y < 32 {
+        let mut x: u64 = 0;
+        while x < 32 {
+            let mut elev: u64 = 0;
+            let mut oct: u64 = 0;
+            while oct < g.octaves {
+                let k: u64 = ((x + 1) * 73856093) ^ ((y + 1) * 19349663)
+                    ^ ((g.world_seed + oct * 2654435761) & 4294967295);
+                let mix: u64 = ((k & 4294967295) * 16777619) & 4294967295;
+                let contrib: u64 = (mix % g.amp_mm) >> oct;
+                elev = elev + contrib;
+                oct = oct + 1;
+            }
+            h_terr = fnv1a_32_u64(h_terr, elev);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    // Integer-exact symplectic particle trajectory (dt = 1/100 s, mm units, ground from seed)
+    let ground_mm: i64 = ((g.world_seed & 1023) as i64) + 50;
+    let mut py: i64 = (g.init_y_mm as i64) + ground_mm;
+    let mut vy: i64 = g.init_vy_mm as i64;
+    let g_step: i64 = (g.gravity_mm_s2 as i64) / 100;
+    let rest_bp: i64 = g.restitution_bp as i64;
+    let mut h_traj: u64 = 2166136261;
+    let mut step: i32 = 0;
+    while step < 200 {
+        vy = vy - g_step;
+        py = py + (vy / 100);
+        if py < ground_mm {
+            py = ground_mm;
+            if vy < 0 {
+                vy = (-vy * rest_bp) / 10000;
+            }
+        }
+        h_traj = fnv1a_32_u64(h_traj, (py as u64) & 4294967295);
+        step = step + 1;
+    }
+
+    WorldHashes { terrain_fnv32: h_terr, traj_fnv32: h_traj, final_y_mm: py }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+    let g0: SeedGenome = SeedGenome {
+        world_seed: 20261127,
+        octaves: 4,
+        amp_mm: 4000,
+        gravity_mm_s2: 9807,
+        restitution_bp: 7500,
+        init_y_mm: 5000,
+        init_vy_mm: 1200,
+    };
+    let mut bytes: Vec<u64> = serialize_genome(&g0);
+    let dec1: GenomeDecode = deserialize_genome(&bytes);
+    let dec2: GenomeDecode = deserialize_genome(&bytes);
+
+    let t0: i64 = clock_ns();
+    let w1: WorldHashes = generate_world_from_genome(&dec1.g);
+    let w2: WorldHashes = generate_world_from_genome(&dec2.g);
+    let t1: i64 = clock_ns();
+
+    if bytes.len() <= 256 && dec1.ok == 1
+        && w1.terrain_fnv32 == w2.terrain_fnv32 && w1.traj_fnv32 == w2.traj_fnv32
+    {
+        println!(
+            "[PASS] c7_seed_genome bytes={} terr_fnv32={} traj_fnv32={} y_end={} elapsed_ns={}",
+            bytes.len(), w1.terrain_fnv32, w1.traj_fnv32, w1.final_y_mm, t1 - t0
+        );
+    } else {
+        println!("[FAIL] c7_seed_genome mismatch");
+        failures = failures + 1;
+    }
+
+    // Planted Control: flip 1 single bit in world_seed (byte 8) -> both hashes must change
+    bytes[8] = bytes[8] ^ 1;
+    let dec_mut: GenomeDecode = deserialize_genome(&bytes);
+    let w_mut: WorldHashes = generate_world_from_genome(&dec_mut.g);
+    if w_mut.terrain_fnv32 != w1.terrain_fnv32 && w_mut.traj_fnv32 != w1.traj_fnv32 {
+        println!(
+            "[PASS] c7_planted_1bit_flip mut_terr={} mut_traj={}",
+            w_mut.terrain_fnv32, w_mut.traj_fnv32
+        );
+    } else {
+        println!("[FAIL] c7_planted_1bit_flip unchanged");
+        failures = failures + 1;
+    }
+
+    if failures == 0 {
+        println!("[PASS] wave54j_seed_genome summary failures=0");
+    } else {
+        println!("[FAIL] wave54j_seed_genome summary failures={}", failures);
+    }
+}
