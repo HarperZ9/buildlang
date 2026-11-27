@@ -10358,13 +10358,25 @@ fn resolve_modules_with_prefix(
         return Ok(());
     }
 
-    // Functions this file defines itself. A name imported by `use` never
-    // replaces one of them.
+    // Functions and types this file defines itself. A name imported by `use`
+    // (or pulled in transitively as a private helper of a selective import)
+    // never replaces or collides with one of them.
     let own_fn_names: HashSet<String> = ast
         .items
         .iter()
         .filter_map(|item| match &item.kind {
             ItemKind::Function(f) => Some(f.name.name.to_string()),
+            _ => None,
+        })
+        .collect();
+    let own_type_names: HashSet<String> = ast
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Struct(s) => Some(s.name.name.to_string()),
+            ItemKind::Enum(e) => Some(e.name.name.to_string()),
+            ItemKind::TypeAlias(t) => Some(t.name.name.to_string()),
+            ItemKind::Trait(t) => Some(t.name.name.to_string()),
             _ => None,
         })
         .collect();
@@ -10438,8 +10450,64 @@ fn resolve_modules_with_prefix(
         }
     }
 
-    // Append module items to the main AST
-    ast.items.extend(new_items);
+    let mut own_impl_methods: HashMap<String, HashSet<String>> = HashMap::new();
+    for item in &ast.items {
+        if let ItemKind::Impl(imp) = &item.kind {
+            if imp.trait_ref.is_none() {
+                if let ast::TypeKind::Path(p) = &imp.self_ty.kind {
+                    if let Some(id) = p.last_ident() {
+                        let entry = own_impl_methods.entry(id.name.to_string()).or_default();
+                        for impl_item in &imp.items {
+                            if let ast::ImplItemKind::Function(f) = &impl_item.kind {
+                                entry.insert(f.name.name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Append module items to the main AST, dropping unrequested transitive
+    // helper types that would collide with types defined in this file, and
+    // filtering out colliding methods from merged impl blocks while preserving
+    // non-conflicting methods needed by merged items.
+    let mut filtered_items = Vec::with_capacity(new_items.len());
+    for mut item in new_items {
+        let keep = match &mut item.kind {
+            ItemKind::Struct(s) => !own_type_names.contains(s.name.name.as_ref()),
+            ItemKind::Enum(e) => !own_type_names.contains(e.name.name.as_ref()),
+            ItemKind::TypeAlias(t) => !own_type_names.contains(t.name.name.as_ref()),
+            ItemKind::Trait(t) => !own_type_names.contains(t.name.name.as_ref()),
+            ItemKind::Impl(imp) if imp.trait_ref.is_none() => {
+                let self_name = match &imp.self_ty.kind {
+                    ast::TypeKind::Path(p) => p.last_ident().map(|i| i.name.as_ref()),
+                    _ => None,
+                };
+                if let Some(n) = self_name {
+                    if own_type_names.contains(n) {
+                        if let Some(existing) = own_impl_methods.get(n) {
+                            imp.items.retain(|impl_item| match &impl_item.kind {
+                                ast::ImplItemKind::Function(f) => {
+                                    !existing.contains(f.name.name.as_ref())
+                                }
+                                _ => true,
+                            });
+                        }
+                        !imp.items.is_empty()
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        };
+        if keep {
+            filtered_items.push(item);
+        }
+    }
+    ast.items.extend(filtered_items);
 
     // Rewrite calls in the main program's existing functions and methods to
     // use prefixed names
@@ -10503,8 +10571,13 @@ fn prune_selective_module_items(
         false
     };
     let mut defined: HashSet<String> = HashSet::new();
+    let mut mod_names: HashSet<String> = HashSet::new();
     for item in items.iter() {
-        if let Some(id) = item.name() {
+        if let ItemKind::Mod(m) = &item.kind {
+            if m.content.is_some() {
+                mod_names.insert(m.name.name.to_string());
+            }
+        } else if let Some(id) = item.name() {
             defined.insert(id.name.to_string());
         } else if let ItemKind::ExternBlock(eb) = &item.kind {
             for ext_item in &eb.items {
@@ -10524,7 +10597,8 @@ fn prune_selective_module_items(
                 continue;
             }
             let should_keep = match &item.kind {
-                ItemKind::Use(_) => true,
+                ItemKind::Use(_) => false,
+                ItemKind::Mod(m) => m.content.is_some() && needed.contains(m.name.name.as_ref()),
                 ItemKind::Impl(imp) => {
                     let self_name = match &imp.self_ty.kind {
                         ast::TypeKind::Path(p) => p.last_ident().map(|i| i.name.as_ref()),
@@ -10581,12 +10655,76 @@ fn prune_selective_module_items(
                             let word = &slice[wstart..pos];
                             if defined.contains(word) && needed.insert(word.to_string()) {
                                 changed = true;
+                            } else if mod_names.contains(word)
+                                && slice.as_bytes().get(pos..pos + 2) == Some(b"::")
+                                && needed.insert(word.to_string())
+                            {
+                                changed = true;
                             }
                         } else {
                             pos += 1;
                         }
                     }
                 }
+            }
+        }
+    }
+    // Retain `use` declarations from a selectively imported module only when
+    // at least one kept non-`Use` item references an imported leaf name (or
+    // when the `use` is a glob). This prevents unrelated `use` statements in
+    // large library roots from leaking into selective importers.
+    let mut kept_words: HashSet<String> = HashSet::new();
+    for (idx, item) in items.iter().enumerate() {
+        if !kept[idx] || matches!(item.kind, ItemKind::Use(_)) {
+            continue;
+        }
+        let start = item.span.start.0 as usize;
+        let end = (item.span.end.0 as usize).min(source.len());
+        if start < end {
+            let slice = &source[start..end];
+            let bytes = slice.as_bytes();
+            let mut pos = 0;
+            while pos < bytes.len() {
+                if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
+                    let wstart = pos;
+                    pos += 1;
+                    while pos < bytes.len()
+                        && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+                    {
+                        pos += 1;
+                    }
+                    kept_words.insert(slice[wstart..pos].to_string());
+                } else {
+                    pos += 1;
+                }
+            }
+        }
+    }
+    if kept_words.is_empty() {
+        items.clear();
+        return;
+    }
+    fn use_tree_referenced(tree: &ast::UseTree, kept_words: &HashSet<String>) -> bool {
+        match &tree.kind {
+            ast::UseTreeKind::Glob(_) => true,
+            ast::UseTreeKind::Simple { path, rename } => {
+                if let Some(alias) = rename {
+                    kept_words.contains(alias.name.as_ref())
+                } else {
+                    path.segments
+                        .last()
+                        .is_some_and(|seg| kept_words.contains(seg.ident.name.as_ref()))
+                }
+            }
+            ast::UseTreeKind::Nested { trees, .. } => {
+                trees.iter().any(|c| use_tree_referenced(c, kept_words))
+            }
+        }
+    }
+    for (idx, item) in items.iter().enumerate() {
+        if let ItemKind::Use(u) = &item.kind {
+            if use_tree_referenced(&u.tree, &kept_words) {
+                kept[idx] = true;
             }
         }
     }
