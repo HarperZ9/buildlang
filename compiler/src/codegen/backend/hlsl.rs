@@ -994,6 +994,30 @@ impl HlslBackend {
             MirRValue::BinaryOp { op, left, right } => {
                 let l = self.value_to_hlsl(left, &func.locals);
                 let r = self.value_to_hlsl(right, &func.locals);
+                if matches!(
+                    op,
+                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping
+                ) {
+                    let sym = match op {
+                        BinOp::AddWrapping => "+",
+                        BinOp::SubWrapping => "-",
+                        BinOp::MulWrapping => "*",
+                        _ => unreachable!(),
+                    };
+                    let is_signed_int = match left {
+                        MirValue::Local(id) => func
+                            .locals
+                            .get(id.0 as usize)
+                            .is_some_and(|loc| matches!(loc.ty, MirType::Int(_, true))),
+                        MirValue::Const(MirConst::Int(_, _)) => true,
+                        _ => false,
+                    };
+                    return if is_signed_int {
+                        format!("asint((asuint({}) {} asuint({})))", l, sym, r)
+                    } else {
+                        format!("({} {} {})", l, sym, r)
+                    };
+                }
                 let op_str = match op {
                     BinOp::Add => "+",
                     BinOp::Sub => "-",
@@ -1625,6 +1649,30 @@ impl HlslBackend {
             MirRValue::BinaryOp { op, left, right } => {
                 let l = self.compute_value_to_hlsl(left, &func.locals, bindings);
                 let r = self.compute_value_to_hlsl(right, &func.locals, bindings);
+                if matches!(
+                    op,
+                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping
+                ) {
+                    let sym = match op {
+                        BinOp::AddWrapping => "+",
+                        BinOp::SubWrapping => "-",
+                        BinOp::MulWrapping => "*",
+                        _ => unreachable!(),
+                    };
+                    let is_signed_int = match left {
+                        MirValue::Local(id) => func
+                            .locals
+                            .get(id.0 as usize)
+                            .is_some_and(|loc| matches!(loc.ty, MirType::Int(_, true))),
+                        MirValue::Const(MirConst::Int(_, _)) => true,
+                        _ => false,
+                    };
+                    return Ok(if is_signed_int {
+                        format!("asint((asuint({l}) {sym} asuint({r})))")
+                    } else {
+                        format!("({l} {sym} {r})")
+                    });
+                }
                 let sym = match op {
                     BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
                         "+"

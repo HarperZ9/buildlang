@@ -473,6 +473,32 @@ impl MslBackend {
                 let r_expected = l_ty.as_ref().filter(|t| matches!(t, MirType::Int(_, _)));
                 let l = self.value_to_msl_typed(left, l_expected, &func.locals)?;
                 let r = self.value_to_msl_typed(right, r_expected, &func.locals)?;
+                if matches!(
+                    op,
+                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping
+                ) {
+                    let sym = match op {
+                        BinOp::AddWrapping => "+",
+                        BinOp::SubWrapping => "-",
+                        BinOp::MulWrapping => "*",
+                        _ => unreachable!(),
+                    };
+                    let is_signed_int = match left {
+                        MirValue::Local(id) => func
+                            .locals
+                            .get(id.0 as usize)
+                            .is_some_and(|loc| matches!(loc.ty, MirType::Int(_, true))),
+                        MirValue::Const(MirConst::Int(_, _)) => true,
+                        _ => false,
+                    };
+                    return Ok(if is_signed_int {
+                        format!(
+                            "static_cast<int>((static_cast<uint>({l}) {sym} static_cast<uint>({r})))"
+                        )
+                    } else {
+                        format!("({l} {sym} {r})")
+                    });
+                }
                 let sym = match op {
                     BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
                         "+"

@@ -3529,21 +3529,21 @@ impl SpirvBackend {
         let is_signed = ty.is_signed();
 
         match op {
-            BinOp::Add => {
+            BinOp::Add | BinOp::AddWrapping => {
                 if is_float {
                     SpvOp::OpFAdd
                 } else {
                     SpvOp::OpIAdd
                 }
             }
-            BinOp::Sub => {
+            BinOp::Sub | BinOp::SubWrapping => {
                 if is_float {
                     SpvOp::OpFSub
                 } else {
                     SpvOp::OpISub
                 }
             }
-            BinOp::Mul => {
+            BinOp::Mul | BinOp::MulWrapping => {
                 if is_float {
                     SpvOp::OpFMul
                 } else {
@@ -5922,6 +5922,28 @@ mod tests {
         assert!(matches!(
             backend.spirv_binop(BinOp::Div, &MirType::u32()),
             SpvOp::OpUDiv
+        ));
+        // Wave 111C: wrapping ops must emit exact two's-complement SPIR-V opcodes
+        // (never fall through to OpIAdd for SubWrapping/MulWrapping).
+        assert!(matches!(
+            backend.spirv_binop(BinOp::AddWrapping, &MirType::u32()),
+            SpvOp::OpIAdd
+        ));
+        assert!(matches!(
+            backend.spirv_binop(BinOp::SubWrapping, &MirType::u32()),
+            SpvOp::OpISub
+        ));
+        assert!(matches!(
+            backend.spirv_binop(BinOp::MulWrapping, &MirType::u32()),
+            SpvOp::OpIMul
+        ));
+        assert!(matches!(
+            backend.spirv_binop(BinOp::SubWrapping, &MirType::i32()),
+            SpvOp::OpISub
+        ));
+        assert!(matches!(
+            backend.spirv_binop(BinOp::MulWrapping, &MirType::i32()),
+            SpvOp::OpIMul
         ));
     }
 
