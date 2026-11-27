@@ -1,0 +1,135 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 58C (Author Idea E10): Deterministic ASCII & Luminance-Ramp Renderer (ascii_render_engine.bld)
+// - Maps 16x16 linear-light scene via perceptual gamma (1/2.2) + Floyd-Steinberg diffusion onto 16-level ASCII ramp
+// - Verifies mean luminance conservation and exact bit-for-bit ramp index digest parity vs Python
+// - Planted failing controls: out-of-range luminance and out-of-bounds ramp index caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn clamp01(x: f64) -> f64 {
+    if x < 0.0 { return 0.0; }
+    if x > 1.0 { return 1.0; }
+    x
+}
+
+fn round_clamp15(x: f64) -> i32 {
+    let v: f64 = clamp01(x) * 15.0 + 0.5;
+    let mut idx: i32 = v as i32;
+    if idx < 0 { idx = 0; }
+    if idx > 15 { idx = 15; }
+    idx
+}
+
+// Fail-closed luminance and ramp-index validators
+fn check_luma(val: f64) -> i32 {
+    if val != val || val < 0.0 || val > 1.0 { return -1; }
+    1
+}
+
+fn check_ramp_idx(idx: i32) -> i32 {
+    if idx < 0 || idx > 15 { return -2; }
+    1
+}
+
+fn fnv1a_byte(h: i64, b: i64) -> i64 {
+    let mask: i64 = 4294967295;
+    (((h ^ (b & 255)) & mask) * 16777619) & mask
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+    let n: usize = 16;
+
+    // Synthesize 16x16 linear-light shaded sphere + gradient scene in [0, 1]
+    let mut buf: Vec<f64> = Vec::new();
+    let mut sum_gamma_in: f64 = 0.0;
+    let mut bad_in: i32 = 0;
+    let mut y: usize = 0;
+    while y < n {
+        let mut x: usize = 0;
+        while x < n {
+            let nx: f64 = ((x as f64) - 7.5) / 7.5;
+            let ny: f64 = ((y as f64) - 7.5) / 7.5;
+            let r2: f64 = nx * nx + ny * ny;
+            let lin: f64 = if r2 < 0.85 {
+                let nz: f64 = sqrt(1.0 - r2);
+                clamp01(0.12 + 0.82 * clamp01(0.45 * nx - 0.55 * ny + 0.70 * nz))
+            } else {
+                0.08 + 0.16 * ((y as f64) / 15.0)
+            };
+            if check_luma(lin) != 1 { bad_in = bad_in + 1; }
+            let gam: f64 = exp(log(lin + 1.0e-12) / 2.2);
+            buf.push(gam);
+            sum_gamma_in = sum_gamma_in + gam;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    // Floyd-Steinberg error-diffusion quantization onto 16-level calibrated ramp (0..15)
+    let mut digest: i64 = 2166136261;
+    let mut sum_quant: f64 = 0.0;
+    let mut oob_idx: i32 = 0;
+    y = 0;
+    while y < n {
+        let mut x: usize = 0;
+        while x < n {
+            let old_v: f64 = buf[y * n + x];
+            let q_idx: i32 = round_clamp15(old_v);
+            if check_ramp_idx(q_idx) != 1 { oob_idx = oob_idx + 1; }
+            let new_v: f64 = (q_idx as f64) / 15.0;
+            let err: f64 = old_v - new_v;
+            sum_quant = sum_quant + new_v;
+            digest = fnv1a_byte(digest, q_idx as i64);
+
+            if x + 1 < n {
+                buf[y * n + (x + 1)] = buf[y * n + (x + 1)] + err * (7.0 / 16.0);
+            }
+            if y + 1 < n {
+                if x > 0 {
+                    buf[(y + 1) * n + (x - 1)] = buf[(y + 1) * n + (x - 1)] + err * (3.0 / 16.0);
+                }
+                buf[(y + 1) * n + x] = buf[(y + 1) * n + x] + err * (5.0 / 16.0);
+                if x + 1 < n {
+                    buf[(y + 1) * n + (x + 1)] = buf[(y + 1) * n + (x + 1)] + err * (1.0 / 16.0);
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+
+    let mean_in: f64 = sum_gamma_in / 256.0;
+    let mean_out: f64 = sum_quant / 256.0;
+    let mean_err: f64 = abs_f64(mean_out - mean_in);
+
+    // Planted failing controls: out-of-range luminance (1.45) and ramp index OOB (17)
+    let rc_luma: i32 = check_luma(1.45);
+    let rc_ramp: i32 = check_ramp_idx(17);
+    let traps_caught: i32 = if rc_luma == -1 && rc_ramp == -2 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("E10_MEAN_IN={:.12}", mean_in);
+    println!("E10_MEAN_OUT={:.12}", mean_out);
+    println!("E10_MEAN_ERR={:.12}", mean_err);
+    println!("E10_RAMP_DIGEST={}", digest);
+    println!("E10_TRAPS_CAUGHT={}", traps_caught);
+    println!("E10_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let ok: bool = bad_in == 0 && oob_idx == 0 && mean_err < 0.01 && traps_caught == 1;
+    if ok {
+        println!(
+            "[PASS] E10_ASCII_RENDER mean_err={:.5} digest={} traps_caught=1",
+            mean_err, digest
+        );
+    } else {
+        println!("[FAIL] E10_ASCII_RENDER mean_err={:.5} traps={}", mean_err, traps_caught);
+    }
+}

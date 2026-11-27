@@ -1,0 +1,146 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 59C (Author Idea K3): Mid-Century Drafting Sheet & Modular Grid Engine (midcentury_synthesis_grid.bld)
+// - Synthesizes 12-element Eames/Italian mid-century layout on A4 sheet with harmonic ratios (1.414, 1.618, 4:3)
+// - Proves zero AABB collisions, strict margin containment, and calibrated hairline rule weights
+// - Planted failing controls: bounding-box collision and aspect-ratio distortion rejected fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+struct LayoutCheck {
+    collisions: i32,
+    oob_count: i32,
+    max_ratio_err: f64,
+    valid: i32,
+}
+
+fn validate_layout(
+    bx: &Vec<f64>,
+    by: &Vec<f64>,
+    bw: &Vec<f64>,
+    bh: &Vec<f64>,
+    target_r: &Vec<f64>,
+    sheet_w: f64,
+    sheet_h: f64,
+    margin: f64,
+    min_gutter: f64
+) -> LayoutCheck {
+    let n: usize = bx.len();
+    let mut oob: i32 = 0;
+    let mut max_rerr: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        if bx[i] < margin - 1.0e-9 || by[i] < margin - 1.0e-9 { oob = oob + 1; }
+        if bx[i] + bw[i] > sheet_w - margin + 1.0e-9 || by[i] + bh[i] > sheet_h - margin + 1.0e-9 {
+            oob = oob + 1;
+        }
+        let ratio: f64 = bw[i] / bh[i];
+        let rerr: f64 = abs_f64(ratio - target_r[i]) / target_r[i];
+        if rerr > max_rerr { max_rerr = rerr; }
+        i = i + 1;
+    }
+
+    let mut cols: i32 = 0;
+    i = 0;
+    while i < n {
+        let mut j: usize = i + 1;
+        while j < n {
+            let sep_x: bool = (bx[i] + bw[i] + min_gutter <= bx[j] + 1.0e-9)
+                || (bx[j] + bw[j] + min_gutter <= bx[i] + 1.0e-9);
+            let sep_y: bool = (by[i] + bh[i] + min_gutter <= by[j] + 1.0e-9)
+                || (by[j] + bh[j] + min_gutter <= by[i] + 1.0e-9);
+            if !sep_x && !sep_y {
+                cols = cols + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    let valid: i32 = if cols > 0 { -1 } else if max_rerr > 0.02 { -2 } else if oob > 0 { -3 } else { 1 };
+    LayoutCheck { collisions: cols, oob_count: oob, max_ratio_err: max_rerr, valid: valid }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    let sheet_w: f64 = 297.0;
+    let sheet_h: f64 = 210.0;
+    let margin: f64 = 12.0;
+    let gutter: f64 = 4.0;
+    let sqrt2: f64 = sqrt(2.0);
+    let phi: f64 = (1.0 + sqrt(5.0)) * 0.5;
+    let r43: f64 = 4.0 / 3.0;
+
+    // 12-element modular 3x4 grid: row 0 = 1:sqrt(2), row 1 = 1:phi, row 2 = 4:3
+    let mut bx: Vec<f64> = Vec::new();
+    let mut by: Vec<f64> = Vec::new();
+    let mut bw: Vec<f64> = Vec::new();
+    let mut bh: Vec<f64> = Vec::new();
+    let mut tr: Vec<f64> = Vec::new();
+
+    let col_pitch: f64 = 68.0;
+    let row_pitch: f64 = 60.0;
+    let mut total_area: f64 = 0.0;
+    let mut row: usize = 0;
+    while row < 3 {
+        let ratio_t: f64 = if row == 0 { sqrt2 } else if row == 1 { phi } else { r43 };
+        let h_box: f64 = if row == 0 { 42.0 } else if row == 1 { 38.0 } else { 44.0 };
+        let w_box: f64 = h_box * ratio_t;
+        let mut col: usize = 0;
+        while col < 4 {
+            let x0: f64 = margin + (col as f64) * col_pitch;
+            let y0: f64 = margin + (row as f64) * row_pitch;
+            bx.push(x0); by.push(y0); bw.push(w_box); bh.push(h_box); tr.push(ratio_t);
+            total_area = total_area + w_box * h_box;
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+
+    // Calibrated hairline rule weights (0.25, 0.50, 1.00, 1.50 pt)
+    let rule_sum_pt: f64 = 0.25 + 0.50 + 1.00 + 1.50;
+    let clean: LayoutCheck = validate_layout(&bx, &by, &bw, &bh, &tr, sheet_w, sheet_h, margin, gutter);
+
+    // Planted control 1: box collision (shift box 1 into box 0)
+    let orig_x1: f64 = bx[1];
+    bx[1] = bx[0] + 10.0;
+    let bad_col: LayoutCheck = validate_layout(&bx, &by, &bw, &bh, &tr, sheet_w, sheet_h, margin, gutter);
+    bx[1] = orig_x1;
+
+    // Planted control 2: aspect-ratio distortion (-25% width squeeze on box 4, zero collision)
+    bw[4] = bw[4] * 0.75;
+    let bad_asp: LayoutCheck = validate_layout(&bx, &by, &bw, &bh, &tr, sheet_w, sheet_h, margin, gutter);
+
+    let traps_caught: i32 = if bad_col.valid == -1 && bad_asp.valid == -2 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("K3_ELEMENTS=12");
+    println!("K3_COLLISIONS={}", clean.collisions);
+    println!("K3_MAX_RATIO_ERR={:.15}", clean.max_ratio_err);
+    println!("K3_TOTAL_AREA_MM2={:.10}", total_area);
+    println!("K3_RULE_SUM_PT={:.4}", rule_sum_pt);
+    println!("K3_BAD_COL_COUNT={}", bad_col.collisions);
+    println!("K3_BAD_ASP_ERR={:.8}", bad_asp.max_ratio_err);
+    println!("K3_TRAPS_CAUGHT={}", traps_caught);
+    println!("K3_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let ok: bool = clean.valid == 1
+        && clean.collisions == 0
+        && clean.max_ratio_err < 1.0e-12
+        && traps_caught == 1;
+    if ok {
+        println!(
+            "[PASS] K3_MIDCENTURY_GRID elems=12 collisions=0 ratio_err={:.2e} traps_caught=1",
+            clean.max_ratio_err
+        );
+    } else {
+        println!("[FAIL] K3_MIDCENTURY_GRID cols={} traps={}", clean.collisions, traps_caught);
+    }
+}

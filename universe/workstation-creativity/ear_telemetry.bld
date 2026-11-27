@@ -1,0 +1,254 @@
+// Wave 55I - Author Idea B9: Audio BPM Autocorrelation & Krumhansl-Schmuckler Key Telemetry
+// Evaluates 10 synthetic harmonic tracks across 10 tempos (84..152 BPM) and 10 musical keys
+// (5 major + 5 minor). Verifies 10/10 BPM within <= 0.1 BPM and 10/10 exact key classification.
+// Planted Control: silent all-zero track flagged NULL_SILENT fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_exp(x: f64) -> f64 {
+    if x < -50.0 {
+        return 0.0;
+    }
+    let u: f64 = x / 64.0;
+    let mut t: f64 = 1.0 + u * (1.0 + u * (0.5 + u * (0.16666666666666666 + u * 0.041666666666666664)));
+    let mut i: i32 = 0;
+    while i < 6 {
+        t = t * t;
+        i = i + 1;
+    }
+    t
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn pearson12(a: &Vec<f64>, b: &Vec<f64>, shift: usize) -> f64 {
+    let mut ma: f64 = 0.0;
+    let mut mb: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < 12 {
+        ma = ma + a[i];
+        mb = mb + b[i];
+        i = i + 1;
+    }
+    ma = ma / 12.0;
+    mb = mb / 12.0;
+    let mut cov: f64 = 0.0;
+    let mut va: f64 = 0.0;
+    let mut vb: f64 = 0.0;
+    i = 0;
+    while i < 12 {
+        let da: f64 = a[(i + shift) % 12] - ma;
+        let db: f64 = b[i] - mb;
+        cov = cov + da * db;
+        va = va + da * da;
+        vb = vb + db * db;
+        i = i + 1;
+    }
+    cov / det_sqrt(va * vb + 1.0e-18)
+}
+
+struct TrackTelemetry {
+    status: i32,
+    bpm_est: f64,
+    key_id: i32, // 0..11 Major (C..B), 12..23 Minor (Cm..Bm)
+    key_corr: f64,
+}
+
+fn analyze_track(true_bpm: f64, true_key_id: i32, silent: bool) -> TrackTelemetry {
+    let fs_env: f64 = 200.0; // 200 Hz onset envelope (5 ms bins)
+    let n_env: usize = 1600; // 8.0 s track
+
+    // Krumhansl-Schmuckler (1990) exact cognitive probe-tone key profiles
+    let ks_maj: Vec<f64> = vec![6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+    let ks_min: Vec<f64> = vec![6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+    // 1. Synthesize onset envelope + 12-bin chromagram
+    let mut env: Vec<f64> = vec![0.0; n_env];
+    let mut chroma: Vec<f64> = vec![0.0; 12];
+
+    if !silent {
+        let period_s: f64 = 60.0 / true_bpm;
+        let mut i: usize = 0;
+        while i < n_env {
+            let t: f64 = (i as f64) / fs_env;
+            let k_b: i32 = (t / period_s + 0.5) as i32;
+            let dt: f64 = t - (k_b as f64) * period_s;
+            env[i] = det_exp(-0.5 * (dt / 0.035) * (dt / 0.035));
+            i = i + 1;
+        }
+        // Build harmonic chromagram from diatonic scale + tonic/dominant triad emphasis
+        let root: usize = (true_key_id % 12) as usize;
+        let is_minor: bool = true_key_id >= 12;
+        let mut pc: usize = 0;
+        while pc < 12 {
+            let rel: usize = (pc + 12 - root) % 12;
+            let base: f64 = if is_minor {
+                if rel == 0 { 1.00 }
+                else if rel == 3 { 0.82 }
+                else if rel == 7 { 0.78 }
+                else if rel == 2 || rel == 5 || rel == 8 || rel == 10 { 0.42 }
+                else { 0.08 }
+            } else {
+                if rel == 0 { 1.00 }
+                else if rel == 4 { 0.80 }
+                else if rel == 7 { 0.85 }
+                else if rel == 2 || rel == 5 || rel == 9 || rel == 11 { 0.42 }
+                else { 0.08 }
+            };
+            chroma[pc] = base;
+            pc = pc + 1;
+        }
+    }
+
+    // Fail-closed silence / null energy detector
+    let mut e_sum: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n_env {
+        e_sum = e_sum + env[i] * env[i];
+        i = i + 1;
+    }
+    if e_sum < 1.0e-6 {
+        return TrackTelemetry { status: 1, bpm_est: 0.0, key_id: -1, key_corr: 0.0 };
+    }
+
+    // 2. Smoothly tapered autocorrelation BPM estimator over lags [70..160] (75..171 BPM)
+    let mut win: Vec<f64> = Vec::new();
+    let mut wk: usize = 0;
+    while wk < 1200 {
+        let u: f64 = (wk as f64) / 1200.0;
+        let b: f64 = 4.0 * u * (1.0 - u);
+        win.push(b * b);
+        wk = wk + 1;
+    }
+    let mut acf: Vec<f64> = vec![0.0; 170];
+    let mut lag: usize = 68;
+    while lag <= 164 {
+        let mut s: f64 = 0.0;
+        let mut t: usize = 0;
+        while t < 1200 {
+            s = s + win[t] * env[100 + t] * env[100 + t + lag];
+            t = t + 1;
+        }
+        acf[lag] = s;
+        lag = lag + 1;
+    }
+
+    // Pick first strong local autocorrelation peak (>= 70% of global max) to lock fundamental period
+    let mut max_acf: f64 = 0.0;
+    lag = 70;
+    while lag <= 160 {
+        if acf[lag] > max_acf {
+            max_acf = acf[lag];
+        }
+        lag = lag + 1;
+    }
+    let mut best_lag: usize = 70;
+    let mut found: bool = false;
+    lag = 70;
+    while lag <= 160 {
+        if !found && acf[lag] >= 0.70 * max_acf && acf[lag] >= acf[lag - 1] && acf[lag] >= acf[lag + 1] {
+            best_lag = lag;
+            found = true;
+        }
+        lag = lag + 1;
+    }
+    // Parabolic sub-bin interpolation around autocorrelation peak
+    let y_m: f64 = acf[best_lag - 1];
+    let y_0: f64 = acf[best_lag];
+    let y_p: f64 = acf[best_lag + 1];
+    let denom: f64 = y_m - 2.0 * y_0 + y_p;
+    let delta: f64 = if abs_f64(denom) > 1.0e-12 { 0.5 * (y_m - y_p) / denom } else { 0.0 };
+    let lag_refined: f64 = (best_lag as f64) + delta;
+    let bpm_est: f64 = 60.0 * fs_env / lag_refined;
+
+    // 3. Krumhansl-Schmuckler 24-Key Classifier
+    let mut best_key: i32 = 0;
+    let mut best_r: f64 = -2.0;
+    let mut k_i: usize = 0;
+    while k_i < 12 {
+        let rmaj: f64 = pearson12(&chroma, &ks_maj, k_i);
+        if rmaj > best_r {
+            best_r = rmaj;
+            best_key = k_i as i32;
+        }
+        let rmin: f64 = pearson12(&chroma, &ks_min, k_i);
+        if rmin > best_r {
+            best_r = rmin;
+            best_key = (12 + k_i) as i32;
+        }
+        k_i = k_i + 1;
+    }
+
+    TrackTelemetry { status: 0, bpm_est: bpm_est, key_id: best_key, key_corr: best_r }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    let bpms: Vec<f64> = vec![84.0, 92.0, 100.0, 108.0, 116.0, 120.0, 128.0, 136.0, 144.0, 152.0];
+    let keys: Vec<i32> = vec![0, 7, 2, 9, 4, 21, 14, 16, 23, 18]; // 5 major + 5 minor
+
+    let mut bpm_hits: i32 = 0;
+    let mut key_hits: i32 = 0;
+    let mut max_bpm_err: f64 = 0.0;
+    let mut checksum: f64 = 0.0;
+
+    let mut i: usize = 0;
+    while i < 10 {
+        let res: TrackTelemetry = analyze_track(bpms[i], keys[i], false);
+        let b_err: f64 = abs_f64(res.bpm_est - bpms[i]);
+        if b_err > max_bpm_err {
+            max_bpm_err = b_err;
+        }
+        if res.status == 0 && b_err <= 0.10 {
+            bpm_hits = bpm_hits + 1;
+        }
+        if res.status == 0 && res.key_id == keys[i] {
+            key_hits = key_hits + 1;
+        }
+        checksum = checksum + res.bpm_est + res.key_corr;
+        i = i + 1;
+    }
+
+    if bpm_hits == 10 && key_hits == 10 && max_bpm_err <= 0.10 {
+        println!(
+            "[PASS] ear_telemetry_10tracks bpm={}/10 key={}/10 max_bpm_err={:.6}",
+            bpm_hits, key_hits, max_bpm_err
+        );
+    } else {
+        println!("[FAIL] ear_telemetry_10tracks bpm={}/10 key={}/10 max_err={:.6}", bpm_hits, key_hits, max_bpm_err);
+        failures = failures + 1;
+    }
+
+    // Planted Control: Silent Track Null Caught Fail-Closed
+    let sil: TrackTelemetry = analyze_track(120.0, 0, true);
+    if sil.status == 1 && sil.key_id == -1 {
+        println!("[PASS] planted_ctrl_silent_null caught status=1 key_id=-1");
+    } else {
+        println!("[FAIL] planted_ctrl_silent_null missed status={}", sil.status);
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_B9] elapsed_ms={:.4} max_bpm_err={:.9} checksum={:.9} failures={}",
+        elapsed_ms, max_bpm_err, checksum, failures
+    );
+}
