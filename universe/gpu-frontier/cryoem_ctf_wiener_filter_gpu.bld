@@ -1,0 +1,45 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Frontier GPU 280-Pack: Cryo-EM Contrast Transfer Function (CTF) and Wiener filter kernel.
+// Evaluates aberration phase contrast with B-factor envelope damping and applies
+// SNR-regularized Wiener deconvolution to complex Fourier-space micrograph pixels.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn cryoem_ctf_wiener_filter_gpu(
+    c_defocus: f32,
+    c_cs: f32,
+    amp_phase: f32,
+    amp_cont: f32,
+    b_factor: f32,
+    inv_snr: f32,
+    s2_buf: &[f32],
+    obs_r_buf: &[f32],
+    obs_i_buf: &[f32],
+    ctf_out: &mut [f32],
+    flt_r_out: &mut [f32],
+    flt_i_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let s2: f32 = s2_buf[i];
+    let chi: f32 = c_defocus * s2 - c_cs * s2 * s2;
+
+    let mut u: f32 = chi;
+    if u > 1.5707963 {
+        u = 1.5707963;
+    }
+    if u < -1.5707963 {
+        u = -1.5707963;
+    }
+    let u2: f32 = u * u;
+    let sin_u: f32 = u * (1.0 - 0.16666667 * u2 + 0.00833333 * u2 * u2);
+    let cos_u: f32 = 1.0 - 0.5 * u2 + 0.04166667 * u2 * u2;
+
+    let bs: f32 = b_factor * s2;
+    let env: f32 = 1.0 / (1.0 + bs + 0.5 * bs * bs);
+    let ctf: f32 = -(amp_phase * sin_u + amp_cont * cos_u) * env;
+
+    let wiener: f32 = ctf / (ctf * ctf + inv_snr);
+    ctf_out[i] = ctf;
+    flt_r_out[i] = obs_r_buf[i] * wiener;
+    flt_i_out[i] = obs_i_buf[i] * wiener;
+}
