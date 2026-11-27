@@ -1,5 +1,5 @@
 // sum-det slot `i8`, variant `edits-cases`.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // PLANTED WRONG: a correct slot whose folder also carries its own tests/cases.txt.

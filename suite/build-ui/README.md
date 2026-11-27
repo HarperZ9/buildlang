@@ -111,7 +111,7 @@ Pro uses the PySide6 lane. Existing PyQt6 applications use the PyQt6 lane.
 ## License
 
 Copyright (c) 2022-2026 Zain Dana Harper. All rights reserved. Build UI is
-released under the FSL-1.1-MIT: the source is available so you can read it, run
+released under the MIT License: the source is open so you can read it, run
 it, and build on it, while competing commercial use is reserved to the
 Licensor to fund continued development. See [LICENSE](LICENSE) and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

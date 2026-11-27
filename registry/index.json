@@ -60,13 +60,13 @@
       "version": "1.0.0",
       "description": "RFC 8785 (JCS) canonical JSON, its SHA-256, and the cr1 numeric-array digest (port of Flywheel harness/canonical_record.py)",
       "author": "Zain Dana Harper",
-      "license": "FSL-1.1-MIT",
-      "checksum": "sha256:9a4204f7accc9e3ad52406d0772d175e66e43fcb3383f5264215f955350ada4a",
+      "license": "MIT",
+      "checksum": "sha256:21065d73a2980bea48c532ccc979a495a43d0e9dcc79cd403ed8219f9f7a8af0",
       "path": "packages/canonical-record/1.0.0",
       "versions": {
         "1.0.0": {
           "path": "packages/canonical-record/1.0.0",
-          "checksum": "sha256:9a4204f7accc9e3ad52406d0772d175e66e43fcb3383f5264215f955350ada4a",
+          "checksum": "sha256:21065d73a2980bea48c532ccc979a495a43d0e9dcc79cd403ed8219f9f7a8af0",
           "dependencies": {
             "sha256": "^1.0.0"
           }
@@ -101,13 +101,13 @@
       "version": "1.0.0",
       "description": "Colour difference metrics (CIE76, CIE94, CIEDE2000, CMC, HyAB) and sRGB, XYZ, xyY, Lab, LCh, Oklab and Oklch conversions in pure BuildLang",
       "author": "Zain Dana Harper",
-      "license": "FSL-1.1-MIT",
-      "checksum": "sha256:987e6a831450d88611ebdfa45c315aecf73ac14e739bb34e6b5bbc9fb5668496",
+      "license": "MIT",
+      "checksum": "sha256:66fa30192ccfbced8d872d89808457a8a7ef8259e9e610c5c58b261e9013d0c4",
       "path": "packages/color/1.0.0",
       "versions": {
         "1.0.0": {
           "path": "packages/color/1.0.0",
-          "checksum": "sha256:987e6a831450d88611ebdfa45c315aecf73ac14e739bb34e6b5bbc9fb5668496",
+          "checksum": "sha256:66fa30192ccfbced8d872d89808457a8a7ef8259e9e610c5c58b261e9013d0c4",
           "dependencies": {}
         }
       }
@@ -221,20 +221,20 @@
       "version": "1.0.1",
       "description": "RFC 6962 Merkle roots, inclusion and consistency proofs (port of Flywheel harness/merkle.py)",
       "author": "Zain Dana Harper",
-      "license": "FSL-1.1-MIT",
-      "checksum": "sha256:d6f0f79d056d221723ad5714054b850898c73c5fd851fcf5e45cdc37f2ec5063",
+      "license": "MIT",
+      "checksum": "sha256:00a151ec9c33c625c8c0bb9de40c89231eccb7ac0718eb26a014c8cad69ec7b7",
       "path": "packages/merkle/1.0.1",
       "versions": {
         "1.0.0": {
           "path": "packages/merkle/1.0.0",
-          "checksum": "sha256:89ff0270f2953b410ca0768eb497fc01bec78f363d520ba2d71aea95f0a56ed8",
+          "checksum": "sha256:a1f9d91f3443e059eb57081e2dd9ed3037393749824ef013c0225023e626b745",
           "dependencies": {
             "sha256": "^1.0.0"
           }
         },
         "1.0.1": {
           "path": "packages/merkle/1.0.1",
-          "checksum": "sha256:d6f0f79d056d221723ad5714054b850898c73c5fd851fcf5e45cdc37f2ec5063",
+          "checksum": "sha256:00a151ec9c33c625c8c0bb9de40c89231eccb7ac0718eb26a014c8cad69ec7b7",
           "dependencies": {
             "sha256": "^1.0.0"
           }
@@ -275,13 +275,13 @@
       "version": "1.0.0",
       "description": "Flesch reading ease with word, sentence and syllable counts, ported from Flywheel's writing linter",
       "author": "Zain Dana Harper",
-      "license": "FSL-1.1-MIT",
-      "checksum": "sha256:10785caef30da9e0c24aad37cb45fcd1673cf36939d04281fc9463f7a1d15ffe",
+      "license": "MIT",
+      "checksum": "sha256:54a9e4468a82afc5ebe0dfcd96c24b693532333e54eea608873d250e9d46ef83",
       "path": "packages/readability/1.0.0",
       "versions": {
         "1.0.0": {
           "path": "packages/readability/1.0.0",
-          "checksum": "sha256:10785caef30da9e0c24aad37cb45fcd1673cf36939d04281fc9463f7a1d15ffe",
+          "checksum": "sha256:54a9e4468a82afc5ebe0dfcd96c24b693532333e54eea608873d250e9d46ef83",
           "dependencies": {}
         }
       }
@@ -362,13 +362,13 @@
       "version": "0.1.0",
       "description": "Float sums with a written order (serial, tree, interleave8), an exact correctly rounded sum two ways (Shewchuk partials, exact bins), and a slot the improvement loop may replace",
       "author": "Zain Dana Harper",
-      "license": "FSL-1.1-MIT",
-      "checksum": "sha256:c3b60fbda9612c98cbbc033135998168cec4cb79349653c618696010b27dcc21",
+      "license": "MIT",
+      "checksum": "sha256:a0539002abebadc6b6693edc51c496e28ca098b6783adccb9c139f0d0194f499",
       "path": "packages/sum-det/0.1.0",
       "versions": {
         "0.1.0": {
           "path": "packages/sum-det/0.1.0",
-          "checksum": "sha256:c3b60fbda9612c98cbbc033135998168cec4cb79349653c618696010b27dcc21",
+          "checksum": "sha256:a0539002abebadc6b6693edc51c496e28ca098b6783adccb9c139f0d0194f499",
           "dependencies": {}
         }
       }

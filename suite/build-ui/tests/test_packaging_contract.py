@@ -27,7 +27,7 @@ def test_pep639_license_payload_is_declared() -> None:
     data = _project()
     assert data["build-system"]["requires"] == ["setuptools>=77.0.0"]
     license_expression = data["project"]["license"]
-    assert license_expression == "LicenseRef-FSL-1.1-MIT"
+    assert license_expression == "MIT"
     assert canonicalize_license_expression(license_expression) == license_expression
     assert data["project"]["license-files"] == [
         "LICENSE",

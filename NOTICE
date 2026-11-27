@@ -16,10 +16,11 @@ License 1.1 with MIT future licence (FSL-1.1-MIT) they were published under.
 
 The files under universe/ (Build Universe: modules, example programs, the
 BuildOS kernel and frametrace) moved here from HarperZ9/build-universe on
-2026-11-15 at its commit 1633fc3. They keep the licence they were published
-under, the Functional Source License 1.1 with MIT future licence
-(FSL-1.1-MIT); see universe/LICENSE. The five packages under suite/ likewise
-keep their own LICENSE files.
+2026-11-15 at its commit 1633fc3. On 2026-11-26, the author (sole copyright
+holder) relicensed universe/, the five Python packages under suite/,
+runtime/audio/, and the previously FSL-1.1-MIT registry packages under
+registry/packages/ to the OSI-approved MIT License; see each folder's
+LICENSE file.
 
 The files under editors/tmLanguage/ and editors/vscode-syntax/ moved here from
 HarperZ9/buildlang-tmLanguage (commit d9c3de1) and HarperZ9/buildlang-vscode

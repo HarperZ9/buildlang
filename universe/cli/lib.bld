@@ -635,7 +635,7 @@ For more information, visit: https://build-universe.dev
         println!("BuildLang Compiler v1.0.0");
         println!();
         println!("Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.");
-        println!("22 Modules │ FSL-1.1-MIT");
+        println!("22 Modules │ MIT");
     }
 }
 

@@ -30,5 +30,5 @@ python -m pytest tests/live_paper -q
 python scripts/run_network_denied.py --pytest tests/live_paper -q
 ```
 
-Licence: the suite packages are source-visible under FSL-1.1-MIT, as stated in each package's
+Licence: the suite packages are licensed under the OSI-approved MIT License, as stated in each package's
 `LICENSE`. The compiler and the rest of this repository keep the licence in the root `LICENSE`.

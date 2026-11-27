@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: FSL-1.1-MIT
+/* SPDX-License-Identifier: MIT
  * bl_audio: real-time audio output for BuildLang programs, with a deadline counter. See bl_audio.h. */
 #include "bl_audio.h"
 #include <math.h>

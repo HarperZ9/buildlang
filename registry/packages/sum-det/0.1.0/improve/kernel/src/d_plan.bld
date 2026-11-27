@@ -1,5 +1,5 @@
 // improve-kernel: plan lines for the spawner.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // The language has no builtin that starts a process, so the kernel prints

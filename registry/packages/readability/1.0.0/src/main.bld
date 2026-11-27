@@ -1,7 +1,7 @@
 // =============================================================================
 // readability: word, sentence and syllable counts and the Flesch ease per file
 // =============================================================================
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2022-2026 Zain Dana Harper.
 // =============================================================================
 //

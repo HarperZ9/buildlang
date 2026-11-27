@@ -178,7 +178,7 @@ build_finance/
 
 ## License
 
-Build Finance is released under the FSL-1.1-MIT.
+Build Finance is released under the MIT License.
 The source is available so you can read it, run it, and build on it; commercial use
 that competes with the project is reserved to the Licensor. See [LICENSE](LICENSE).
 

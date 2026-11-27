@@ -1,5 +1,5 @@
 // sum-det: named properties and the differential fuzz run.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 
 fn sd_same(a: f64, b: f64) -> bool {

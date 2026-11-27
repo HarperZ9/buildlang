@@ -11,11 +11,11 @@ original on the same inputs (`tests/cases.txt`, run by
 | Package | Original | Licence | .bld lines | Differential result |
 |---|---|---|---|---|
 | `sha256` 1.0.0 | Python `hashlib` (building block) | AGPL-3.0-only | 163 | FIPS 180-4 vectors and a 1,280-byte file of every byte value: identical |
-| `merkle` 1.0.0 | Flywheel `harness/merkle.py` | FSL-1.1-MIT | 424 | every root, inclusion proof and consistency proof, with tampered-proof checks, for trees of 0 to 40 leaves (1,722 lines): identical |
-| `canonical-record` 1.0.0 | Flywheel `harness/canonical_record.py` (RFC 8785) | FSL-1.1-MIT; vectors CC0-1.0 | 1,622 | 190 of 190 cases identical (canonical text, SHA-256, array digest, refusals); 75 of 75 published vector fields; 8,000 random documents identical |
-| `color` 1.0.0 | build-color `difference.py` and `spaces.py` | FSL-1.1-MIT | 606 | 34 Sharma CIEDE2000 pairs identical to the original and to the published 4 decimals; 608 random pairs within 2.84e-14; 103 sRGB rows of 17 conversions within 6.42e-12 (bounds 2 to 4 times the measured maximum) |
+| `merkle` 1.0.0 | Flywheel `harness/merkle.py` | MIT | 424 | every root, inclusion proof and consistency proof, with tampered-proof checks, for trees of 0 to 40 leaves (1,722 lines): identical |
+| `canonical-record` 1.0.0 | Flywheel `harness/canonical_record.py` (RFC 8785) | MIT; vectors CC0-1.0 | 1,622 | 190 of 190 cases identical (canonical text, SHA-256, array digest, refusals); 75 of 75 published vector fields; 8,000 random documents identical |
+| `color` 1.0.0 | build-color `difference.py` and `spaces.py` | MIT | 606 | 34 Sharma CIEDE2000 pairs identical to the original and to the published 4 decimals; 608 random pairs within 2.84e-14; 103 sRGB rows of 17 conversions within 6.42e-12 (bounds 2 to 4 times the measured maximum) |
 | `repo-art` 1.0.0 | BuildLang `tools/repo_flow.py` and `tools/repo_card.py` | AGPL-3.0-only | 727 | the three committed artworks and 7 stress artworks: identical bytes |
-| `readability` 1.0.0 | Flywheel `harness/writing_lint/readability.py` | FSL-1.1-MIT | 234 | 9 of 9 cases identical, Unicode whitespace included; 400 random texts identical |
+| `readability` 1.0.0 | Flywheel `harness/writing_lint/readability.py` | MIT | 234 | 9 of 9 cases identical, Unicode whitespace included; 400 random texts identical |
 | `art-receipts` 1.0.0 | BuildLang `scripts/check_art_receipts.py` | AGPL-3.0-only | 356 | 10 of 10 cases identical with equal exit codes (7 kept in `cases.txt`; 3 print a platform path separator); this repository's art: `2 match, 0 mismatch, 22 not committed` from both |
 
 Each package keeps its source's licence: its `Build.toml` names it, and the

@@ -1,5 +1,5 @@
 // sum-det: seeded inputs for cases, properties, the fuzz run and the bench.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // splitmix64, then bit patterns built with integer steps, so ref/reference.py

@@ -4,7 +4,7 @@ Usage: python -I reference.py PATH/TO/merkle.py table N
        python -I reference.py PATH/TO/merkle.py root FILE
        python -I reference.py PATH/TO/merkle.py prove FILE INDEX
 
-PATH/TO/merkle.py is Flywheel's harness/merkle.py (FSL-1.1-MIT). The golden
+PATH/TO/merkle.py is Flywheel's harness/merkle.py (MIT). The golden
 files in this folder were written by this driver from that module.
 """
 import importlib.util

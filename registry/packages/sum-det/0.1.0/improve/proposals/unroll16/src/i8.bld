@@ -1,5 +1,5 @@
 // sum-det slot `i8`, variant `unroll16`.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // Claim: sixteen elements per pass, two additions per lane in index order.

@@ -1,5 +1,5 @@
 // improve-kernel: the frozen set and the admission rule.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // improve/FROZEN.sha256 lists "HEX  PATH" for every file the loop may not

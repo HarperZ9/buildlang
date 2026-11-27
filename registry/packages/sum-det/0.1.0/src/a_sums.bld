@@ -1,5 +1,5 @@
 // sum-det: float sums with a written operation order.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // Every function here is class exact-ieee: binary64, round to nearest ties to

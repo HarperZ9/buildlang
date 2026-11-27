@@ -128,7 +128,7 @@ fn print_banner() ~ Console {
     ║                         v2.0.0 - "The Language of the Universe"               ║
     ║                                                                               ║
     ║    Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.               ║
-    ║    22 Modules │ FSL-1.1-MIT                                                   ║
+    ║    22 Modules │ MIT                                                           ║
     ║                                                                               ║
     ╚═══════════════════════════════════════════════════════════════════════════════╝
     "#);

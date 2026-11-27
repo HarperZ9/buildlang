@@ -1,5 +1,5 @@
 // sum-det: the exact sum, correctly rounded, two ways.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // Contract for both functions: inputs are finite and the exact sum is below

@@ -342,10 +342,15 @@ The paper in [`papers/`](papers/) is licensed CC BY 4.0, the same licence its
 Zenodo deposit records. Share and adapt it with credit to Zain Dana Harper; the
 terms are in [`LICENSE-TEXT`](LICENSE-TEXT).
 
-The compiler, toolchain and their documentation are under the GNU Affero General
-Public License, version 3 only (AGPL-3.0-only). You may use, study, change and
-share them. If you run a changed version as a network service, you must offer its
-users the source of that version. See [LICENSE](LICENSE).
+The compiler, toolchain, BuildDB (`bdb/`), and their documentation are under the
+GNU Affero General Public License, version 3 only (AGPL-3.0-only). You may use,
+study, change and share them. If you run a changed version as a network service,
+you must offer its users the source of that version. See [LICENSE](LICENSE).
+
+Build Universe ([`universe/`](universe/LICENSE)), the Build suite
+([`suite/`](suite/README.md)), `runtime/audio/`, `editors/tmLanguage/`,
+`editors/vscode-syntax/`, and the MIT packages in `registry/packages/` are
+licensed under the OSI-approved MIT License.
 
 Releases up to and including 1.8.0 were published under the BuildLang Fair-Source
 License v1.0 and keep it. AGPL-3.0-only applies from the next release.

@@ -1,5 +1,5 @@
 // sum-det slot `i8`, variant `large-n`.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // PLANTED WRONG: 100000 elements or more fold the lanes in another order.

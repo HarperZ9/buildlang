@@ -1,5 +1,5 @@
 // improve-kernel: the paired benchmark and its interval.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // Round r gives a baseline time a[r] and a variant time b[r], and the gain is

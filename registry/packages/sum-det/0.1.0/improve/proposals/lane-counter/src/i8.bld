@@ -1,5 +1,5 @@
 // sum-det slot `i8`, variant `lane-counter`.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // Claim: a lane counter that wraps at 8 replaces the remainder per element.

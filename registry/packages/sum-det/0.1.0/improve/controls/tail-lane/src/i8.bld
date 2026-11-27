@@ -1,5 +1,5 @@
 // sum-det slot `i8`, variant `tail-lane`.
-// SPDX-License-Identifier: FSL-1.1-MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // PLANTED WRONG: the elements after the last full block go to lane 0.

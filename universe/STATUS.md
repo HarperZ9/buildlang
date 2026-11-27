@@ -7,7 +7,7 @@ source audit: real, correct, extractable logic vs scaffolding/showcase.
 
 ## Canonical facts
 
-- Version: 1.0.0  |  License: FSL-1.1-MIT (see LICENSE)
+- Version: 1.0.0  |  License: MIT (see LICENSE)
 - Compiler: 612 tests pass / 0 fail on cargo test (755 #[test] annotations incl. ignored/multi-bin); only the C backend is end-to-end.
   HLSL/GLSL emit text; x86-64/ARM64/WASM/LLVM/SPIR-V emit output but have no
   linker/assembler integration (no runnable artifacts yet).

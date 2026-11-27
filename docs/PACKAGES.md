@@ -40,7 +40,7 @@ name = "merkle"
 version = "1.0.0"
 description = "RFC 6962 Merkle roots and proofs"
 author = "Zain Dana Harper"
-license = "FSL-1.1-MIT"
+license = "MIT"
 
 [dependencies]
 sha256 = "^1.0"
