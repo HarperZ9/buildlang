@@ -1,0 +1,207 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51B Kernel 2 (Author Idea C4):
+//   Physarum / Mycelial Murray-Law Conductance Optimization (r_p^3 = r_1^3 + r_2^3)
+//   + Armillaria Root-Contact Percolation Threshold on Synthetic 24x24 Stand
+//   + Planted Disconnected-Graph Isolation Trap.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn cbrt_pos(x: f64) -> f64 {
+    exp(ln(x) / 3.0)
+}
+
+// Murray's Law optimal parent radius r_p = (r1^3 + r2^3)^(1/3) and power-stationarity check.
+struct MurrayRes {
+    r_parent: f64,
+    cube_residual: f64,
+    d_short_final: f64,
+    d_long_final: f64,
+}
+
+fn run_murray_and_physarum(r1: f64, r2: f64, l_short: f64, l_long: f64) -> MurrayRes {
+    let r_p: f64 = cbrt_pos(r1 * r1 * r1 + r2 * r2 * r2);
+    let cube_res: f64 = abs_f64(r_p * r_p * r_p - (r1 * r1 * r1 + r2 * r2 * r2));
+
+    // Tero-Kobayashi Physarum two-tube conductance adaptation (mu = 1.8, I0 = 1.0)
+    let mut d1: f64 = 0.5;
+    let mut d2: f64 = 0.5;
+    let dt: f64 = 0.05;
+    let mut step: i32 = 0;
+    while step < 600 {
+        let g1: f64 = d1 / l_short;
+        let g2: f64 = d2 / l_long;
+        let dp: f64 = 1.0 / (g1 + g2);
+        let q1: f64 = g1 * dp;
+        let q2: f64 = g2 * dp;
+        let f1: f64 = exp(1.8 * ln(q1 + 0.000000000001));
+        let f2: f64 = exp(1.8 * ln(q2 + 0.000000000001));
+        d1 = d1 + dt * (f1 / (1.0 + f1) - d1);
+        d2 = d2 + dt * (f2 / (1.0 + f2) - d2);
+        step = step + 1;
+    }
+
+    MurrayRes {
+        r_parent: r_p,
+        cube_residual: cube_res,
+        d_short_final: d1,
+        d_long_final: d2,
+    }
+}
+
+// Overflow-safe Park-Miller MINSTD LCG for deterministic Armillaria stand percolation.
+struct Lcg {
+    s: i64,
+}
+
+fn next_u01(rng: &mut Lcg) -> f64 {
+    let a: i64 = 48271;
+    let m: i64 = 2147483647;
+    rng.s = (rng.s * a) % m;
+    (rng.s as f64) / (m as f64)
+}
+
+// Check if root-contact stand of size N x N spans top row (y=0) to bottom row (y=N-1).
+// If barrier_row >= 0, that entire row is cleared (planted disconnected-graph isolation trap).
+fn stand_percolates(n: i32, prob: f64, seed: i64, barrier_row: i32) -> i32 {
+    let mut rng: Lcg = Lcg { s: seed };
+    let total: usize = (n * n) as usize;
+    let mut open: Vec<i32> = Vec::new();
+    let mut vis: Vec<i32> = Vec::new();
+    let mut idx: usize = 0;
+    while idx < total {
+        let row: i32 = (idx as i32) / n;
+        let u: f64 = next_u01(&mut rng);
+        let is_open: i32 = if row == barrier_row { 0 } else if u < prob { 1 } else { 0 };
+        open.push(is_open);
+        vis.push(0);
+        idx = idx + 1;
+    }
+
+    let mut queue: Vec<i32> = Vec::new();
+    let mut col: i32 = 0;
+    while col < n {
+        if open[col as usize] == 1 {
+            vis[col as usize] = 1;
+            queue.push(col);
+        }
+        col = col + 1;
+    }
+
+    let mut head: usize = 0;
+    while head < queue.len() {
+        let cur: i32 = queue[head];
+        head = head + 1;
+        let r: i32 = cur / n;
+        let c: i32 = cur % n;
+        if r == n - 1 {
+            return 1;
+        }
+        // Up, Down, Left, Right 4-connected root contacts
+        if r > 0 {
+            let nb: i32 = (r - 1) * n + c;
+            if open[nb as usize] == 1 && vis[nb as usize] == 0 {
+                vis[nb as usize] = 1;
+                queue.push(nb);
+            }
+        }
+        if r + 1 < n {
+            let nb: i32 = (r + 1) * n + c;
+            if open[nb as usize] == 1 && vis[nb as usize] == 0 {
+                vis[nb as usize] = 1;
+                queue.push(nb);
+            }
+        }
+        if c > 0 {
+            let nb: i32 = r * n + (c - 1);
+            if open[nb as usize] == 1 && vis[nb as usize] == 0 {
+                vis[nb as usize] = 1;
+                queue.push(nb);
+            }
+        }
+        if c + 1 < n {
+            let nb: i32 = r * n + (c + 1);
+            if open[nb as usize] == 1 && vis[nb as usize] == 0 {
+                vis[nb as usize] = 1;
+                queue.push(nb);
+            }
+        }
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Murray's Law + Physarum adaptive shortest-path pruning
+    let mr: MurrayRes = run_murray_and_physarum(0.80, 0.60, 1.0, 2.5);
+    if mr.cube_residual < 0.000000000001 && mr.d_short_final > 0.49 && mr.d_long_final < 0.0001 {
+        println!(
+            "[PASS] c4_murray_physarum r_parent={:.12} cube_res={:.12} d_short={:.12} d_long={:.12}",
+            mr.r_parent, mr.cube_residual, mr.d_short_final, mr.d_long_final
+        );
+    } else {
+        println!("[FAIL] c4_murray_physarum d_short={} d_long={}", mr.d_short_final, mr.d_long_final);
+        failures = failures + 1;
+    }
+
+    // 2. Armillaria root-contact percolation threshold (subcritical p=0.42 vs supercritical p=0.74)
+    let mut sub_spans: i32 = 0;
+    let mut sup_spans: i32 = 0;
+    let mut trap_spans: i32 = 0;
+    let mut k: i32 = 0;
+    while k < 16 {
+        let seed: i64 = 10007 + (k as i64) * 7919;
+        sub_spans = sub_spans + stand_percolates(24, 0.42, seed, -1);
+        sup_spans = sup_spans + stand_percolates(24, 0.74, seed, -1);
+        trap_spans = trap_spans + stand_percolates(24, 0.85, seed, 12);
+        k = k + 1;
+    }
+
+    if sub_spans <= 1 && sup_spans >= 15 {
+        println!("[PASS] c4_armillaria_percolation sub_spans={} sup_spans={} trials=16", sub_spans, sup_spans);
+    } else {
+        println!("[FAIL] c4_armillaria_percolation sub={} sup={}", sub_spans, sup_spans);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: disconnected-graph trench isolation catches spanning failure (0/16)
+    if trap_spans == 0 {
+        println!("[PASS] c4_planted_disconnected_graph trap_spans=0 trials=16");
+    } else {
+        println!("[FAIL] c4_planted_disconnected_graph trap_spans={}", trap_spans);
+        failures = failures + 1;
+    }
+
+    // 4. Throughput benchmark: 200,000 Physarum conductance updates
+    let t0: i64 = clock_ns();
+    let mut d1: f64 = 0.5;
+    let mut d2: f64 = 0.5;
+    let mut i: i64 = 0;
+    while i < 200000 {
+        let g1: f64 = d1;
+        let g2: f64 = d2 / 2.5;
+        let dp: f64 = 1.0 / (g1 + g2);
+        let q1: f64 = g1 * dp;
+        let q2: f64 = g2 * dp;
+        let f1: f64 = q1 * q1;
+        let f2: f64 = q2 * q2;
+        d1 = d1 + 0.01 * (f1 / (1.0 + f1) - d1);
+        d2 = d2 + 0.01 * (f2 / (1.0 + f2) - d2);
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] mycelium_net steps=200000 elapsed_ns={} d1={:.6}", t1 - t0, d1);
+
+    if failures == 0 {
+        println!("[PASS] wave51b_mycelium_net summary failures=0");
+    } else {
+        println!("[FAIL] wave51b_mycelium_net summary failures={}", failures);
+    }
+}

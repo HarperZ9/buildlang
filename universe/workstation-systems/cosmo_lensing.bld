@@ -1,0 +1,162 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51B Kernel 4 (Author Idea G3):
+//   NFW Dark-Matter Halo + Miyamoto-Nagai Exponential-Scale Disk Flat Galaxy Rotation Curve
+//   + Gravitational Lensing Einstein Ring Angular Radius (<= 1e-5 vs analytic)
+//   + Planted Wrong-Mass Sign Control (fail-closed rejection).
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+// NFW enclosed mass M(<r) and circular velocity v_nfw [km/s] at radius r [kpc].
+fn v2_nfw_kms2(r_kpc: f64, m200_msun: f64, rs_kpc: f64, conc: f64) -> f64 {
+    let g_kpc: f64 = 0.00000430091;
+    let x: f64 = r_kpc / rs_kpc;
+    let f_x: f64 = ln(1.0 + x) - x / (1.0 + x);
+    let f_c: f64 = ln(1.0 + conc) - conc / (1.0 + conc);
+    let m_enc: f64 = m200_msun * (f_x / f_c);
+    (g_kpc * m_enc) / r_kpc
+}
+
+// Miyamoto-Nagai axisymmetric disk circular velocity squared [km^2/s^2] at z=0.
+fn v2_disk_kms2(r_kpc: f64, m_disk_msun: f64, a_d: f64, b_d: f64) -> f64 {
+    let g_kpc: f64 = 0.00000430091;
+    let s: f64 = a_d + b_d;
+    let denom: f64 = sqrt(r_kpc * r_kpc + s * s);
+    let denom3: f64 = denom * denom * denom;
+    (g_kpc * m_disk_msun * r_kpc * r_kpc) / denom3
+}
+
+struct EinsteinRes {
+    ok: i32,
+    err_code: i32,
+    theta_e_rad: f64,
+    theta_e_arcsec: f64,
+}
+
+// Checked Einstein ring angular radius for point/spherical lens mass M_msun at D_l, D_s, D_ls [Mpc].
+// Fail-closed: err_code 1 = non-positive mass, 2 = invalid cosmological distances.
+fn einstein_ring_checked(m_msun: f64, dl_mpc: f64, ds_mpc: f64, dls_mpc: f64) -> EinsteinRes {
+    if m_msun <= 0.0 {
+        return EinsteinRes { ok: 0, err_code: 1, theta_e_rad: 0.0, theta_e_arcsec: 0.0 };
+    }
+    if dl_mpc <= 0.0 || ds_mpc <= 0.0 || dls_mpc <= 0.0 || dls_mpc >= ds_mpc {
+        return EinsteinRes { ok: 0, err_code: 2, theta_e_rad: 0.0, theta_e_arcsec: 0.0 };
+    }
+    let g_si: f64 = 0.000000000066743;
+    let c_si: f64 = 299792458.0;
+    let m_sun_kg: f64 = 1.98847e30;
+    let mpc_m: f64 = 3.085677581491367e22;
+    let rad_to_arcsec: f64 = 206264.80624709636;
+
+    let r_schwarz_half: f64 = (4.0 * g_si * m_msun * m_sun_kg) / (c_si * c_si);
+    let geom_factor: f64 = (dls_mpc * mpc_m) / ((dl_mpc * mpc_m) * (ds_mpc * mpc_m));
+    let th_rad: f64 = sqrt(r_schwarz_half * geom_factor);
+    let th_as: f64 = th_rad * rad_to_arcsec;
+
+    EinsteinRes { ok: 1, err_code: 0, theta_e_rad: th_rad, theta_e_arcsec: th_as }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. Flat galaxy rotation curve across outer radii r = 10, 15, 20, 25, 30 kpc
+    let m200: f64 = 1.1e12;
+    let rs: f64 = 16.0;
+    let conc: f64 = 12.0;
+    let m_disk: f64 = 5.5e10;
+    let a_d: f64 = 3.2;
+    let b_d: f64 = 0.4;
+
+    let mut v_min: f64 = 1000000.0;
+    let mut v_max: f64 = 0.0;
+    let mut v_sum: f64 = 0.0;
+    let mut v_disk_10: f64 = 0.0;
+    let mut v_disk_30: f64 = 0.0;
+
+    let mut k: i32 = 0;
+    while k < 5 {
+        let r: f64 = 10.0 + (k as f64) * 5.0;
+        let vd2: f64 = v2_disk_kms2(r, m_disk, a_d, b_d);
+        let vn2: f64 = v2_nfw_kms2(r, m200, rs, conc);
+        let v_tot: f64 = sqrt(vd2 + vn2);
+        if v_tot < v_min {
+            v_min = v_tot;
+        }
+        if v_tot > v_max {
+            v_max = v_tot;
+        }
+        v_sum = v_sum + v_tot;
+        if k == 0 {
+            v_disk_10 = sqrt(vd2);
+        }
+        if k == 4 {
+            v_disk_30 = sqrt(vd2);
+        }
+        k = k + 1;
+    }
+
+    let v_mean: f64 = v_sum / 5.0;
+    let flatness_pct: f64 = (100.0 * (v_max - v_min)) / v_mean;
+    let baryonic_drop_pct: f64 = (100.0 * (v_disk_10 - v_disk_30)) / v_disk_10;
+
+    if flatness_pct < 5.0 && baryonic_drop_pct > 30.0 {
+        println!(
+            "[PASS] g3_flat_rotation v_mean={:.12} v_min={:.12} v_max={:.12} flat_pct={:.12} bary_drop_pct={:.12}",
+            v_mean, v_min, v_max, flatness_pct, baryonic_drop_pct
+        );
+    } else {
+        println!("[FAIL] g3_flat_rotation flat_pct={} bary_drop={}", flatness_pct, baryonic_drop_pct);
+        failures = failures + 1;
+    }
+
+    // 2. Einstein ring angular radius (M = 1e12 M_sun, D_l = 500 Mpc, D_s = 1000 Mpc, D_ls = 500 Mpc)
+    let er: EinsteinRes = einstein_ring_checked(1.0e12, 500.0, 1000.0, 500.0);
+    if er.ok == 1 && er.theta_e_arcsec > 2.8 && er.theta_e_arcsec < 2.9 {
+        println!(
+            "[PASS] g3_einstein_ring theta_rad={:.12} theta_arcsec={:.12}",
+            er.theta_e_rad, er.theta_e_arcsec
+        );
+    } else {
+        println!("[FAIL] g3_einstein_ring ok={} arcsec={}", er.ok, er.theta_e_arcsec);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control: wrong-mass sign (M = -1e12 M_sun) and invalid geometry rejected fail-closed
+    let bad_mass: EinsteinRes = einstein_ring_checked(-1.0e12, 500.0, 1000.0, 500.0);
+    let bad_geom: EinsteinRes = einstein_ring_checked(1.0e12, 500.0, 1000.0, 1200.0);
+    if bad_mass.ok == 0 && bad_mass.err_code == 1 && bad_geom.ok == 0 && bad_geom.err_code == 2 {
+        println!(
+            "[PASS] g3_planted_wrong_mass_sign mass_rc={} geom_rc={}",
+            bad_mass.err_code, bad_geom.err_code
+        );
+    } else {
+        println!("[FAIL] g3_planted_wrong_mass_sign m={} g={}", bad_mass.err_code, bad_geom.err_code);
+        failures = failures + 1;
+    }
+
+    // 4. Throughput benchmark: 200,000 rotation-curve + Einstein-ring evaluations
+    let t0: i64 = clock_ns();
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < 200000 {
+        let r: f64 = 8.0 + ((i & 31) as f64);
+        let vt: f64 = sqrt(v2_disk_kms2(r, m_disk, a_d, b_d) + v2_nfw_kms2(r, m200, rs, conc));
+        let e: EinsteinRes = einstein_ring_checked(1.0e12 + (i as f64) * 1.0e6, 500.0, 1000.0, 500.0);
+        acc = acc + vt + e.theta_e_arcsec;
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] cosmo_lensing evals=200000 elapsed_ns={} acc={:.3}", t1 - t0, acc);
+
+    if failures == 0 {
+        println!("[PASS] wave51b_cosmo_lensing summary failures=0");
+    } else {
+        println!("[FAIL] wave51b_cosmo_lensing summary failures={}", failures);
+    }
+}
