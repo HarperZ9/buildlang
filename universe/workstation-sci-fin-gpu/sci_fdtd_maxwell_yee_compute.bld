@@ -1,0 +1,50 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Scientific-Bio-Audio CS-066 2D TMz Maxwell Yee FDTD electromagnetic field step kernel.
+// Advances staggered magnetic (Hx, Hy) and electric (Ez) fields under Courant-stable
+// curl updates with conductive damping and computes local EM field energy density.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn sci_fdtd_maxwell_yee_compute(
+    c_h: f32,
+    c_e: f32,
+    damp_e: f32,
+    eps_r: f32,
+    mu_r: f32,
+    hx_buf: &[f32],
+    hy_buf: &[f32],
+    hx_ym_buf: &[f32],
+    hy_xm_buf: &[f32],
+    ez_c_buf: &[f32],
+    ez_xp_buf: &[f32],
+    ez_yp_buf: &[f32],
+    src_j_buf: &[f32],
+    hx_out: &mut [f32],
+    hy_out: &mut [f32],
+    ez_out: &mut [f32],
+    energy_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let ez_c: f32 = ez_c_buf[i];
+    let ez_xp: f32 = ez_xp_buf[i];
+    let ez_yp: f32 = ez_yp_buf[i];
+
+    let hx_next: f32 = hx_buf[i] - c_h * (ez_yp - ez_c);
+    let hy_next: f32 = hy_buf[i] + c_h * (ez_xp - ez_c);
+
+    let curl_h: f32 = (hy_next - hy_xm_buf[i]) - (hx_next - hx_ym_buf[i]);
+    let mut ez_next: f32 = damp_e * ez_c + c_e * curl_h + src_j_buf[i];
+    if ez_next > 64.0 {
+        ez_next = 64.0;
+    }
+    if ez_next < -64.0 {
+        ez_next = -64.0;
+    }
+
+    let u_em: f32 = 0.5 * (eps_r * ez_next * ez_next + mu_r * (hx_next * hx_next + hy_next * hy_next));
+
+    hx_out[i] = hx_next;
+    hy_out[i] = hy_next;
+    ez_out[i] = ez_next;
+    energy_out[i] = u_em;
+}

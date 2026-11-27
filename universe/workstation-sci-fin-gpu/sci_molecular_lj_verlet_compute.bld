@@ -1,0 +1,66 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Scientific-Bio-Audio Lennard-Jones 12-6 pairwise force + velocity-Verlet integrator kernel.
+// Evaluates short-range softened Lennard-Jones potential and pairwise force vector, then
+// advances molecular position and velocity via symplectic velocity-Verlet integration.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn sci_molecular_lj_verlet_compute(
+    sigma2: f32,
+    eps_lj: f32,
+    r2_min: f32,
+    dt: f32,
+    inv_mass: f32,
+    force_cap: f32,
+    dx_buf: &[f32],
+    dy_buf: &[f32],
+    dz_buf: &[f32],
+    x_buf: &[f32],
+    y_buf: &[f32],
+    vx_buf: &[f32],
+    vy_buf: &[f32],
+    x_out: &mut [f32],
+    y_out: &mut [f32],
+    vx_out: &mut [f32],
+    vy_out: &mut [f32],
+    pot_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let dx: f32 = dx_buf[i];
+    let dy: f32 = dy_buf[i];
+    let dz: f32 = dz_buf[i];
+
+    let mut r2: f32 = dx * dx + dy * dy + dz * dz;
+    if r2 < r2_min {
+        r2 = r2_min;
+    }
+
+    let inv_r2: f32 = 1.0 / r2;
+    let sr2: f32 = sigma2 * inv_r2;
+    let sr6: f32 = sr2 * sr2 * sr2;
+    let sr12: f32 = sr6 * sr6;
+
+    let pot: f32 = 4.0 * eps_lj * (sr12 - sr6);
+    let mut f_fac: f32 = 24.0 * eps_lj * (2.0 * sr12 - sr6) * inv_r2;
+    if f_fac > force_cap {
+        f_fac = force_cap;
+    }
+    if f_fac < -force_cap {
+        f_fac = -force_cap;
+    }
+
+    let ax: f32 = f_fac * dx * inv_mass;
+    let ay: f32 = f_fac * dy * inv_mass;
+    let half_dt: f32 = 0.5 * dt;
+
+    let vx_half: f32 = vx_buf[i] + half_dt * ax;
+    let vy_half: f32 = vy_buf[i] + half_dt * ay;
+    let x_next: f32 = x_buf[i] + dt * vx_half;
+    let y_next: f32 = y_buf[i] + dt * vy_half;
+
+    x_out[i] = x_next;
+    y_out[i] = y_next;
+    vx_out[i] = vx_half + half_dt * ax;
+    vy_out[i] = vy_half + half_dt * ay;
+    pot_out[i] = pot;
+}

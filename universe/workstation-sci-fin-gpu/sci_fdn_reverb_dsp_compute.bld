@@ -1,0 +1,55 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Scientific-Bio-Audio 4-channel Householder Feedback Delay Network (FDN) reverb DSP kernel.
+// Applies one-pole lowpass damping to four delay-line taps, mixes through the orthogonal
+// 4x4 Householder reflection matrix (I - 0.5*1*1^T), and emits stereo wet audio + energy.
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn sci_fdn_reverb_dsp_compute(
+    fb_gain: f32,
+    damp: f32,
+    in_gain: f32,
+    x0_buf: &[f32],
+    x1_buf: &[f32],
+    x2_buf: &[f32],
+    x3_buf: &[f32],
+    lp0_buf: &[f32],
+    lp1_buf: &[f32],
+    lp2_buf: &[f32],
+    lp3_buf: &[f32],
+    dry_buf: &[f32],
+    y0_out: &mut [f32],
+    y1_out: &mut [f32],
+    y2_out: &mut [f32],
+    y3_out: &mut [f32],
+    wet_l_out: &mut [f32],
+    wet_r_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let one_m_d: f32 = 1.0 - damp;
+
+    let f0: f32 = one_m_d * x0_buf[i] + damp * lp0_buf[i];
+    let f1: f32 = one_m_d * x1_buf[i] + damp * lp1_buf[i];
+    let f2: f32 = one_m_d * x2_buf[i] + damp * lp2_buf[i];
+    let f3: f32 = one_m_d * x3_buf[i] + damp * lp3_buf[i];
+
+    let d0: f32 = fb_gain * f0;
+    let d1: f32 = fb_gain * f1;
+    let d2: f32 = fb_gain * f2;
+    let d3: f32 = fb_gain * f3;
+
+    let half_sum: f32 = 0.5 * (d0 + d1 + d2 + d3);
+    let inj: f32 = in_gain * dry_buf[i];
+
+    let y0: f32 = d0 - half_sum + inj;
+    let y1: f32 = d1 - half_sum - inj;
+    let y2: f32 = d2 - half_sum + inj;
+    let y3: f32 = d3 - half_sum - inj;
+
+    y0_out[i] = y0;
+    y1_out[i] = y1;
+    y2_out[i] = y2;
+    y3_out[i] = y3;
+    wet_l_out[i] = 0.5 * (y0 + y2);
+    wet_r_out[i] = 0.5 * (y1 + y3);
+}

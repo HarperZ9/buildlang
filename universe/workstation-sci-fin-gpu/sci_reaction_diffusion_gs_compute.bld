@@ -1,0 +1,55 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Scientific-Bio-Audio Gray-Scott reaction-diffusion morphogenesis PDE step kernel.
+// Evaluates 5-point discrete Laplacians for morphogens (U, V), applies autocatalytic
+// reaction UV^2 with feed/kill rates, and clamps concentrations strictly to [0, 1].
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn sci_reaction_diffusion_gs_compute(
+    dt: f32,
+    du: f32,
+    dv: f32,
+    feed: f32,
+    kill: f32,
+    u_c_buf: &[f32],
+    u_l_buf: &[f32],
+    u_r_buf: &[f32],
+    u_d_buf: &[f32],
+    u_u_buf: &[f32],
+    v_c_buf: &[f32],
+    v_l_buf: &[f32],
+    v_r_buf: &[f32],
+    v_d_buf: &[f32],
+    v_u_buf: &[f32],
+    u_out: &mut [f32],
+    v_out: &mut [f32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let uc: f32 = u_c_buf[i];
+    let vc: f32 = v_c_buf[i];
+
+    let lap_u: f32 = u_l_buf[i] + u_r_buf[i] + u_d_buf[i] + u_u_buf[i] - 4.0 * uc;
+    let lap_v: f32 = v_l_buf[i] + v_r_buf[i] + v_d_buf[i] + v_u_buf[i] - 4.0 * vc;
+
+    let uvv: f32 = uc * vc * vc;
+    let du_dt: f32 = du * lap_u - uvv + feed * (1.0 - uc);
+    let dv_dt: f32 = dv * lap_v + uvv - (feed + kill) * vc;
+
+    let mut u_next: f32 = uc + dt * du_dt;
+    let mut v_next: f32 = vc + dt * dv_dt;
+    if u_next < 0.0 {
+        u_next = 0.0;
+    }
+    if u_next > 1.0 {
+        u_next = 1.0;
+    }
+    if v_next < 0.0 {
+        v_next = 0.0;
+    }
+    if v_next > 1.0 {
+        v_next = 1.0;
+    }
+
+    u_out[i] = u_next;
+    v_out[i] = v_next;
+}
