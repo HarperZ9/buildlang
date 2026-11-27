@@ -1,0 +1,394 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 49H (P1 Author Idea B3): 3-Strut Snelson Tensegrity Prism Solver (tensegrity.bld)
+// - Full 6-node (18-DOF) 3D nonlinear static equilibrium & prestress solver
+// - Unilateral tension-only cables T = max(0, k*(L - L0)) and bilateral compression struts
+// - Kinetic-damping dynamic relaxation from perturbed geometry to residual < 1e-8 (target < 1e-11)
+// - Planted failing control: slack vertical cable (L0 = 1.30 * L_eq) collapse caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+struct SolveOut {
+    max_res: f64,
+    net_force: f64,
+    twist_rad: f64,
+    mean_height: f64,
+    taut_cables: i32,
+    slack_cables: i32,
+    comp_struts: i32,
+    iters: i32,
+    coord_checksum: f64,
+}
+
+fn eval_forces(
+    pos: &Vec<f64>,
+    m_i: &Vec<usize>,
+    m_j: &Vec<usize>,
+    m_k: &Vec<f64>,
+    m_l0: &Vec<f64>,
+    m_is_cable: &Vec<i32>,
+    forces: &mut Vec<f64>,
+) -> i32 {
+    let mut k: usize = 0;
+    while k < 18 {
+        forces[k] = 0.0;
+        k = k + 1;
+    }
+    let mut slack_cnt: i32 = 0;
+    let mut m: usize = 0;
+    while m < 12 {
+        let a: usize = m_i[m];
+        let b: usize = m_j[m];
+        let dx: f64 = pos[3 * b] - pos[3 * a];
+        let dy: f64 = pos[3 * b + 1] - pos[3 * a + 1];
+        let dz: f64 = pos[3 * b + 2] - pos[3 * a + 2];
+        let len: f64 = sqrt(dx * dx + dy * dy + dz * dz);
+        let mut tens: f64 = m_k[m] * (len - m_l0[m]);
+        if m_is_cable[m] == 1 && tens <= 0.0 {
+            tens = 0.0;
+            slack_cnt = slack_cnt + 1;
+        }
+        let q: f64 = if len > 1.0e-15 { tens / len } else { 0.0 };
+        let fx: f64 = q * dx;
+        let fy: f64 = q * dy;
+        let fz: f64 = q * dz;
+        forces[3 * a] = forces[3 * a] + fx;
+        forces[3 * a + 1] = forces[3 * a + 1] + fy;
+        forces[3 * a + 2] = forces[3 * a + 2] + fz;
+        forces[3 * b] = forces[3 * b] - fx;
+        forces[3 * b + 1] = forces[3 * b + 1] - fy;
+        forces[3 * b + 2] = forces[3 * b + 2] - fz;
+        m = m + 1;
+    }
+    slack_cnt
+}
+
+fn max_nodal_res(forces: &Vec<f64>) -> f64 {
+    let mut mx: f64 = 0.0;
+    let mut n: usize = 0;
+    while n < 6 {
+        let fx: f64 = forces[3 * n];
+        let fy: f64 = forces[3 * n + 1];
+        let fz: f64 = forces[3 * n + 2];
+        let r: f64 = sqrt(fx * fx + fy * fy + fz * fz);
+        if r > mx {
+            mx = r;
+        }
+        n = n + 1;
+    }
+    mx
+}
+
+fn solve_prism(
+    init_pos: &Vec<f64>,
+    m_i: &Vec<usize>,
+    m_j: &Vec<usize>,
+    m_k: &Vec<f64>,
+    m_l0: &Vec<f64>,
+    m_is_cable: &Vec<i32>,
+    max_iters: i32,
+) -> SolveOut {
+    let mut pos: Vec<f64> = Vec::new();
+    let mut vel: Vec<f64> = Vec::new();
+    let mut forces: Vec<f64> = Vec::new();
+    let mut k: usize = 0;
+    while k < 18 {
+        pos.push(init_pos[k]);
+        vel.push(0.0);
+        forces.push(0.0);
+        k = k + 1;
+    }
+
+    // Kinetic-damping dynamic relaxation (Cundall / Barnes): exact energy minimizer
+    let dt: f64 = 0.0022;
+    let mut ke_prev: f64 = 0.0;
+    let mut it: i32 = 0;
+    let mut res: f64 = 1.0e9;
+
+    while it < max_iters {
+        let _s: i32 = eval_forces(&pos, m_i, m_j, m_k, m_l0, m_is_cable, &mut forces);
+        res = max_nodal_res(&forces);
+        if res < 1.0e-12 {
+            break;
+        }
+        let mut ke: f64 = 0.0;
+        let mut d: usize = 0;
+        while d < 18 {
+            let v_new: f64 = vel[d] + dt * forces[d];
+            vel[d] = v_new;
+            ke = ke + 0.5 * v_new * v_new;
+            d = d + 1;
+        }
+        if ke < ke_prev {
+            // Kinetic energy peaked: rewind half step and zero velocity
+            d = 0;
+            while d < 18 {
+                pos[d] = pos[d] - 0.5 * dt * vel[d];
+                vel[d] = 0.0;
+                d = d + 1;
+            }
+            ke_prev = 0.0;
+        } else {
+            d = 0;
+            while d < 18 {
+                pos[d] = pos[d] + dt * vel[d];
+                d = d + 1;
+            }
+            ke_prev = ke;
+        }
+        it = it + 1;
+    }
+
+    let slack_cnt: i32 = eval_forces(&pos, m_i, m_j, m_k, m_l0, m_is_cable, &mut forces);
+    res = max_nodal_res(&forces);
+
+    // Count taut cables and compressed struts
+    let mut taut_cables: i32 = 0;
+    let mut comp_struts: i32 = 0;
+    let mut m: usize = 0;
+    while m < 12 {
+        let a: usize = m_i[m];
+        let b: usize = m_j[m];
+        let dx: f64 = pos[3 * b] - pos[3 * a];
+        let dy: f64 = pos[3 * b + 1] - pos[3 * a + 1];
+        let dz: f64 = pos[3 * b + 2] - pos[3 * a + 2];
+        let len: f64 = sqrt(dx * dx + dy * dy + dz * dz);
+        let tens: f64 = m_k[m] * (len - m_l0[m]);
+        if m_is_cable[m] == 1 {
+            if tens > 1.0e-6 {
+                taut_cables = taut_cables + 1;
+            }
+        } else {
+            if tens < -1.0e-6 {
+                comp_struts = comp_struts + 1;
+            }
+        }
+        m = m + 1;
+    }
+
+    // Net external force sum (conservation of linear momentum = 0)
+    let mut sx: f64 = 0.0;
+    let mut sy: f64 = 0.0;
+    let mut sz: f64 = 0.0;
+    let mut n: usize = 0;
+    while n < 6 {
+        sx = sx + forces[3 * n];
+        sy = sy + forces[3 * n + 1];
+        sz = sz + forces[3 * n + 2];
+        n = n + 1;
+    }
+    let net_force: f64 = sqrt(sx * sx + sy * sy + sz * sz);
+
+    // Measure converged twist angle between bottom centroid->b0 and top centroid->t0
+    let bx_c: f64 = (pos[0] + pos[3] + pos[6]) / 3.0;
+    let by_c: f64 = (pos[1] + pos[4] + pos[7]) / 3.0;
+    let bz_c: f64 = (pos[2] + pos[5] + pos[8]) / 3.0;
+    let tx_c: f64 = (pos[9] + pos[12] + pos[15]) / 3.0;
+    let ty_c: f64 = (pos[10] + pos[13] + pos[16]) / 3.0;
+    let tz_c: f64 = (pos[11] + pos[14] + pos[17]) / 3.0;
+    let dx_h: f64 = tx_c - bx_c;
+    let dy_h: f64 = ty_c - by_c;
+    let dz_h: f64 = tz_c - bz_c;
+    let mean_h: f64 = sqrt(dx_h * dx_h + dy_h * dy_h + dz_h * dz_h);
+
+    // Radial vectors b0 - b_c and t0 - t_c (cosine of twist angle via dot product)
+    let rb_x: f64 = pos[0] - bx_c;
+    let rb_y: f64 = pos[1] - by_c;
+    let rb_z: f64 = pos[2] - bz_c;
+    let rt_x: f64 = pos[9] - tx_c;
+    let rt_y: f64 = pos[10] - ty_c;
+    let rt_z: f64 = pos[11] - tz_c;
+    let rb_n: f64 = sqrt(rb_x * rb_x + rb_y * rb_y + rb_z * rb_z);
+    let rt_n: f64 = sqrt(rt_x * rt_x + rt_y * rt_y + rt_z * rt_z);
+    let mut cos_a: f64 = (rb_x * rt_x + rb_y * rt_y + rb_z * rt_z) / (rb_n * rt_n);
+    if cos_a > 1.0 { cos_a = 1.0; }
+    if cos_a < -1.0 { cos_a = -1.0; }
+    // Compute acos(cos_a) via Newton solve on cos(theta) = cos_a from pi/6
+    let mut theta: f64 = 0.5235987755982988;
+    let mut ni: i32 = 0;
+    while ni < 12 {
+        let f_val: f64 = cos(theta) - cos_a;
+        let df_val: f64 = -sin(theta);
+        if abs_f64(df_val) > 1.0e-12 {
+            theta = theta - f_val / df_val;
+        }
+        ni = ni + 1;
+    }
+
+    // Distance-matrix checksum (rigid-body invariant!)
+    let mut csum: f64 = 0.0;
+    let mut a_i: usize = 0;
+    while a_i < 6 {
+        let mut b_i: usize = a_i + 1;
+        while b_i < 6 {
+            let ddx: f64 = pos[3 * b_i] - pos[3 * a_i];
+            let ddy: f64 = pos[3 * b_i + 1] - pos[3 * a_i + 1];
+            let ddz: f64 = pos[3 * b_i + 2] - pos[3 * a_i + 2];
+            csum = csum + sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            b_i = b_i + 1;
+        }
+        a_i = a_i + 1;
+    }
+
+    SolveOut {
+        max_res: res,
+        net_force: net_force,
+        twist_rad: theta,
+        mean_height: mean_h,
+        taut_cables: taut_cables,
+        slack_cables: slack_cnt,
+        comp_struts: comp_struts,
+        iters: it,
+        coord_checksum: csum,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let pi: f64 = 3.141592653589793;
+    let r_nom: f64 = 1.0;
+    let h_nom: f64 = 1.2;
+    let alpha_star: f64 = pi / 6.0;
+    let s3: f64 = sqrt(3.0);
+
+    // Exact Snelson equilibrium lengths and prestress force densities
+    let lh_star: f64 = s3 * r_nom;
+    let lv_star: f64 = sqrt(r_nom * r_nom * (2.0 - s3) + h_nom * h_nom);
+    let ls_star: f64 = sqrt(r_nom * r_nom * (2.0 + s3) + h_nom * h_nom);
+
+    let qv_star: f64 = 100.0;
+    let qs_star: f64 = -100.0;
+    let qh_star: f64 = qv_star / s3;
+
+    let kv: f64 = 5000.0;
+    let kh: f64 = 5000.0;
+    let ks: f64 = 50000.0;
+
+    let l0_v: f64 = lv_star - (qv_star * lv_star) / kv;
+    let l0_h: f64 = lh_star - (qh_star * lh_star) / kh;
+    let l0_s: f64 = ls_star - (qs_star * ls_star) / ks;
+
+    // 12 members: 3 bottom horiz, 3 top horiz, 3 vertical cables, 3 struts
+    let mut m_i: Vec<usize> = Vec::new();
+    let mut m_j: Vec<usize> = Vec::new();
+    let mut m_k: Vec<f64> = Vec::new();
+    let mut m_l0: Vec<f64> = Vec::new();
+    let mut m_is_cable: Vec<i32> = Vec::new();
+
+    // Bottom triangle horizontal cables: (0,1), (1,2), (2,0)
+    m_i.push(0); m_j.push(1); m_k.push(kh); m_l0.push(l0_h); m_is_cable.push(1);
+    m_i.push(1); m_j.push(2); m_k.push(kh); m_l0.push(l0_h); m_is_cable.push(1);
+    m_i.push(2); m_j.push(0); m_k.push(kh); m_l0.push(l0_h); m_is_cable.push(1);
+    // Top triangle horizontal cables: (3,4), (4,5), (5,3)
+    m_i.push(3); m_j.push(4); m_k.push(kh); m_l0.push(l0_h); m_is_cable.push(1);
+    m_i.push(4); m_j.push(5); m_k.push(kh); m_l0.push(l0_h); m_is_cable.push(1);
+    m_i.push(5); m_j.push(3); m_k.push(kh); m_l0.push(l0_h); m_is_cable.push(1);
+    // Vertical cables: (0,3), (1,4), (2,5)
+    m_i.push(0); m_j.push(3); m_k.push(kv); m_l0.push(l0_v); m_is_cable.push(1);
+    m_i.push(1); m_j.push(4); m_k.push(kv); m_l0.push(l0_v); m_is_cable.push(1);
+    m_i.push(2); m_j.push(5); m_k.push(kv); m_l0.push(l0_v); m_is_cable.push(1);
+    // Compression struts: (0,4), (1,5), (2,3)
+    m_i.push(0); m_j.push(4); m_k.push(ks); m_l0.push(l0_s); m_is_cable.push(0);
+    m_i.push(1); m_j.push(5); m_k.push(ks); m_l0.push(l0_s); m_is_cable.push(0);
+    m_i.push(2); m_j.push(3); m_k.push(ks); m_l0.push(l0_s); m_is_cable.push(0);
+
+    // Perturbed initial geometry (+0.12 rad twist, -0.08 m height, +0.04 m top radius)
+    let mut init_pos: Vec<f64> = Vec::new();
+    let mut idx: i32 = 0;
+    while idx < 3 {
+        let ang: f64 = 2.0 * pi * (idx as f64) / 3.0;
+        init_pos.push(r_nom * cos(ang));
+        init_pos.push(r_nom * sin(ang));
+        init_pos.push(0.0);
+        idx = idx + 1;
+    }
+    idx = 0;
+    while idx < 3 {
+        let ang: f64 = 2.0 * pi * (idx as f64) / 3.0 + alpha_star + 0.12;
+        init_pos.push((r_nom + 0.04) * cos(ang));
+        init_pos.push((r_nom + 0.04) * sin(ang));
+        init_pos.push(h_nom - 0.08);
+        idx = idx + 1;
+    }
+
+    let t0: i64 = clock_ns();
+    let eq: SolveOut = solve_prism(&init_pos, &m_i, &m_j, &m_k, &m_l0, &m_is_cable, 25000);
+    let t1: i64 = clock_ns();
+    let solve_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+    let twist_err: f64 = abs_f64(eq.twist_rad - alpha_star);
+
+    // Planted failing control: snap / over-lengthen vertical cable 0 (m=6) to 1.30 * lv_star
+    let mut m_l0_slack: Vec<f64> = Vec::new();
+    let mut mi: usize = 0;
+    while mi < 12 {
+        m_l0_slack.push(m_l0[mi]);
+        mi = mi + 1;
+    }
+    m_l0_slack[6] = lv_star * 1.30;
+
+    // First verify nominal equilibrium immediately breaks when cable 0 goes slack
+    let mut nom_pos: Vec<f64> = Vec::new();
+    idx = 0;
+    while idx < 3 {
+        let ang: f64 = 2.0 * pi * (idx as f64) / 3.0;
+        nom_pos.push(r_nom * cos(ang));
+        nom_pos.push(r_nom * sin(ang));
+        nom_pos.push(0.0);
+        idx = idx + 1;
+    }
+    idx = 0;
+    while idx < 3 {
+        let ang: f64 = 2.0 * pi * (idx as f64) / 3.0 + alpha_star;
+        nom_pos.push(r_nom * cos(ang));
+        nom_pos.push(r_nom * sin(ang));
+        nom_pos.push(h_nom);
+        idx = idx + 1;
+    }
+    let mut slack_f: Vec<f64> = Vec::new();
+    let mut fk: usize = 0;
+    while fk < 18 { slack_f.push(0.0); fk = fk + 1; }
+    let slack_at_nom: i32 = eval_forces(&nom_pos, &m_i, &m_j, &m_k, &m_l0_slack, &m_is_cable, &mut slack_f);
+    let res_at_nom_slack: f64 = max_nodal_res(&slack_f);
+
+    // Relax the damaged prism and confirm structural prestress collapse
+    let col: SolveOut = solve_prism(&nom_pos, &m_i, &m_j, &m_k, &m_l0_slack, &m_is_cable, 8000);
+    let slack_collapse_caught: i32 = if slack_at_nom >= 1
+        && res_at_nom_slack > 50.0
+        && col.taut_cables < 9 { 1 } else { 0 };
+
+    println!("B3_MAX_RESIDUAL={:.15}", eq.max_res);
+    println!("B3_NET_FORCE={:.15}", eq.net_force);
+    println!("B3_TWIST_RAD={:.12}", eq.twist_rad);
+    println!("B3_TWIST_ERR={:.15}", twist_err);
+    println!("B3_MEAN_HEIGHT={:.12}", eq.mean_height);
+    println!("B3_TAUT_CABLES={}", eq.taut_cables);
+    println!("B3_COMP_STRUTS={}", eq.comp_struts);
+    println!("B3_SLACK_CABLES={}", eq.slack_cables);
+    println!("B3_ITERS={}", eq.iters);
+    println!("B3_SOLVE_MS={:.4}", solve_ms);
+    println!("B3_DIST_CHECKSUM={:.12}", eq.coord_checksum);
+    println!("B3_PLANTED_NOM_SLACK_RES={:.6}", res_at_nom_slack);
+    println!("B3_PLANTED_COLLAPSED_TAUT={}", col.taut_cables);
+    println!("B3_PLANTED_COLLAPSE_HEIGHT={:.6}", col.mean_height);
+    println!("B3_SLACK_CAUGHT={}", slack_collapse_caught);
+
+    let eq_ok: bool = eq.max_res < 1.0e-8 && twist_err < 1.0e-8
+        && eq.taut_cables == 9 && eq.comp_struts == 3
+        && eq.slack_cables == 0 && slack_collapse_caught == 1;
+    if eq_ok {
+        println!(
+            "[PASS] B3_TENSEGRITY max_res={:.3e} twist_err={:.3e} taut=9/9 slack_caught=1",
+            eq.max_res, twist_err
+        );
+    } else {
+        println!(
+            "[FAIL] B3_TENSEGRITY max_res={:.3e} twist_err={:.3e} taut={}/9 slack_caught={}",
+            eq.max_res, twist_err, eq.taut_cables, slack_collapse_caught
+        );
+    }
+}

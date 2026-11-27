@@ -1,0 +1,463 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 49M - Author Idea N03: Passive Acoustic UAV Localizer & Tracker
+// Strictly passive detection and awareness scope (no actuation or kinetic control).
+// Part 1: 4-mic 0.60 m square array TDOA narrowband cross-spectral azimuth estimator
+//         for a synthetic 150 Hz quadrotor harmonic source at 100 m in 0 dB wind noise.
+// Part 2: 2-state azimuth + azimuth-rate Kalman filter achieving < 2.5 deg RMS error.
+// Part 3: Urban dual-tone car-horn (400 + 500 Hz) distractor rejection (FPR < 1%) +
+//         planted swapped-microphone geometry fault control.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn wrap_pi(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let mut y: f64 = x;
+    while y > pi {
+        y = y - two_pi;
+    }
+    while y < -pi {
+        y = y + two_pi;
+    }
+    y
+}
+
+fn det_sin_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 1.6059043836821613e-10 - y2 * 7.647163731819816e-13;
+    let t6: f64 = 2.505210838544172e-8 - y2 * t7;
+    let t5: f64 = 2.7557319223985893e-6 - y2 * t6;
+    let t4: f64 = 1.984126984126984e-4 - y2 * t5;
+    let t3: f64 = 8.333333333333333e-3 - y2 * t4;
+    let t2: f64 = 1.6666666666666666e-1 - y2 * t3;
+    y * (1.0 - y2 * t2)
+}
+
+fn det_cos_poly(y: f64) -> f64 {
+    let y2: f64 = y * y;
+    let t7: f64 = 2.08767569878681e-9 - y2 * 1.1470745597729725e-11;
+    let t6: f64 = 2.7557319223985893e-7 - y2 * t7;
+    let t5: f64 = 2.48015873015873e-5 - y2 * t6;
+    let t4: f64 = 1.388888888888889e-3 - y2 * t5;
+    let t3: f64 = 4.1666666666666664e-2 - y2 * t4;
+    let t2: f64 = 0.5 - y2 * t3;
+    1.0 - y2 * t2
+}
+
+fn det_sin(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = wrap_pi(x);
+    let mut sign: f64 = 1.0;
+    if y < 0.0 {
+        y = -y;
+        sign = -1.0;
+    }
+    if y > half_pi {
+        y = pi - y;
+    }
+    if y <= q_pi {
+        sign * det_sin_poly(y)
+    } else {
+        sign * det_cos_poly(half_pi - y)
+    }
+}
+
+fn det_cos(x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    let q_pi: f64 = 0.78539816339744830962;
+    let mut y: f64 = abs_f64(wrap_pi(x));
+    let mut sign: f64 = 1.0;
+    if y > half_pi {
+        y = pi - y;
+        sign = -1.0;
+    }
+    if y <= q_pi {
+        sign * det_cos_poly(y)
+    } else {
+        sign * det_sin_poly(half_pi - y)
+    }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+// High-accuracy atan(z) for |z| <= 1 via 7-step halving identity + Taylor series
+fn det_atan_unit(z: f64) -> f64 {
+    let mut t: f64 = z;
+    let mut scale: f64 = 1.0;
+    let mut i: i32 = 0;
+    while i < 5 {
+        t = t / (1.0 + det_sqrt(1.0 + t * t));
+        scale = scale * 2.0;
+        i = i + 1;
+    }
+    let t2: f64 = t * t;
+    let poly: f64 = t * (1.0 - t2 * (0.3333333333333333 - t2 * (0.2 - t2 * 0.14285714285714285)));
+    scale * poly
+}
+
+fn det_atan2(y: f64, x: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let half_pi: f64 = 1.57079632679489661923;
+    if x == 0.0 && y == 0.0 {
+        return 0.0;
+    }
+    let ax: f64 = abs_f64(x);
+    let ay: f64 = abs_f64(y);
+    let base: f64 = if ax >= ay {
+        det_atan_unit(ay / ax)
+    } else {
+        half_pi - det_atan_unit(ax / ay)
+    };
+    if x >= 0.0 && y >= 0.0 {
+        base
+    } else if x < 0.0 && y >= 0.0 {
+        pi - base
+    } else if x < 0.0 && y < 0.0 {
+        base - pi
+    } else {
+        -base
+    }
+}
+
+// Deterministic LCG uniform in (-1, 1) summed 6x (CLT Gaussian with std = sqrt(2))
+fn lcg_next(state: i64) -> i64 {
+    let m: i64 = 2147483647;
+    let a: i64 = 48271;
+    let nxt: i64 = (state * a) % m;
+    if nxt <= 0 { nxt + m } else { nxt }
+}
+
+struct RngGauss {
+    val: f64,
+    state: i64,
+}
+
+fn next_gauss(seed: i64) -> RngGauss {
+    let mut st: i64 = seed;
+    let mut acc: f64 = 0.0;
+    let mut k: i32 = 0;
+    while k < 6 {
+        st = lcg_next(st);
+        let u: f64 = (st as f64) / 2147483647.0;
+        acc = acc + (2.0 * u - 1.0);
+        k = k + 1;
+    }
+    // Var(2u-1) = 1/3, sum of 6 has Var = 2.0 -> divide by sqrt(2) for unit Gaussian
+    RngGauss { val: acc * 0.7071067811865475, state: st }
+}
+
+struct FrameEval {
+    detected: bool,
+    harm_ratio: f64,
+    az_deg: f64,
+    pair_mismatch_deg: f64,
+    rng_state: i64,
+}
+
+// Evaluate one 512-sample frame (64 ms at 8000 Hz) across 4 microphones.
+// mode=0: 150 Hz quadrotor harmonic comb (150, 300, 450, 600 Hz) at 0 dB wind noise
+// mode=1: urban dual-tone car horn (400 + 500 Hz) at 0 dB wind noise
+// swap_mics: planted geometry fault swapping mic 1 and mic 3
+fn eval_passive_frame(
+    mode: i32,
+    az_true_deg: f64,
+    swap_mics: bool,
+    seed_in: i64,
+) -> FrameEval {
+    let pi: f64 = 3.14159265358979323846;
+    let two_pi: f64 = 6.28318530717958647692;
+    let fs: f64 = 8000.0;
+    let c_sound: f64 = 343.0;
+    let d_arr: f64 = 0.60;
+    let half_d: f64 = 0.30;
+    let n_samp: i32 = 512;
+
+    // 4-mic square array coordinates (m): M0=(+h,+h), M1=(-h,+h), M2=(-h,-h), M3=(+h,-h)
+    let mx: Vec<f64> = vec![half_d, -half_d, -half_d, half_d];
+    let my: Vec<f64> = vec![half_d, half_d, -half_d, -half_d];
+
+    let az_rad: f64 = az_true_deg * pi / 180.0;
+    let ux: f64 = det_cos(az_rad);
+    let uy: f64 = det_sin(az_rad);
+
+    // Plane-wave arrival delays relative to array center
+    let mut tau: Vec<f64> = Vec::new();
+    let mut m: usize = 0;
+    while m < 4 {
+        tau.push(-(mx[m] * ux + my[m] * uy) / c_sound);
+        m = m + 1;
+    }
+    if swap_mics {
+        // Swap adjacent mics 0 and 1 to invert top baseline relative to bottom baseline
+        let tmp: f64 = tau[0];
+        tau[0] = tau[1];
+        tau[1] = tmp;
+    }
+
+    // Frequencies to probe via exact DFT correlation:
+    // Rotor harmonics: 150, 300, 450, 600 Hz
+    // Distractor & noise reference bins: 400, 500, 225, 375 Hz
+    let freqs: Vec<f64> = vec![150.0, 300.0, 450.0, 600.0, 400.0, 500.0, 225.0, 375.0];
+    let n_freq: usize = 8;
+
+    // Complex DFT bins [mic * n_freq + fi]
+    let mut re: Vec<f64> = vec![0.0; 4 * n_freq];
+    let mut im: Vec<f64> = vec![0.0; 4 * n_freq];
+
+    let mut rng: i64 = seed_in;
+    // Signal RMS = 1.0, ambient wind noise RMS = 1.0 -> exact 0 dB SNR
+    let a1: f64 = 0.90;
+    let a2: f64 = 0.72;
+    let a3: f64 = 0.56;
+    let a4: f64 = 0.44;
+    // (a1^2+a2^2+a3^2+a4^2)/2 = (0.81+0.5184+0.3136+0.1936)/2 = 0.9178 -> scale to RMS=1.0
+    let sig_norm: f64 = 1.0438;
+
+    let mut n: i32 = 0;
+    while n < n_samp {
+        let t: f64 = (n as f64) / fs;
+        // Hann window for low sidelobe leakage
+        let win: f64 = 0.5 - 0.5 * det_cos(two_pi * (n as f64) / (n_samp as f64));
+        m = 0;
+        while m < 4 {
+            let td: f64 = t - tau[m];
+            let s_clean: f64 = if mode == 0 {
+                sig_norm * (
+                    a1 * det_sin(two_pi * 150.0 * td + 0.15)
+                    + a2 * det_sin(two_pi * 300.0 * td + 0.45)
+                    + a3 * det_sin(two_pi * 450.0 * td + 0.90)
+                    + a4 * det_sin(two_pi * 600.0 * td + 1.25)
+                )
+            } else {
+                // Urban dual-tone car horn (400 Hz + 500 Hz, RMS = 1.0)
+                det_sin(two_pi * 400.0 * td + 0.20) + det_sin(two_pi * 500.0 * td + 0.75)
+            };
+            let g: RngGauss = next_gauss(rng);
+            rng = g.state;
+            let x_val: f64 = (s_clean + g.val) * win;
+
+            let mut fi: usize = 0;
+            while fi < n_freq {
+                let ph: f64 = two_pi * freqs[fi] * t;
+                let idx: usize = m * n_freq + fi;
+                re[idx] = re[idx] + x_val * det_cos(ph);
+                im[idx] = im[idx] - x_val * det_sin(ph);
+                fi = fi + 1;
+            }
+            m = m + 1;
+        }
+        n = n + 1;
+    }
+
+    // Harmonic comb detector power vs distractor & off-comb reference power
+    let mut p_rotor: f64 = 0.0;
+    let mut p_other: f64 = 0.0;
+    m = 0;
+    while m < 4 {
+        let mut fi: usize = 0;
+        while fi < 4 {
+            let idx: usize = m * n_freq + fi;
+            p_rotor = p_rotor + re[idx] * re[idx] + im[idx] * im[idx];
+            fi = fi + 1;
+        }
+        while fi < 8 {
+            let idx: usize = m * n_freq + fi;
+            p_other = p_other + re[idx] * re[idx] + im[idx] * im[idx];
+            fi = fi + 1;
+        }
+        m = m + 1;
+    }
+    let harm_ratio: f64 = p_rotor / (p_other + 1.0e-9);
+    let detected: bool = harm_ratio > 6.0;
+
+    // Narrowband TDOA from cross-spectra at f1=150 Hz and f2=300 Hz (zero spatial aliasing at 150 Hz;
+    // at 150 Hz, max phase is 2*pi*150*0.60/343 = 1.648 rad < pi!)
+    // Pair (0,1) and (3,2) span +x (d=0.60 m): tau_1 - tau_0 = +(d/c)*ux
+    // Pair (0,3) and (1,2) span +y (d=0.60 m): tau_3 - tau_0 = +(d/c)*uy
+    // Cross-spectrum X_a * conj(X_b) has phase -2*pi*f*(tau_a - tau_b) = +2*pi*f*(tau_b - tau_a)
+    let f0: f64 = 150.0;
+    let idx0: usize = 0 * n_freq + 0;
+    let idx1: usize = 1 * n_freq + 0;
+    let idx2: usize = 2 * n_freq + 0;
+    let idx3: usize = 3 * n_freq + 0;
+
+    // Pair A_x = (0, 1), Pair B_x = (3, 2)
+    let ax_re: f64 = re[idx0] * re[idx1] + im[idx0] * im[idx1];
+    let ax_im: f64 = im[idx0] * re[idx1] - re[idx0] * im[idx1];
+    let bx_re: f64 = re[idx3] * re[idx2] + im[idx3] * im[idx2];
+    let bx_im: f64 = im[idx3] * re[idx2] - re[idx3] * im[idx2];
+
+    // Pair A_y = (0, 3), Pair B_y = (1, 2)
+    let ay_re: f64 = re[idx0] * re[idx3] + im[idx0] * im[idx3];
+    let ay_im: f64 = im[idx0] * re[idx3] - re[idx0] * im[idx3];
+    let by_re: f64 = re[idx1] * re[idx2] + im[idx1] * im[idx2];
+    let by_im: f64 = im[idx1] * re[idx2] - re[idx1] * im[idx2];
+
+    let ph_x1: f64 = det_atan2(ax_im, ax_re);
+    let ph_x2: f64 = det_atan2(bx_im, bx_re);
+    let ph_y1: f64 = det_atan2(ay_im, ay_re);
+    let ph_y2: f64 = det_atan2(by_im, by_re);
+
+    // Geometry self-consistency residual between parallel pairs (catches swapped mics!)
+    let mis_x: f64 = abs_f64(wrap_pi(ph_x1 - ph_x2)) * 180.0 / pi;
+    let mis_y: f64 = abs_f64(wrap_pi(ph_y1 - ph_y2)) * 180.0 / pi;
+    let pair_mismatch_deg: f64 = if mis_x > mis_y { mis_x } else { mis_y };
+
+    // Coherently sum parallel pairs at 150 Hz and 300 Hz (weight 150 Hz + unwrapped 300 Hz)
+    let ux_150: f64 = det_atan2(ax_im + bx_im, ax_re + bx_re) * c_sound / (two_pi * f0 * d_arr);
+    let uy_150: f64 = det_atan2(ay_im + by_im, ay_re + by_re) * c_sound / (two_pi * f0 * d_arr);
+
+    let az_est_deg: f64 = det_atan2(uy_150, ux_150) * 180.0 / pi;
+
+    FrameEval {
+        detected: detected,
+        harm_ratio: harm_ratio,
+        az_deg: az_est_deg,
+        pair_mismatch_deg: pair_mismatch_deg,
+        rng_state: rng,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    // 1. Track moving 150 Hz quadrotor harmonic source at 100 m in 0 dB wind noise (40 frames)
+    let n_frames: i32 = 40;
+    let dt_frame: f64 = 0.064;
+    let mut rng: i64 = 123456789;
+
+    // 2-state Kalman filter [theta_deg, theta_dot_deg_s]
+    let mut x0: f64 = 32.0;
+    let mut x1: f64 = 12.0;
+    let mut p00: f64 = 25.0;
+    let mut p01: f64 = 0.0;
+    let mut p11: f64 = 16.0;
+    let q_proc: f64 = 0.5;
+    let r_meas: f64 = 9.0;
+
+    let mut raw_sq_err: f64 = 0.0;
+    let mut kf_sq_err: f64 = 0.0;
+    let mut tp_count: i32 = 0;
+    let mut track_checksum: f64 = 0.0;
+
+    let mut f: i32 = 0;
+    while f < n_frames {
+        let t_s: f64 = (f as f64) * dt_frame;
+        let az_true: f64 = 32.0 + 12.5 * t_s;
+        let ev: FrameEval = eval_passive_frame(0, az_true, false, rng);
+        rng = ev.rng_state;
+        if ev.detected {
+            tp_count = tp_count + 1;
+        }
+        let raw_err: f64 = ev.az_deg - az_true;
+        raw_sq_err = raw_sq_err + raw_err * raw_err;
+
+        // Kalman predict
+        let xp0: f64 = x0 + dt_frame * x1;
+        let xp1: f64 = x1;
+        let pp00: f64 = p00 + 2.0 * dt_frame * p01 + dt_frame * dt_frame * p11 + q_proc * dt_frame * dt_frame;
+        let pp01: f64 = p01 + dt_frame * p11;
+        let pp11: f64 = p11 + q_proc;
+
+        // Kalman update
+        let innov: f64 = ev.az_deg - xp0;
+        let s_cov: f64 = pp00 + r_meas;
+        let k0: f64 = pp00 / s_cov;
+        let k1: f64 = pp01 / s_cov;
+        x0 = xp0 + k0 * innov;
+        x1 = xp1 + k1 * innov;
+        p00 = (1.0 - k0) * pp00;
+        p01 = (1.0 - k0) * pp01;
+        p11 = pp11 - k1 * pp01;
+
+        let kf_err: f64 = x0 - az_true;
+        kf_sq_err = kf_sq_err + kf_err * kf_err;
+        track_checksum = track_checksum + x0;
+        f = f + 1;
+    }
+
+    let raw_rms_deg: f64 = det_sqrt(raw_sq_err / (n_frames as f64));
+    let kf_rms_deg: f64 = det_sqrt(kf_sq_err / (n_frames as f64));
+
+    if tp_count == n_frames && kf_rms_deg < 2.5 {
+        println!(
+            "[PASS] passive_uav_tdoa_kf tp={}/{} raw_rms_deg={:.6} kf_rms_deg={:.6}",
+            tp_count, n_frames, raw_rms_deg, kf_rms_deg
+        );
+    } else {
+        println!(
+            "[FAIL] passive_uav_tdoa_kf tp={}/{} raw_rms_deg={:.6} kf_rms_deg={:.6}",
+            tp_count, n_frames, raw_rms_deg, kf_rms_deg
+        );
+        failures = failures + 1;
+    }
+
+    // 2. Planted Control 1: Urban Car-Horn Distractor (200 frames at 0 dB wind noise, FPR < 1%)
+    let n_horn: i32 = 200;
+    let mut fp_count: i32 = 0;
+    let mut max_horn_ratio: f64 = 0.0;
+    let mut h: i32 = 0;
+    while h < n_horn {
+        let ev: FrameEval = eval_passive_frame(1, 55.0, false, rng);
+        rng = ev.rng_state;
+        if ev.detected {
+            fp_count = fp_count + 1;
+        }
+        if ev.harm_ratio > max_horn_ratio {
+            max_horn_ratio = ev.harm_ratio;
+        }
+        h = h + 1;
+    }
+    let fpr_pct: f64 = 100.0 * (fp_count as f64) / (n_horn as f64);
+    if fpr_pct < 1.0 {
+        println!(
+            "[PASS] planted_ctrl1_car_horn_reject fp={}/{} fpr_pct={:.4} max_harm_ratio={:.4}",
+            fp_count, n_horn, fpr_pct, max_horn_ratio
+        );
+    } else {
+        println!("[FAIL] planted_ctrl1_car_horn_reject fp={}/{} fpr_pct={:.4}", fp_count, n_horn, fpr_pct);
+        failures = failures + 1;
+    }
+
+    // 3. Planted Control 2: Swapped Mic-Array Geometry Fault Detection
+    let ev_bad: FrameEval = eval_passive_frame(0, 42.0, true, rng);
+    if ev_bad.pair_mismatch_deg > 15.0 {
+        println!(
+            "[PASS] planted_ctrl2_swapped_mics caught pair_mismatch_deg={:.4}",
+            ev_bad.pair_mismatch_deg
+        );
+    } else {
+        println!(
+            "[FAIL] planted_ctrl2_swapped_mics missed pair_mismatch_deg={:.4}",
+            ev_bad.pair_mismatch_deg
+        );
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_N03] elapsed_ms={:.4} kf_rms_deg={:.9} track_checksum={:.9} failures={}",
+        elapsed_ms, kf_rms_deg, track_checksum, failures
+    );
+}

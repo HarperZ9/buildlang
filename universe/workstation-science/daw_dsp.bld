@@ -1,0 +1,323 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 49H (P1 Author Idea E7): Physics-Based DAW DSP Kernel (daw_dsp.bld)
+// - Waveguide plucked string at 440 Hz (fractional Thiran allpass + 3-tap linear-phase FIR loss)
+// - Simply-supported C260 cartridge brass Kirchhoff modal plate (4 modes: (1,1),(1,2),(2,1),(2,2))
+// - Hann-windowed Goertzel fine peak detector verifying fundamental & first 3 overtones <= 0.5 Hz
+// - Realtime budget check (< 0.2x realtime for 1.0 s @ 48 kHz)
+// - Planted failing control: unstable waveguide feedback gain g_fb = 1.02 > 1.0 caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+// Hann-windowed Goertzel power at target frequency f_hz
+fn goertzel_power(sig: &Vec<f64>, n: usize, fs: f64, f_hz: f64) -> f64 {
+    let pi: f64 = 3.141592653589793;
+    let w: f64 = 2.0 * pi * f_hz / fs;
+    let coeff: f64 = 2.0 * cos(w);
+    let mut s1: f64 = 0.0;
+    let mut s2: f64 = 0.0;
+    let nf_m1: f64 = (n - 1) as f64;
+    let mut i: usize = 0;
+    while i < n {
+        let win: f64 = 0.5 * (1.0 - cos(2.0 * pi * (i as f64) / nf_m1));
+        let x: f64 = sig[i] * win;
+        let s0: f64 = x + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+        i = i + 1;
+    }
+    let p: f64 = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+    if p < 0.0 {
+        return 0.0;
+    }
+    p
+}
+
+// Fine-grid Goertzel peak locator around f_guess +/- span_hz (step 0.02 Hz)
+fn find_peak_hz(sig: &Vec<f64>, n: usize, fs: f64, f_guess: f64, span_hz: f64) -> f64 {
+    let step: f64 = 0.02;
+    let steps: i32 = ((2.0 * span_hz) / step) as i32;
+    let f_start: f64 = f_guess - span_hz;
+    let mut best_f: f64 = f_guess;
+    let mut best_p: f64 = -1.0;
+    let mut k: i32 = 0;
+    while k <= steps {
+        let f: f64 = f_start + (k as f64) * step;
+        let p: f64 = goertzel_power(sig, n, fs, f);
+        if p > best_p {
+            best_p = p;
+            best_f = f;
+        }
+        k = k + 1;
+    }
+    best_f
+}
+
+// Waveguide plucked string with 3-tap symmetric linear-phase loss FIR (1.0 sample delay)
+// plus 1st-order Thiran allpass fractional delay.
+// Returns synthesized samples (length n_samples).
+fn synth_waveguide_string(fs: f64, f0: f64, g_fb: f64, n_samples: usize) -> Vec<f64> {
+    let period: f64 = fs / f0;
+    let d_rem: f64 = period - 1.0;
+    let mut n_int: usize = (d_rem as usize) - 1;
+    if n_int < 4 {
+        n_int = 4;
+    }
+    let d_frac: f64 = d_rem - (n_int as f64);
+    let eta: f64 = (1.0 - d_frac) / (1.0 + d_frac);
+
+    let mut ring: Vec<f64> = Vec::new();
+    let pluck_pos: f64 = 0.19 * (n_int as f64);
+    let mut i: usize = 0;
+    while i < n_int {
+        let xf: f64 = i as f64;
+        let v: f64 = if xf <= pluck_pos {
+            xf / pluck_pos
+        } else {
+            ((n_int as f64) - xf) / ((n_int as f64) - pluck_pos)
+        };
+        ring.push(v);
+        i = i + 1;
+    }
+
+    // Remove DC offset from initial triangular displacement
+    let mut mean: f64 = 0.0;
+    i = 0;
+    while i < n_int {
+        mean = mean + ring[i];
+        i = i + 1;
+    }
+    mean = mean / (n_int as f64);
+    i = 0;
+    while i < n_int {
+        ring[i] = ring[i] - mean;
+        i = i + 1;
+    }
+
+    let mut out: Vec<f64> = Vec::new();
+    let mut idx: usize = 0;
+    let mut fir_x1: f64 = 0.0;
+    let mut fir_x2: f64 = 0.0;
+    let mut ap_x1: f64 = 0.0;
+    let mut ap_y1: f64 = 0.0;
+    let c0: f64 = 0.12;
+    let c1: f64 = 0.76;
+
+    let mut n: usize = 0;
+    while n < n_samples {
+        let x0: f64 = ring[idx];
+        out.push(x0);
+        // 3-tap symmetric linear-phase lowpass filter (exact 1.0 sample delay)
+        let lp: f64 = g_fb * (c0 * x0 + c1 * fir_x1 + c0 * fir_x2);
+        fir_x2 = fir_x1;
+        fir_x1 = x0;
+        // 1st-order Thiran allpass fractional delay
+        let ap_y: f64 = eta * (lp - ap_y1) + ap_x1;
+        ap_x1 = lp;
+        ap_y1 = ap_y;
+        ring[idx] = ap_y;
+        idx = idx + 1;
+        if idx >= n_int {
+            idx = 0;
+        }
+        n = n + 1;
+    }
+    out
+}
+
+// Simply-supported rectangular C260 cartridge brass Kirchhoff modal plate (4 lowest modes).
+// Analytical eigenfrequency: f_{m,n} = (pi/2) * sqrt(D / (rho*h)) * ((m/Lx)^2 + (n/Ly)^2)
+fn synth_brass_plate(fs: f64, f11: f64, f12: f64, f21: f64, f22: f64, n_samples: usize) -> Vec<f64> {
+    let pi: f64 = 3.141592653589793;
+    let mut freqs: Vec<f64> = Vec::new();
+    freqs.push(f11);
+    freqs.push(f12);
+    freqs.push(f21);
+    freqs.push(f22);
+
+    let mut qs: Vec<f64> = Vec::new();
+    qs.push(620.0);
+    qs.push(540.0);
+    qs.push(500.0);
+    qs.push(420.0);
+
+    let mut amps: Vec<f64> = Vec::new();
+    amps.push(1.0);
+    amps.push(0.65);
+    amps.push(0.55);
+    amps.push(0.45);
+
+    let mut a1: Vec<f64> = Vec::new();
+    let mut a2: Vec<f64> = Vec::new();
+    let mut s1: Vec<f64> = Vec::new();
+    let mut s2: Vec<f64> = Vec::new();
+    let mut k: usize = 0;
+    while k < 4 {
+        let fk: f64 = freqs[k];
+        let qk: f64 = qs[k];
+        let r: f64 = exp(-pi * fk / (qk * fs));
+        let w: f64 = 2.0 * pi * fk / fs;
+        a1.push(2.0 * r * cos(w));
+        a2.push(r * r);
+        s1.push(0.0);
+        s2.push(0.0);
+        k = k + 1;
+    }
+
+    let mut out: Vec<f64> = Vec::new();
+    let mut n: usize = 0;
+    while n < n_samples {
+        // Short mallet impulse over first 16 samples (raised half-sine)
+        let exc: f64 = if n < 16 {
+            sin(pi * ((n as f64) + 0.5) / 16.0)
+        } else {
+            0.0
+        };
+        let mut y: f64 = 0.0;
+        let mut m: usize = 0;
+        while m < 4 {
+            let s0: f64 = a1[m] * s1[m] - a2[m] * s2[m] + amps[m] * exc;
+            s2[m] = s1[m];
+            s1[m] = s0;
+            y = y + s0;
+            m = m + 1;
+        }
+        out.push(y);
+        n = n + 1;
+    }
+    out
+}
+
+fn passivity_guard_ok(g_fb: f64) -> i32 {
+    if g_fb >= 1.0 || g_fb < 0.0 {
+        return 0;
+    }
+    1
+}
+
+fn max_abs_vec(v: &Vec<f64>) -> f64 {
+    let n: usize = v.len();
+    let mut mx: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        let a: f64 = abs_f64(v[i]);
+        if a > mx {
+            mx = a;
+        }
+        i = i + 1;
+    }
+    mx
+}
+
+fn main() ~ Clock + Console {
+    let pi: f64 = 3.141592653589793;
+    let fs: f64 = 48000.0;
+    let n_samples: usize = 48000;
+    let f0: f64 = 440.0;
+
+    // C260 Cartridge Brass physical constants
+    let e_brass: f64 = 110.0e9;
+    let rho_brass: f64 = 8530.0;
+    let nu_brass: f64 = 0.34;
+    let h_plate: f64 = 0.002;
+    let aspect: f64 = 1.18;
+    let d_flex: f64 = e_brass * h_plate * h_plate * h_plate / (12.0 * (1.0 - nu_brass * nu_brass));
+    let c_plate: f64 = (pi / 2.0) * sqrt(d_flex / (rho_brass * h_plate));
+    // Solve Lx so fundamental mode (1,1) = 440.0 Hz with Ly = aspect * Lx
+    let inv_asp2: f64 = 1.0 / (aspect * aspect);
+    let lx: f64 = sqrt(c_plate * (1.0 + inv_asp2) / f0);
+    let ly: f64 = aspect * lx;
+    let f11: f64 = c_plate * (1.0 / (lx * lx) + 1.0 / (ly * ly));
+    let f12: f64 = c_plate * (1.0 / (lx * lx) + 4.0 / (ly * ly));
+    let f21: f64 = c_plate * (4.0 / (lx * lx) + 1.0 / (ly * ly));
+    let f22: f64 = c_plate * (4.0 / (lx * lx) + 4.0 / (ly * ly));
+
+    let g_stable: f64 = 0.9985;
+    let guard_stable: i32 = passivity_guard_ok(g_stable);
+
+    // Timed 1.0 s synthesis of BOTH waveguide string and modal brass plate
+    let t0: i64 = clock_ns();
+    let str_sig: Vec<f64> = synth_waveguide_string(fs, f0, g_stable, n_samples);
+    let plt_sig: Vec<f64> = synth_brass_plate(fs, f11, f12, f21, f22, n_samples);
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+    let rt_factor: f64 = elapsed_ms / 1000.0;
+
+    // Verify fundamental and first 3 overtones via Goertzel peak search (first 24000 samples = 0.5 s)
+    let n_fft: usize = 24000;
+    let sp1: f64 = find_peak_hz(&str_sig, n_fft, fs, 440.0, 2.0);
+    let sp2: f64 = find_peak_hz(&str_sig, n_fft, fs, 880.0, 2.0);
+    let sp3: f64 = find_peak_hz(&str_sig, n_fft, fs, 1320.0, 2.0);
+    let sp4: f64 = find_peak_hz(&str_sig, n_fft, fs, 1760.0, 2.0);
+
+    let pp1: f64 = find_peak_hz(&plt_sig, n_fft, fs, f11, 2.0);
+    let pp2: f64 = find_peak_hz(&plt_sig, n_fft, fs, f12, 2.0);
+    let pp3: f64 = find_peak_hz(&plt_sig, n_fft, fs, f21, 2.0);
+    let pp4: f64 = find_peak_hz(&plt_sig, n_fft, fs, f22, 2.0);
+
+    let mut max_str_err: f64 = abs_f64(sp1 - 440.0);
+    let e2: f64 = abs_f64(sp2 - 880.0);
+    let e3: f64 = abs_f64(sp3 - 1320.0);
+    let e4: f64 = abs_f64(sp4 - 1760.0);
+    if e2 > max_str_err { max_str_err = e2; }
+    if e3 > max_str_err { max_str_err = e3; }
+    if e4 > max_str_err { max_str_err = e4; }
+
+    let mut max_plt_err: f64 = abs_f64(pp1 - f11);
+    let pe2: f64 = abs_f64(pp2 - f12);
+    let pe3: f64 = abs_f64(pp3 - f21);
+    let pe4: f64 = abs_f64(pp4 - f22);
+    if pe2 > max_plt_err { max_plt_err = pe2; }
+    if pe3 > max_plt_err { max_plt_err = pe3; }
+    if pe4 > max_plt_err { max_plt_err = pe4; }
+
+    // Deterministic sample checksums for independent Python f64 parity
+    let mut str_sum: f64 = 0.0;
+    let mut plt_sum: f64 = 0.0;
+    let mut ci: usize = 0;
+    while ci < 4096 {
+        str_sum = str_sum + str_sig[ci] * ((ci as f64) + 1.0) * 1.0e-4;
+        plt_sum = plt_sum + plt_sig[ci] * ((ci as f64) + 1.0) * 1.0e-4;
+        ci = ci + 1;
+    }
+
+    // Planted failing control: unstable feedback gain g_fb = 1.02 > 1.0
+    let g_unstable: f64 = 1.02;
+    let guard_unstable: i32 = passivity_guard_ok(g_unstable);
+    let unstable_sig: Vec<f64> = synth_waveguide_string(fs, f0, g_unstable, n_samples);
+    let stable_peak: f64 = max_abs_vec(&str_sig);
+    let unstable_peak: f64 = max_abs_vec(&unstable_sig);
+    let unstable_caught: i32 = if guard_unstable == 0 && unstable_peak > 100.0 * stable_peak { 1 } else { 0 };
+
+    println!("E7_PLATE_LX={:.12}", lx);
+    println!("E7_PLATE_MODES={:.6},{:.6},{:.6},{:.6}", f11, f12, f21, f22);
+    println!("E7_STRING_PEAKS={:.4},{:.4},{:.4},{:.4}", sp1, sp2, sp3, sp4);
+    println!("E7_PLATE_PEAKS={:.4},{:.4},{:.4},{:.4}", pp1, pp2, pp3, pp4);
+    println!("E7_MAX_STR_ERR_HZ={:.6}", max_str_err);
+    println!("E7_MAX_PLT_ERR_HZ={:.6}", max_plt_err);
+    println!("E7_STR_CHECKSUM={:.12}", str_sum);
+    println!("E7_PLT_CHECKSUM={:.12}", plt_sum);
+    println!("E7_ELAPSED_MS={:.4}", elapsed_ms);
+    println!("E7_RT_FACTOR={:.6}", rt_factor);
+    println!("E7_STABLE_PEAK={:.6}", stable_peak);
+    println!("E7_UNSTABLE_PEAK={:.6}", unstable_peak);
+    println!("E7_UNSTABLE_CAUGHT={}", unstable_caught);
+
+    if guard_stable == 1 && max_str_err <= 0.5 && max_plt_err <= 0.5 && rt_factor < 0.2 && unstable_caught == 1 {
+        println!(
+            "[PASS] E7_DAW_DSP max_str_err={:.4}Hz max_plt_err={:.4}Hz rt={:.5}x unstable_caught=1",
+            max_str_err, max_plt_err, rt_factor
+        );
+    } else {
+        println!(
+            "[FAIL] E7_DAW_DSP max_str_err={:.4}Hz max_plt_err={:.4}Hz rt={:.5}x unstable_caught={}",
+            max_str_err, max_plt_err, rt_factor, unstable_caught
+        );
+    }
+}
