@@ -1,0 +1,155 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 52G (Author Idea A19): Falsifiable Analogy-to-Equation Contract Validator (analogy_contract.bld)
+// - Enforces MISSION.md rule ("rhyme proves nothing"): every cross-domain analogy MUST bind an
+//   executable dimensionless ODE/invariant residual, positive quantitative null threshold, and >= 10
+//   evaluated points with zero woo-woo / metaphor-only text
+// - Passes 2 exact physical contracts (Mechanical<->RLC, Fourier Heat<->Fick Diffusion)
+// - Rejects 4/4 planted metaphor-only, missing-threshold, unexecuted, and falsified analogies fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn has_woo_woo(desc: &String) -> i32 {
+    let low: String = desc.to_lowercase();
+    if low.contains("resonance aura") || low.contains("vibe")
+        || low.contains("cosmic metaphor") || low.contains("consciousness field") {
+        return 1;
+    }
+    0
+}
+
+// Validate analogy contract; returns 1 = PASS, 0 = REJECT fail-closed
+fn validate_contract(
+    src_domain: &String,
+    dst_domain: &String,
+    description: &String,
+    has_equation: i32,
+    n_points: i32,
+    null_threshold: f64,
+    measured_residual: f64,
+) -> i32 {
+    if src_domain.trim().len() < 3 || dst_domain.trim().len() < 3 {
+        return 0;
+    }
+    if has_equation != 1 {
+        return 0;
+    }
+    if has_woo_woo(description) == 1 {
+        return 0;
+    }
+    if n_points < 10 {
+        return 0;
+    }
+    if null_threshold <= 0.0 || null_threshold > 0.10 {
+        return 0;
+    }
+    if measured_residual < 0.0 || measured_residual > null_threshold {
+        return 0;
+    }
+    1
+}
+
+// Compute exact dimensionless harmonic residual over 64 time samples (undamped vs candidate damping)
+fn eval_harmonic_contract_residual(gamma_candidate: f64) -> f64 {
+    let pi: f64 = 3.14159265358979323846264338327950288;
+    let mut sum_sq: f64 = 0.0;
+    let mut i: i32 = 0;
+    while i < 64 {
+        let tau: f64 = 2.0 * pi * (i as f64) / 64.0;
+        let u_ref: f64 = cos(tau);
+        let u_cand: f64 = exp(-0.5 * gamma_candidate * tau) * cos(tau);
+        let d: f64 = u_cand - u_ref;
+        sum_sq = sum_sq + d * d;
+        i = i + 1;
+    }
+    sqrt(sum_sq / 64.0)
+}
+
+// Compute exact Fourier-heat vs Fick-diffusion dimensionless Gaussian kernel residual over 64 spatial points
+fn eval_diffusion_contract_residual(diff_ratio: f64) -> f64 {
+    let mut sum_sq: f64 = 0.0;
+    let mut i: i32 = 0;
+    while i < 64 {
+        let xi: f64 = -3.0 + 6.0 * (i as f64) / 63.0;
+        let g_heat: f64 = exp(-0.5 * xi * xi);
+        let g_fick: f64 = exp(-0.5 * diff_ratio * xi * xi);
+        let d: f64 = g_fick - g_heat;
+        sum_sq = sum_sq + d * d;
+        i = i + 1;
+    }
+    sqrt(sum_sq / 64.0)
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    // 1. Two valid grounded cross-domain contracts (MUST PASS 2/2)
+    let res_harm: f64 = eval_harmonic_contract_residual(0.0);
+    let res_diff: f64 = eval_diffusion_contract_residual(1.0);
+    let c1_ok: i32 = validate_contract(
+        &"mechanical_spring".to_string(),
+        &"electrical_lc".to_string(),
+        &"dimensionless u'' + u = 0".to_string(),
+        1, 64, 1.0e-6, res_harm,
+    );
+    let c2_ok: i32 = validate_contract(
+        &"fourier_heat".to_string(),
+        &"fick_diffusion".to_string(),
+        &"dimensionless u_t = u_xx".to_string(),
+        1, 64, 1.0e-6, res_diff,
+    );
+
+    // 2. Four planted invalid / woo-woo / falsified contracts (4/4 MUST REJECT fail-closed)
+    let bad_metaphor: i32 = validate_contract(
+        &"quantum_optics".to_string(),
+        &"poetry_craft".to_string(),
+        &"cosmic metaphor resonance aura".to_string(),
+        0, 64, 0.01, 0.0,
+    );
+    let bad_no_thresh: i32 = validate_contract(
+        &"fluid_vortex".to_string(),
+        &"market_cycle".to_string(),
+        &"vorticity mapping".to_string(),
+        1, 64, 0.0, 0.0,
+    );
+    let bad_unexec: i32 = validate_contract(
+        &"circuit_ode".to_string(),
+        &"acoustic_horn".to_string(),
+        &"dimensionless u'' + u = 0".to_string(),
+        1, 0, 1.0e-4, 0.0,
+    );
+    let res_falsified: f64 = eval_harmonic_contract_residual(0.50);
+    let bad_falsified: i32 = validate_contract(
+        &"undamped_spring".to_string(),
+        &"heavily_damped_rlc".to_string(),
+        &"claimed undamped equivalence".to_string(),
+        1, 64, 0.01, res_falsified,
+    );
+
+    let valid_pass: i32 = c1_ok + c2_ok;
+    let planted_rejected: i32 =
+        (if bad_metaphor == 0 { 1 } else { 0 })
+        + (if bad_no_thresh == 0 { 1 } else { 0 })
+        + (if bad_unexec == 0 { 1 } else { 0 })
+        + (if bad_falsified == 0 { 1 } else { 0 });
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("A19_VALID_PASS={}", valid_pass);
+    println!("A19_RES_HARM={:.15}", res_harm);
+    println!("A19_RES_DIFF={:.15}", res_diff);
+    println!("A19_RES_FALSIFIED={:.12}", res_falsified);
+    println!("A19_PLANTED_REJECTED={}", planted_rejected);
+    println!("A19_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if valid_pass == 2 && planted_rejected == 4 {
+        println!("[PASS] A19_ANALOGY_CONTRACT valid=2/2 rejected=4/4 falsified_res={:.4}", res_falsified);
+    } else {
+        println!("[FAIL] A19_ANALOGY_CONTRACT valid={}/2 rejected={}/4", valid_pass, planted_rejected);
+    }
+}

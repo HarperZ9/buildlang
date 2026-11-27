@@ -1,0 +1,187 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+
+// Wave 52I - Author Idea B11: Unified P4/S6 Optical Aperture Iris Gate Law
+// Sweeps photographic stops f/1.4 .. f/22 balancing sqrt(N) photon shot-noise SNR against
+// spherical aberration (wide open) and Airy diffraction limit r_Airy = 1.21967 * lambda * N
+// (stopped down), locating the exact interior optimal f-stop and rejecting f <= 0 fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn det_sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g: f64 = x;
+    if g < 1.0 {
+        g = 1.0;
+    }
+    let mut i: i32 = 0;
+    while i < 24 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    g
+}
+
+fn det_ln(x: f64) -> f64 {
+    let mut v: f64 = x;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.69314718055994530942;
+    while v > 1.4142135623730951 {
+        v = v * 0.5;
+        k = k + 1;
+    }
+    while v < 0.7071067811865476 {
+        v = v * 2.0;
+        k = k - 1;
+    }
+    let y: f64 = (v - 1.0) / (v + 1.0);
+    let y2: f64 = y * y;
+    let mut term: f64 = y;
+    let mut sum: f64 = y;
+    let mut n: i32 = 1;
+    while n < 12 {
+        term = term * y2;
+        sum = sum + term / ((2 * n + 1) as f64);
+        n = n + 1;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+struct StopMetrics {
+    status: i32,
+    f_stop: f64,
+    photons: f64,
+    snr_shot: f64,
+    airy_um: f64,
+    psf_um: f64,
+    res_lpmm: f64,
+    gate_score: f64,
+}
+
+fn eval_aperture_stop(f_stop: f64) -> StopMetrics {
+    // Fail-closed invalid aperture guard (f <= 0)
+    if f_stop <= 0.0 {
+        return StopMetrics {
+            status: 1,
+            f_stop: f_stop,
+            photons: 0.0,
+            snr_shot: 0.0,
+            airy_um: 0.0,
+            psf_um: 0.0,
+            res_lpmm: 0.0,
+            gate_score: 0.0,
+        };
+    }
+
+    let lambda_um: f64 = 0.550; // 550 nm green center wavelength
+    let pitch_um: f64 = 3.76;   // full-frame sensor pixel pitch
+    let phi_f1: f64 = 64000.0;  // incident photons per pixel at f/1.0 constant exposure
+
+    // Photon count scales inversely with N^2 -> shot-noise SNR = sqrt(N_photons)
+    let photons: f64 = phi_f1 / (f_stop * f_stop);
+    let snr_shot: f64 = det_sqrt(photons);
+
+    // Airy disk first-zero radius r_Airy = 1.21966989 * lambda * N (um)
+    let airy_um: f64 = 1.2196698912665045 * lambda_um * f_stop;
+    // Seidel spherical aberration blur radius scales as ~ 1 / N^2 when wide open
+    let aber_um: f64 = 18.0 / (f_stop * f_stop);
+    let pix_um: f64 = 0.5 * pitch_um;
+    let psf_um: f64 = det_sqrt(airy_um * airy_um + aber_um * aber_um + pix_um * pix_um);
+
+    // Spatial resolution in line-pairs/mm = 1000 / (2 * psf_um)
+    let res_lpmm: f64 = 1000.0 / (2.0 * psf_um);
+    // Unified P4/S6 aperture-gate information score: resolution * log2(1 + SNR_shot^2)
+    let ln2: f64 = 0.69314718055994530942;
+    let bits_px: f64 = det_ln(1.0 + snr_shot * snr_shot) / ln2;
+    let gate_score: f64 = res_lpmm * bits_px;
+
+    StopMetrics {
+        status: 0,
+        f_stop: f_stop,
+        photons: photons,
+        snr_shot: snr_shot,
+        airy_um: airy_um,
+        psf_um: psf_um,
+        res_lpmm: res_lpmm,
+        gate_score: gate_score,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let mut failures: i32 = 0;
+    let t0_ns: i64 = clock_ns();
+
+    let stops: Vec<f64> = vec![1.4, 2.0, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0];
+    let mut best_f: f64 = 0.0;
+    let mut best_score: f64 = -1.0;
+    let mut best_res: f64 = 0.0;
+    let mut best_snr: f64 = 0.0;
+    let mut f14_score: f64 = 0.0;
+    let mut f22_score: f64 = 0.0;
+    let mut prev_snr: f64 = 1.0e9;
+    let mut prev_airy: f64 = 0.0;
+    let mut mono_ok: bool = true;
+    let mut checksum: f64 = 0.0;
+
+    let mut i: usize = 0;
+    while i < stops.len() {
+        let sm: StopMetrics = eval_aperture_stop(stops[i]);
+        if sm.status != 0 {
+            failures = failures + 1;
+        }
+        // Verify strict physical monotonicity: SNR decreases & Airy disk grows with f-stop
+        if sm.snr_shot >= prev_snr || sm.airy_um <= prev_airy {
+            mono_ok = false;
+        }
+        prev_snr = sm.snr_shot;
+        prev_airy = sm.airy_um;
+        if i == 0 {
+            f14_score = sm.gate_score;
+        }
+        if i == stops.len() - 1 {
+            f22_score = sm.gate_score;
+        }
+        if sm.gate_score > best_score {
+            best_score = sm.gate_score;
+            best_f = sm.f_stop;
+            best_res = sm.res_lpmm;
+            best_snr = sm.snr_shot;
+        }
+        checksum = checksum + sm.gate_score + sm.airy_um + sm.snr_shot;
+        i = i + 1;
+    }
+
+    if mono_ok && best_f >= 2.8 && best_f <= 8.0 && best_score > f14_score && best_score > f22_score {
+        println!(
+            "[PASS] aperture_gate_sweep opt_f={:.1} opt_score={:.4} opt_lpmm={:.4} opt_snr={:.4}",
+            best_f, best_score, best_res, best_snr
+        );
+        println!(
+            "[PASS] aperture_endpoints f14_score={:.4} f22_score={:.4} monotonic_tradeoff=true",
+            f14_score, f22_score
+        );
+    } else {
+        println!("[FAIL] aperture_gate_sweep opt_f={:.1} mono={}", best_f, mono_ok);
+        failures = failures + 1;
+    }
+
+    // Planted Control: Invalid Non-Positive Apertures (f=0.0 and f=-2.8) Rejected Fail-Closed
+    let bad0: StopMetrics = eval_aperture_stop(0.0);
+    let badn: StopMetrics = eval_aperture_stop(-2.8);
+    if bad0.status == 1 && badn.status == 1 {
+        println!("[PASS] planted_ctrl_invalid_aperture caught f0_status=1 fneg_status=1");
+    } else {
+        println!("[FAIL] planted_ctrl_invalid_aperture missed");
+        failures = failures + 1;
+    }
+
+    let elapsed_ms: f64 = ((clock_ns() - t0_ns) as f64) / 1.0e6;
+    println!(
+        "[METRICS_B11] elapsed_ms={:.4} opt_f={:.1} checksum={:.9} failures={}",
+        elapsed_ms, best_f, checksum, failures
+    );
+}

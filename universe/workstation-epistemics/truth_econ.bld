@@ -1,0 +1,161 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51L (Author Idea G7): Truth-Incentive Institutional Economics (truth_econ.bld)
+// - 3-strategy simplex replicator dynamics (Truth T, Rent-Seeking/Noise R, Verifying Auditors A)
+// - Compares unchecked high-cost auditing (truth collapses) vs O-01 low-cost verifiable auditing
+//   (sustains high-truth ESS) via 4th-order Runge-Kutta integration
+// - Planted failing control: zero/negative audit-cost or zero-detection bypass rejected fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn validate_audit_regime(c_audit: f64, p_det: f64) -> i32 {
+    if c_audit <= 0.0 || p_det <= 0.0 || p_det > 1.0 {
+        return 0;
+    }
+    1
+}
+
+struct SimOut {
+    x_t: f64,
+    x_r: f64,
+    x_a: f64,
+    truth_share: f64,
+    simplex_err: f64,
+    checksum: f64,
+}
+
+fn rk4_replicator(
+    c_audit: f64,
+    p_det: f64,
+    b_truth: f64,
+    c_effort: f64,
+    b_noise: f64,
+    f_fine: f64,
+    r_bounty: f64,
+    dt: f64,
+    n_steps: i32,
+) -> SimOut {
+    let mut xt: f64 = 0.45;
+    let mut xr: f64 = 0.35;
+    let mut xa: f64 = 0.20;
+    let mut csum: f64 = 0.0;
+
+    let mut s: i32 = 0;
+    while s < n_steps {
+        if s % 100 == 0 {
+            csum = csum + xt + 2.0 * xr + 3.0 * xa;
+        }
+
+        // Stage 1
+        let pt1: f64 = b_truth - c_effort;
+        let pr1: f64 = b_noise - p_det * (xa + 0.5 * xt) * f_fine;
+        let pa1: f64 = b_truth - c_effort - c_audit + p_det * xr * r_bounty;
+        let phi1: f64 = xt * pt1 + xr * pr1 + xa * pa1;
+        let dxt1: f64 = xt * (pt1 - phi1);
+        let dxr1: f64 = xr * (pr1 - phi1);
+        let dxa1: f64 = xa * (pa1 - phi1);
+
+        // Stage 2
+        let xt2: f64 = xt + 0.5 * dt * dxt1;
+        let xr2: f64 = xr + 0.5 * dt * dxr1;
+        let xa2: f64 = xa + 0.5 * dt * dxa1;
+        let pt2: f64 = b_truth - c_effort;
+        let pr2: f64 = b_noise - p_det * (xa2 + 0.5 * xt2) * f_fine;
+        let pa2: f64 = b_truth - c_effort - c_audit + p_det * xr2 * r_bounty;
+        let phi2: f64 = xt2 * pt2 + xr2 * pr2 + xa2 * pa2;
+        let dxt2: f64 = xt2 * (pt2 - phi2);
+        let dxr2: f64 = xr2 * (pr2 - phi2);
+        let dxa2: f64 = xa2 * (pa2 - phi2);
+
+        // Stage 3
+        let xt3: f64 = xt + 0.5 * dt * dxt2;
+        let xr3: f64 = xr + 0.5 * dt * dxr2;
+        let xa3: f64 = xa + 0.5 * dt * dxa2;
+        let pt3: f64 = b_truth - c_effort;
+        let pr3: f64 = b_noise - p_det * (xa3 + 0.5 * xt3) * f_fine;
+        let pa3: f64 = b_truth - c_effort - c_audit + p_det * xr3 * r_bounty;
+        let phi3: f64 = xt3 * pt3 + xr3 * pr3 + xa3 * pa3;
+        let dxt3: f64 = xt3 * (pt3 - phi3);
+        let dxr3: f64 = xr3 * (pr3 - phi3);
+        let dxa3: f64 = xa3 * (pa3 - phi3);
+
+        // Stage 4
+        let xt4: f64 = xt + dt * dxt3;
+        let xr4: f64 = xr + dt * dxr3;
+        let xa4: f64 = xa + dt * dxa3;
+        let pt4: f64 = b_truth - c_effort;
+        let pr4: f64 = b_noise - p_det * (xa4 + 0.5 * xt4) * f_fine;
+        let pa4: f64 = b_truth - c_effort - c_audit + p_det * xr4 * r_bounty;
+        let phi4: f64 = xt4 * pt4 + xr4 * pr4 + xa4 * pa4;
+        let dxt4: f64 = xt4 * (pt4 - phi4);
+        let dxr4: f64 = xr4 * (pr4 - phi4);
+        let dxa4: f64 = xa4 * (pa4 - phi4);
+
+        xt = xt + (dt / 6.0) * (dxt1 + 2.0 * dxt2 + 2.0 * dxt3 + dxt4);
+        xr = xr + (dt / 6.0) * (dxr1 + 2.0 * dxr2 + 2.0 * dxr3 + dxr4);
+        xa = xa + (dt / 6.0) * (dxa1 + 2.0 * dxa2 + 2.0 * dxa3 + dxa4);
+        s = s + 1;
+    }
+    SimOut {
+        x_t: xt,
+        x_r: xr,
+        x_a: xa,
+        truth_share: xt + xa,
+        simplex_err: abs_f64((xt + xr + xa) - 1.0),
+        checksum: csum,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+    let b_truth: f64 = 1.0;
+    let c_effort: f64 = 0.20;
+    let b_noise: f64 = 1.35;
+    let f_fine: f64 = 1.60;
+    let r_bounty: f64 = 0.45;
+    let dt: f64 = 0.02;
+    let n_steps: i32 = 2000;
+
+    // Regime 1: Unchecked noise / high checking cost (c_audit = 0.85, p_det = 0.05)
+    let unchecked: SimOut = rk4_replicator(0.85, 0.05, b_truth, c_effort, b_noise, f_fine, r_bounty, dt, n_steps);
+    // Regime 2: O-01 low-cost verifiable auditing (c_audit = 0.04, p_det = 0.90)
+    let verified: SimOut = rk4_replicator(0.04, 0.90, b_truth, c_effort, b_noise, f_fine, r_bounty, dt, n_steps);
+
+    // Planted failing controls: zero audit cost (c_audit = 0.0) and zero-detection bypass (p_det = 0.0)
+    let zero_cost_caught: i32 = if validate_audit_regime(0.0, 0.90) == 0 { 1 } else { 0 };
+    let zero_det_caught: i32 = if validate_audit_regime(0.04, 0.0) == 0 { 1 } else { 0 };
+    let planted_caught: i32 = if zero_cost_caught == 1 && zero_det_caught == 1 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("G7_UNCHECKED_TRUTH_SHARE={:.12}", unchecked.truth_share);
+    println!("G7_UNCHECKED_RENT_SHARE={:.12}", unchecked.x_r);
+    println!("G7_VERIFIED_TRUTH_SHARE={:.12}", verified.truth_share);
+    println!("G7_VERIFIED_RENT_SHARE={:.12}", verified.x_r);
+    println!("G7_SIMPLEX_ERR={:.15}", unchecked.simplex_err + verified.simplex_err);
+    println!("G7_CHECKSUM={:.12}", unchecked.checksum + verified.checksum);
+    println!("G7_PLANTED_CAUGHT={}", planted_caught);
+    println!("G7_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let simplex_err: f64 = unchecked.simplex_err + verified.simplex_err;
+    let ok_g7: bool = unchecked.truth_share < 0.05
+        && verified.truth_share > 0.95
+        && simplex_err < 1.0e-12
+        && planted_caught == 1;
+    if ok_g7 {
+        println!(
+            "[PASS] G7_TRUTH_ECON unchecked_truth={:.6} verified_truth={:.6} planted_caught=1",
+            unchecked.truth_share, verified.truth_share
+        );
+    } else {
+        println!(
+            "[FAIL] G7_TRUTH_ECON unchecked={:.6} verified={:.6} caught={}",
+            unchecked.truth_share, verified.truth_share, planted_caught
+        );
+    }
+}

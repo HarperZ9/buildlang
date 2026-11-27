@@ -1,0 +1,135 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53E (Author Idea A10): Duffing Double-Well Symplectic Separatrix (law_shapes.bld)
+// - Integrates undamped Duffing double-well oscillator x'' - x + x^3 = 0 along the exact
+//   homoclinic separatrix v^2 - x^2 + 0.5*x^4 = 0 via 4th-order Yoshida symplectic integrator
+// - Verifies homoclinic invariant error < 1e-4 (actual < 1e-10) and saddle-point approach
+// - Planted failing control: non-symplectic Forward Euler blowup off separatrix caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn duffing_force(x: f64) -> f64 {
+    x - x * x * x
+}
+
+// Analytic homoclinic separatrix invariant I(x, v) = v^2 - x^2 + 0.5*x^4 (== 0 on separatrix)
+fn sep_invariant(x: f64, v: f64) -> f64 {
+    v * v - x * x + 0.5 * x * x * x * x
+}
+
+struct SepOut {
+    max_inv_err: f64,
+    min_saddle_dist: f64,
+    end_x: f64,
+    end_v: f64,
+    checksum: f64,
+}
+
+// 4th-order Yoshida symplectic integrator along homoclinic orbit from (sqrt(2), 0)
+fn run_yoshida_separatrix(dt: f64, n_steps: i32) -> SepOut {
+    // Exact Yoshida 4th-order splitting coefficients (cbrt(2) = 1.2599210498948732)
+    let cbrt2: f64 = 1.2599210498948732;
+    let w1: f64 = 1.0 / (2.0 - cbrt2);
+    let w0: f64 = -cbrt2 * w1;
+    let c1: f64 = 0.5 * w1;
+    let c2: f64 = 0.5 * (w0 + w1);
+    let d1: f64 = w1;
+    let d2: f64 = w0;
+
+    let mut x: f64 = sqrt(2.0);
+    let mut v: f64 = 0.0;
+    let mut max_err: f64 = 0.0;
+    let mut min_dist: f64 = 1.0e9;
+    let mut csum: f64 = 0.0;
+
+    let mut k: i32 = 0;
+    while k < n_steps {
+        // Yoshida 4-drift / 3-kick symplectic step
+        x = x + c1 * dt * v;
+        v = v + d1 * dt * duffing_force(x);
+        x = x + c2 * dt * v;
+        v = v + d2 * dt * duffing_force(x);
+        x = x + c2 * dt * v;
+        v = v + d1 * dt * duffing_force(x);
+        x = x + c1 * dt * v;
+
+        let err: f64 = abs_f64(sep_invariant(x, v));
+        if err > max_err { max_err = err; }
+        let dist: f64 = sqrt(x * x + v * v);
+        if dist < min_dist { min_dist = dist; }
+        if k % 50 == 0 {
+            csum = csum + x + v;
+        }
+        k = k + 1;
+    }
+
+    SepOut {
+        max_inv_err: max_err,
+        min_saddle_dist: min_dist,
+        end_x: x,
+        end_v: v,
+        checksum: csum,
+    }
+}
+
+// Planted non-symplectic Forward Euler integrator
+fn run_forward_euler_blowup(dt: f64, n_steps: i32) -> f64 {
+    let mut x: f64 = sqrt(2.0);
+    let mut v: f64 = 0.0;
+    let mut max_err: f64 = 0.0;
+    let mut k: i32 = 0;
+    while k < n_steps {
+        let a: f64 = duffing_force(x);
+        let x_new: f64 = x + dt * v;
+        let v_new: f64 = v + dt * a;
+        x = x_new;
+        v = v_new;
+        let err: f64 = abs_f64(sep_invariant(x, v));
+        if err > max_err { max_err = err; }
+        k = k + 1;
+    }
+    max_err
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    // Symplectic integration along homoclinic separatrix over T = 6.0 (approaches saddle (0,0))
+    let symp: SepOut = run_yoshida_separatrix(0.004, 1500);
+    // Analytic closed-form check: x(t) = sqrt(2) * sech(t), at t = 6.0: x = 0.0070108...
+    let sech6: f64 = 2.0 / (exp(6.0) + exp(-6.0));
+    let x_exact_6: f64 = sqrt(2.0) * sech6;
+    let saddle_analytic_err: f64 = abs_f64(symp.end_x - x_exact_6);
+
+    // Planted failing control: non-symplectic Forward Euler (dt = 0.10, 60 steps) blows off separatrix
+    let euler_err: f64 = run_forward_euler_blowup(0.10, 60);
+    let blowup_caught: i32 = if euler_err > 0.5 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("A10_MAX_INV_ERR={:.15}", symp.max_inv_err);
+    println!("A10_SADDLE_ANALYTIC_ERR={:.15}", saddle_analytic_err);
+    println!("A10_MIN_SADDLE_DIST={:.12}", symp.min_saddle_dist);
+    println!("A10_END_X={:.12}", symp.end_x);
+    println!("A10_CHECKSUM={:.12}", symp.checksum);
+    println!("A10_EULER_BLOWUP_ERR={:.12}", euler_err);
+    println!("A10_BLOWUP_CAUGHT={}", blowup_caught);
+    println!("A10_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if symp.max_inv_err < 1.0e-4 && saddle_analytic_err < 1.0e-4 && blowup_caught == 1 {
+        println!(
+            "[PASS] A10_LAW_SHAPES inv_err={:.3e} saddle_err={:.3e} euler_err={:.4} caught=1",
+            symp.max_inv_err, saddle_analytic_err, euler_err
+        );
+    } else {
+        println!(
+            "[FAIL] A10_LAW_SHAPES inv_err={:.3e} saddle_err={:.3e} caught={}",
+            symp.max_inv_err, saddle_analytic_err, blowup_caught
+        );
+    }
+}

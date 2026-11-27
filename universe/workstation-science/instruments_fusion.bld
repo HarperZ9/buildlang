@@ -1,0 +1,302 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 50F Kernel 2 (Author Ideas N07 + N08):
+//   1. N07: Stage-9 Measurement-Bus Receipt Emitter with automatic HP-style UNCAL flag
+//      when calibration timestamp expires or drift exceeds tolerance.
+//   2. N08: Multi-Modal Fused Tree-Hollow Radar (GPR) + Acoustic (PiCUS) Inverse-Variance
+//      Estimator reproducing fused MAE <= 0.060 (beating 0.089 single-modality PiCUS baseline)
+//      with planted single-sensor dropout degradation checks.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn clamp_01(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0;
+    }
+    if x > 1.0 {
+        return 1.0;
+    }
+    x
+}
+
+// Deterministic 32-bit FNV-1a mixer (Project Telos measurement-bus/v1) in overflow-safe u64.
+fn fnv1a_32_mix(hash: u64, val: u64) -> u64 {
+    let prime: u64 = 16777619;
+    let mask32: u64 = 4294967295;
+    let mut h: u64 = hash & mask32;
+    let mut k: i32 = 0;
+    let mut v: u64 = val;
+    while k < 8 {
+        let byte: u64 = v & 255;
+        h = ((h ^ byte) * prime) & mask32;
+        v = v >> 8;
+        k = k + 1;
+    }
+    h
+}
+
+struct Stage9Receipt {
+    uncal_flag: i32,
+    reason_code: i32,
+    value_out: f64,
+    sigma_out: f64,
+    receipt_fnv32: u64,
+}
+
+// Stage-9 Measurement-Bus Receipt Emitter (extends project-telos.measurement-bus/v1).
+// reason_code: 0=CAL_OK, 1=UNCAL_EXPIRED, 2=UNCAL_DRIFT, 3=UNCAL_EXPIRED_AND_DRIFT.
+fn emit_stage9_receipt(
+    now_epoch_s: i64,
+    cal_issued_s: i64,
+    cal_expires_s: i64,
+    drift_pct: f64,
+    max_drift_pct: f64,
+    value: f64,
+    sigma: f64,
+) -> Stage9Receipt {
+    let expired: bool = now_epoch_s > cal_expires_s || now_epoch_s < cal_issued_s;
+    let drifted: bool = abs_f64(drift_pct) > max_drift_pct;
+    let mut reason: i32 = 0;
+    if expired && drifted {
+        reason = 3;
+    } else if expired {
+        reason = 1;
+    } else if drifted {
+        reason = 2;
+    }
+    let uncal: i32 = if reason == 0 { 0 } else { 1 };
+    let val_scaled: u64 = (floor(value * 1000000.0 + 0.5) as i64) as u64;
+    let sig_scaled: u64 = (floor(sigma * 1000000.0 + 0.5) as i64) as u64;
+
+    let mut h: u64 = 2166136261;
+    h = fnv1a_32_mix(h, now_epoch_s as u64);
+    h = fnv1a_32_mix(h, cal_expires_s as u64);
+    h = fnv1a_32_mix(h, uncal as u64);
+    h = fnv1a_32_mix(h, reason as u64);
+    h = fnv1a_32_mix(h, val_scaled);
+    h = fnv1a_32_mix(h, sig_scaled);
+
+    Stage9Receipt {
+        uncal_flag: uncal,
+        reason_code: reason,
+        value_out: value,
+        sigma_out: sigma,
+        receipt_fnv32: h,
+    }
+}
+
+// Deterministic Box-Muller pair from overflow-safe Park-Miller MINSTD LCG (identical in Python).
+struct LcgState {
+    s: i64,
+}
+
+fn lcg_next_u01(st: &mut LcgState) -> f64 {
+    let a: i64 = 48271;
+    let m: i64 = 2147483647;
+    st.s = (st.s * a) % m;
+    (st.s as f64) / (m as f64)
+}
+
+fn lcg_normal(st: &mut LcgState) -> f64 {
+    let pi: f64 = 3.14159265358979323846;
+    let u1: f64 = lcg_next_u01(st);
+    let u2: f64 = lcg_next_u01(st);
+    sqrt(-2.0 * ln(u1)) * cos(2.0 * pi * u2)
+}
+
+struct FusionEstimate {
+    r_hat: f64,
+    sigma_hat: f64,
+    degraded: i32,
+}
+
+// Multi-modal inverse-variance fusion for tree-hollow radar (GPR) + acoustic (PiCUS).
+fn fuse_tree_hollow(
+    y_acoustic: f64,
+    sigma_acoustic: f64,
+    acoustic_ok: i32,
+    y_radar: f64,
+    sigma_radar: f64,
+    radar_ok: i32,
+) -> FusionEstimate {
+    if acoustic_ok == 1 && radar_ok == 1 {
+        let w_ac: f64 = 1.0 / (sigma_acoustic * sigma_acoustic);
+        let w_rad: f64 = 1.0 / (sigma_radar * sigma_radar);
+        let w_sum: f64 = w_ac + w_rad;
+        let r_hat: f64 = clamp_01((w_ac * y_acoustic + w_rad * y_radar) / w_sum);
+        let sig_hat: f64 = 1.0 / sqrt(w_sum);
+        return FusionEstimate { r_hat: r_hat, sigma_hat: sig_hat, degraded: 0 };
+    }
+    if acoustic_ok == 1 {
+        return FusionEstimate { r_hat: clamp_01(y_acoustic), sigma_hat: sigma_acoustic, degraded: 1 };
+    }
+    if radar_ok == 1 {
+        return FusionEstimate { r_hat: clamp_01(y_radar), sigma_hat: sigma_radar, degraded: 1 };
+    }
+    FusionEstimate { r_hat: 0.5, sigma_hat: 1.0, degraded: 2 }
+}
+
+struct TrunkCohortMetrics {
+    mae_acoustic: f64,
+    mae_radar: f64,
+    mae_fused: f64,
+    mean_sigma_fused: f64,
+    degraded_count: i32,
+}
+
+// Evaluate M=256 synthetic tree trunks across acoustic-only, radar-only, and fused modes.
+fn run_tree_hollow_cohort(acoustic_ok: i32, radar_ok: i32) -> TrunkCohortMetrics {
+    let mut rng: LcgState = LcgState { s: 20261127 };
+    let n_trunks: i32 = 256;
+    let mut sum_err_ac: f64 = 0.0;
+    let mut sum_err_rad: f64 = 0.0;
+    let mut sum_err_fused: f64 = 0.0;
+    let mut sum_sig_fused: f64 = 0.0;
+    let mut deg_cnt: i32 = 0;
+
+    let mut i: i32 = 0;
+    while i < n_trunks {
+        let frac: f64 = (i as f64) / (n_trunks as f64);
+        let r_true: f64 = 0.15 + 0.55 * frac;
+        // Acoustic PiCUS noise sigma ~ 0.112 -> single-modality MAE ~ 0.089
+        let wet_bark: f64 = if (i & 3) == 0 { 1.0 } else { 0.0 };
+        let sig_ac: f64 = 0.112;
+        // Radar GPR noise sigma ~ 0.082 dry / 0.125 wet sapwood
+        let sig_rad: f64 = 0.082 + 0.043 * wet_bark;
+
+        let y_ac: f64 = r_true + sig_ac * lcg_normal(&mut rng);
+        let y_rad: f64 = r_true + sig_rad * lcg_normal(&mut rng);
+
+        let est: FusionEstimate = fuse_tree_hollow(y_ac, sig_ac, acoustic_ok, y_rad, sig_rad, radar_ok);
+        sum_err_ac = sum_err_ac + abs_f64(clamp_01(y_ac) - r_true);
+        sum_err_rad = sum_err_rad + abs_f64(clamp_01(y_rad) - r_true);
+        sum_err_fused = sum_err_fused + abs_f64(est.r_hat - r_true);
+        sum_sig_fused = sum_sig_fused + est.sigma_hat;
+        if est.degraded != 0 {
+            deg_cnt = deg_cnt + 1;
+        }
+        i = i + 1;
+    }
+
+    let nf: f64 = n_trunks as f64;
+    TrunkCohortMetrics {
+        mae_acoustic: sum_err_ac / nf,
+        mae_radar: sum_err_rad / nf,
+        mae_fused: sum_err_fused / nf,
+        mean_sigma_fused: sum_sig_fused / nf,
+        degraded_count: deg_cnt,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // 1. N07 Stage-9 Measurement-Bus Receipt checks (valid cal vs planted expired & drift UNCAL)
+    let cal_issued: i64 = 1795000000;
+    let cal_expires: i64 = 1797592000;
+    let r_ok: Stage9Receipt = emit_stage9_receipt(
+        1795700000, cal_issued, cal_expires, 0.12, 0.50, 0.4215, 0.054,
+    );
+    let r_exp: Stage9Receipt = emit_stage9_receipt(
+        1797592001, cal_issued, cal_expires, 0.12, 0.50, 0.4215, 0.054,
+    );
+    let r_drift: Stage9Receipt = emit_stage9_receipt(
+        1795700000, cal_issued, cal_expires, 1.25, 0.50, 0.4215, 0.054,
+    );
+
+    if r_ok.uncal_flag == 0 && r_ok.reason_code == 0 {
+        println!(
+            "[PASS] n07_cal_ok uncal={} reason={} fnv32={}",
+            r_ok.uncal_flag, r_ok.reason_code, r_ok.receipt_fnv32
+        );
+    } else {
+        println!("[FAIL] n07_cal_ok uncal={} reason={}", r_ok.uncal_flag, r_ok.reason_code);
+        failures = failures + 1;
+    }
+
+    if r_exp.uncal_flag == 1 && r_exp.reason_code == 1 && r_exp.receipt_fnv32 != r_ok.receipt_fnv32 {
+        println!(
+            "[PASS] n07_planted_expired_uncal uncal={} reason={} fnv32={}",
+            r_exp.uncal_flag, r_exp.reason_code, r_exp.receipt_fnv32
+        );
+    } else {
+        println!("[FAIL] n07_planted_expired_uncal uncal={} reason={}", r_exp.uncal_flag, r_exp.reason_code);
+        failures = failures + 1;
+    }
+
+    if r_drift.uncal_flag == 1 && r_drift.reason_code == 2 {
+        println!(
+            "[PASS] n07_planted_drift_uncal uncal={} reason={} fnv32={}",
+            r_drift.uncal_flag, r_drift.reason_code, r_drift.receipt_fnv32
+        );
+    } else {
+        println!("[FAIL] n07_planted_drift_uncal uncal={} reason={}", r_drift.uncal_flag, r_drift.reason_code);
+        failures = failures + 1;
+    }
+
+    // 2. N08 Multi-modal fused tree-hollow radar + acoustic cohort
+    let fused: TrunkCohortMetrics = run_tree_hollow_cohort(1, 1);
+    if fused.mae_fused <= 0.060 && fused.mae_fused < fused.mae_acoustic && fused.mae_fused < fused.mae_radar {
+        println!(
+            "[PASS] n08_fused_cohort mae_fused={:.12} mae_ac={:.12} mae_rad={:.12} sig_fused={:.12}",
+            fused.mae_fused, fused.mae_acoustic, fused.mae_radar, fused.mean_sigma_fused
+        );
+    } else {
+        println!(
+            "[FAIL] n08_fused_cohort mae_fused={:.6} mae_ac={:.6} mae_rad={:.6}",
+            fused.mae_fused, fused.mae_acoustic, fused.mae_radar
+        );
+        failures = failures + 1;
+    }
+
+    // 3. Planted single-sensor dropout degradation controls
+    let drop_rad: TrunkCohortMetrics = run_tree_hollow_cohort(1, 0);
+    let drop_ac: TrunkCohortMetrics = run_tree_hollow_cohort(0, 1);
+    if drop_rad.degraded_count == 256 && drop_rad.mae_fused > 0.075 && drop_rad.mae_fused > fused.mae_fused {
+        println!(
+            "[PASS] n08_planted_radar_dropout mae={:.12} degraded={}",
+            drop_rad.mae_fused, drop_rad.degraded_count
+        );
+    } else {
+        println!("[FAIL] n08_planted_radar_dropout mae={:.6}", drop_rad.mae_fused);
+        failures = failures + 1;
+    }
+
+    if drop_ac.degraded_count == 256 && drop_ac.mae_fused > 0.065 && drop_ac.mae_fused > fused.mae_fused {
+        println!(
+            "[PASS] n08_planted_acoustic_dropout mae={:.12} degraded={}",
+            drop_ac.mae_fused, drop_ac.degraded_count
+        );
+    } else {
+        println!("[FAIL] n08_planted_acoustic_dropout mae={:.6}", drop_ac.mae_fused);
+        failures = failures + 1;
+    }
+
+    // 4. Native throughput benchmark: 200,000 fused estimates + Stage-9 UNCAL receipts
+    let t0: i64 = clock_ns();
+    let mut h_xor: u64 = 0;
+    let mut i: i64 = 0;
+    while i < 200000 {
+        let off: f64 = ((i & 63) as f64) * 0.002;
+        let fe: FusionEstimate = fuse_tree_hollow(0.40 + off, 0.112, 1, 0.41 + off, 0.082, 1);
+        let rc: Stage9Receipt = emit_stage9_receipt(
+            1795700000 + i, cal_issued, cal_expires, 0.10, 0.50, fe.r_hat, fe.sigma_hat,
+        );
+        h_xor = h_xor ^ rc.receipt_fnv32;
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] instruments_fusion evals=200000 elapsed_ns={} h_xor={}", t1 - t0, h_xor);
+
+    if failures == 0 {
+        println!("[PASS] wave50f_instruments_fusion summary failures=0");
+    } else {
+        println!("[FAIL] wave50f_instruments_fusion summary failures={}", failures);
+    }
+}

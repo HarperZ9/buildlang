@@ -1,0 +1,297 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 50F Kernel 1 (Author Idea D9):
+//   Dimensionally-Checked 4-Stage Multi-Domain Transducer Chain:
+//   pressure [Pa] -> piezo voltage [V] -> 16-bit ADC [code] -> calibrated FFT amplitude [Pa].
+//   Verifies coherent 16-bit SQNR matches 6.02*N + 1.76 dB within 0.2 dB and rejects
+//   planted unit-incompatible stage pairs fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x;
+    }
+    x
+}
+
+fn log10_f64(x: f64) -> f64 {
+    let ln10: f64 = 2.302585092994045684017991454684364208;
+    ln(x) / ln10
+}
+
+// SI base exponents (M, L, T, I) plus discrete quantization domain (code).
+struct UnitDim {
+    m_exp: i32,
+    l_exp: i32,
+    t_exp: i32,
+    i_exp: i32,
+    code_exp: i32,
+}
+
+fn dim_pa() -> UnitDim {
+    // Pa = kg * m^-1 * s^-2
+    UnitDim { m_exp: 1, l_exp: -1, t_exp: -2, i_exp: 0, code_exp: 0 }
+}
+
+fn dim_volt() -> UnitDim {
+    // V = kg * m^2 * s^-3 * A^-1
+    UnitDim { m_exp: 1, l_exp: 2, t_exp: -3, i_exp: -1, code_exp: 0 }
+}
+
+fn dim_code() -> UnitDim {
+    UnitDim { m_exp: 0, l_exp: 0, t_exp: 0, i_exp: 0, code_exp: 1 }
+}
+
+fn dim_ampere() -> UnitDim {
+    UnitDim { m_exp: 0, l_exp: 0, t_exp: 0, i_exp: 1, code_exp: 0 }
+}
+
+fn dim_v_per_pa() -> UnitDim {
+    // V / Pa = m^3 * s^-1 * A^-1
+    UnitDim { m_exp: 0, l_exp: 3, t_exp: -1, i_exp: -1, code_exp: 0 }
+}
+
+fn dim_code_per_v() -> UnitDim {
+    UnitDim { m_exp: -1, l_exp: -2, t_exp: 3, i_exp: 1, code_exp: 1 }
+}
+
+fn dim_pa_per_code() -> UnitDim {
+    UnitDim { m_exp: 1, l_exp: -1, t_exp: -2, i_exp: 0, code_exp: -1 }
+}
+
+fn dim_unity() -> UnitDim {
+    UnitDim { m_exp: 0, l_exp: 0, t_exp: 0, i_exp: 0, code_exp: 0 }
+}
+
+fn dims_equal(a: &UnitDim, b: &UnitDim) -> bool {
+    a.m_exp == b.m_exp
+        && a.l_exp == b.l_exp
+        && a.t_exp == b.t_exp
+        && a.i_exp == b.i_exp
+        && a.code_exp == b.code_exp
+}
+
+fn dims_mul(a: &UnitDim, b: &UnitDim) -> UnitDim {
+    UnitDim {
+        m_exp: a.m_exp + b.m_exp,
+        l_exp: a.l_exp + b.l_exp,
+        t_exp: a.t_exp + b.t_exp,
+        i_exp: a.i_exp + b.i_exp,
+        code_exp: a.code_exp + b.code_exp,
+    }
+}
+
+struct TransducerStage {
+    in_dim: UnitDim,
+    gain_dim: UnitDim,
+    out_dim: UnitDim,
+}
+
+fn make_stage(in_d: UnitDim, gain_d: UnitDim, out_d: UnitDim) -> TransducerStage {
+    TransducerStage { in_dim: in_d, gain_dim: gain_d, out_dim: out_d }
+}
+
+fn stage_self_consistent(s: &TransducerStage) -> bool {
+    let expected: UnitDim = dims_mul(&s.in_dim, &s.gain_dim);
+    dims_equal(&expected, &s.out_dim)
+}
+
+// Fail-closed composition check across 4 transducer stages.
+// Returns 0 on full dimensional agreement, or stage error code 1..4 on mismatch.
+fn validate_4_stage_chain(
+    src_dim: &UnitDim,
+    s1: &TransducerStage,
+    s2: &TransducerStage,
+    s3: &TransducerStage,
+    s4: &TransducerStage,
+) -> i32 {
+    if !dims_equal(src_dim, &s1.in_dim) || !stage_self_consistent(s1) {
+        return 1;
+    }
+    if !dims_equal(&s1.out_dim, &s2.in_dim) || !stage_self_consistent(s2) {
+        return 2;
+    }
+    if !dims_equal(&s2.out_dim, &s3.in_dim) || !stage_self_consistent(s3) {
+        return 3;
+    }
+    if !dims_equal(&s3.out_dim, &s4.in_dim) || !stage_self_consistent(s4) {
+        return 4;
+    }
+    0
+}
+
+fn quantize_bipolar_adc(v_in: f64, v_ref: f64, bits: i32) -> f64 {
+    let mut levels: f64 = 1.0;
+    let mut k: i32 = 0;
+    while k < bits {
+        levels = levels * 2.0;
+        k = k + 1;
+    }
+    let half_levels: f64 = levels * 0.5;
+    let lsb: f64 = (2.0 * v_ref) / levels;
+    let mut q: f64 = floor(v_in / lsb + 0.5);
+    let max_code: f64 = half_levels - 1.0;
+    let min_code: f64 = -half_levels;
+    if q > max_code {
+        q = max_code;
+    }
+    if q < min_code {
+        q = min_code;
+    }
+    q
+}
+
+struct ChainMetrics {
+    amp_in_pa: f64,
+    amp_fft_pa: f64,
+    amp_err_pa: f64,
+    sqnr_meas_db: f64,
+    sqnr_ideal_db: f64,
+    sqnr_diff_db: f64,
+}
+
+// Run coherent 4-stage pressure -> piezo voltage -> N-bit ADC -> calibrated FFT [Pa].
+fn run_4_stage_signal(n_samples: i32, k_bin: i32, bits: i32) -> ChainMetrics {
+    let pi: f64 = 3.14159265358979323846;
+    let s_piezo_v_per_pa: f64 = 0.05;
+    let v_ref: f64 = 1.0;
+    let mut levels: f64 = 1.0;
+    let mut b: i32 = 0;
+    while b < bits {
+        levels = levels * 2.0;
+        b = b + 1;
+    }
+    let lsb_v: f64 = (2.0 * v_ref) / levels;
+    let v_peak: f64 = (levels * 0.5 - 1.0) * lsb_v;
+    let p_peak: f64 = v_peak / s_piezo_v_per_pa;
+    let inv_gain_pa_per_code: f64 = lsb_v / s_piezo_v_per_pa;
+
+    let nf: f64 = n_samples as f64;
+    let kf: f64 = k_bin as f64;
+    let mut re: f64 = 0.0;
+    let mut im: f64 = 0.0;
+    let mut sig_pow_sum: f64 = 0.0;
+    let mut err_pow_sum: f64 = 0.0;
+
+    let mut n: i32 = 0;
+    while n < n_samples {
+        let phase: f64 = (2.0 * pi * kf * (n as f64)) / nf;
+        // Stage 1: acoustic pressure [Pa] -> piezo voltage [V]
+        let p_true: f64 = p_peak * sin(phase);
+        let v_piezo: f64 = p_true * s_piezo_v_per_pa;
+        // Stage 2: voltage [V] -> quantized ADC [code]
+        let code: f64 = quantize_bipolar_adc(v_piezo, v_ref, bits);
+        // Stage 3: ADC [code] -> calibrated pressure sample [Pa]
+        let p_cal: f64 = code * inv_gain_pa_per_code;
+        // Stage 4: coherent DFT bin k_bin -> calibrated spectral amplitude [Pa]
+        re = re + p_cal * cos(phase);
+        im = im - p_cal * sin(phase);
+
+        let err: f64 = p_cal - p_true;
+        sig_pow_sum = sig_pow_sum + p_true * p_true;
+        err_pow_sum = err_pow_sum + err * err;
+        n = n + 1;
+    }
+
+    let amp_fft_pa: f64 = (2.0 / nf) * sqrt(re * re + im * im);
+    let amp_err_pa: f64 = abs_f64(amp_fft_pa - p_peak);
+    let sqnr_meas_db: f64 = 10.0 * log10_f64(sig_pow_sum / err_pow_sum);
+    let sqnr_ideal_db: f64 = 6.02 * (bits as f64) + 1.76;
+    let sqnr_diff_db: f64 = abs_f64(sqnr_meas_db - sqnr_ideal_db);
+
+    ChainMetrics {
+        amp_in_pa: p_peak,
+        amp_fft_pa: amp_fft_pa,
+        amp_err_pa: amp_err_pa,
+        sqnr_meas_db: sqnr_meas_db,
+        sqnr_ideal_db: sqnr_ideal_db,
+        sqnr_diff_db: sqnr_diff_db,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let mut failures: i32 = 0;
+
+    // Valid 4-stage chain: [Pa] -> [V] -> [code] -> [Pa] -> FFT [Pa]
+    let st_piezo: TransducerStage = make_stage(dim_pa(), dim_v_per_pa(), dim_volt());
+    let st_adc: TransducerStage = make_stage(dim_volt(), dim_code_per_v(), dim_code());
+    let st_cal: TransducerStage = make_stage(dim_code(), dim_pa_per_code(), dim_pa());
+    let st_fft: TransducerStage = make_stage(dim_pa(), dim_unity(), dim_pa());
+    let pa_src: UnitDim = dim_pa();
+
+    let rc_ok: i32 = validate_4_stage_chain(&pa_src, &st_piezo, &st_adc, &st_cal, &st_fft);
+    if rc_ok == 0 {
+        println!("[PASS] d9_chain_valid rc=0 stages=4");
+    } else {
+        println!("[FAIL] d9_chain_valid rc={}", rc_ok);
+        failures = failures + 1;
+    }
+
+    // Coherent 16-bit ADC SQNR check (N=8192, prime bin k=197)
+    let m16: ChainMetrics = run_4_stage_signal(8192, 197, 16);
+    if m16.sqnr_diff_db <= 0.2 && m16.amp_err_pa < 0.001 {
+        println!(
+            "[PASS] d9_16bit_sqnr amp_in={:.12} amp_fft={:.12} amp_err={:.12} sqnr_db={:.12} diff_db={:.12}",
+            m16.amp_in_pa, m16.amp_fft_pa, m16.amp_err_pa, m16.sqnr_meas_db, m16.sqnr_diff_db
+        );
+    } else {
+        println!(
+            "[FAIL] d9_16bit_sqnr sqnr_db={:.6} diff_db={:.6} amp_err={:.6}",
+            m16.sqnr_meas_db, m16.sqnr_diff_db, m16.amp_err_pa
+        );
+        failures = failures + 1;
+    }
+
+    // Planted Control 1: incompatible unit pair ([Pa] output wired into ADC expecting [V])
+    let bad_pass_pa: TransducerStage = make_stage(dim_pa(), dim_unity(), dim_pa());
+    let rc_bad_stage2: i32 = validate_4_stage_chain(&pa_src, &bad_pass_pa, &st_adc, &st_cal, &st_fft);
+    if rc_bad_stage2 == 2 {
+        println!("[PASS] planted_unit_mismatch_pa_to_adc rejected_stage={}", rc_bad_stage2);
+    } else {
+        println!("[FAIL] planted_unit_mismatch_pa_to_adc rc={}", rc_bad_stage2);
+        failures = failures + 1;
+    }
+
+    // Planted Control 2: incompatible source domain ([A] current wired into [Pa] piezo input)
+    let amp_src: UnitDim = dim_ampere();
+    let rc_bad_src: i32 = validate_4_stage_chain(&amp_src, &st_piezo, &st_adc, &st_cal, &st_fft);
+    if rc_bad_src == 1 {
+        println!("[PASS] planted_unit_mismatch_amp_to_pa rejected_stage={}", rc_bad_src);
+    } else {
+        println!("[FAIL] planted_unit_mismatch_amp_to_pa rc={}", rc_bad_src);
+        failures = failures + 1;
+    }
+
+    // Planted Control 3: 8-bit ADC degrades SQNR by ~48 dB (must fail 16-bit spec)
+    let m8: ChainMetrics = run_4_stage_signal(8192, 197, 8);
+    let drop_db: f64 = m16.sqnr_meas_db - m8.sqnr_meas_db;
+    if drop_db > 47.0 && m8.sqnr_meas_db < 51.0 {
+        println!(
+            "[PASS] planted_8bit_sqnr_drop sqnr8_db={:.12} drop_db={:.12}",
+            m8.sqnr_meas_db, drop_db
+        );
+    } else {
+        println!("[FAIL] planted_8bit_sqnr_drop sqnr8_db={:.6}", m8.sqnr_meas_db);
+        failures = failures + 1;
+    }
+
+    // Native throughput benchmark: 200,000 4-stage dimensional checks + scalar chain evaluations
+    let t0: i64 = clock_ns();
+    let mut acc: f64 = 0.0;
+    let mut i: i64 = 0;
+    while i < 200000 {
+        let rc: i32 = validate_4_stage_chain(&pa_src, &st_piezo, &st_adc, &st_cal, &st_fft);
+        let p_in: f64 = 10.0 + ((i & 63) as f64) * 0.1;
+        let q: f64 = quantize_bipolar_adc(p_in * 0.05, 1.0, 16);
+        acc = acc + q + (rc as f64);
+        i = i + 1;
+    }
+    let t1: i64 = clock_ns();
+    println!("[BENCH] transducers evals=200000 elapsed_ns={} acc={:.3}", t1 - t0, acc);
+
+    if failures == 0 {
+        println!("[PASS] wave50f_transducers summary failures=0");
+    } else {
+        println!("[FAIL] wave50f_transducers summary failures={}", failures);
+    }
+}
