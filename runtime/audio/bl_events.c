@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: FSL-1.1-MIT
+/* SPDX-License-Identifier: MIT
  * Part of bl_audio.c (included from it, not compiled alone): events from another process through a lock-free ring. */
 /* ---- Events from another process: one line per event on standard input -------------------------------
  * A reader thread parses lines "t a b c d e" (six numbers) into a single-producer single-consumer ring; the

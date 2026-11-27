@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-Build UI is licensed under FSL-1.1-MIT. That license does not relicense its
+Build UI is licensed under MIT. That license does not relicense its
 dependencies.
 
 - QtPy 2.4.3 is available under the MIT License.

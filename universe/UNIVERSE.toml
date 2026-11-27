@@ -1,5 +1,5 @@
 # Build Universe Manifest v2.0.0
-# Copyright (c) 2024-2026 Zain Dana Harper. FSL-1.1-MIT (see LICENSE).
+# Copyright (c) 2024-2026 Zain Dana Harper. MIT (see LICENSE).
 
 [universe]
 name = "BUILD-UNIVERSE"

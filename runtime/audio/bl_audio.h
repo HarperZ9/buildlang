@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: FSL-1.1-MIT
+/* SPDX-License-Identifier: MIT
  * bl_audio: a small real-time audio output for BuildLang programs, with a deadline counter.
  *
  * Devices: "wasapi" (Windows, shared mode, event driven, pro-audio thread class) and "null" (any OS: a

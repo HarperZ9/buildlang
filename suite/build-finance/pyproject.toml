@@ -7,7 +7,7 @@ name = "build-finance"
 version = "1.1.0"
 description = "Algorithmic trading toolkit for backtesting, technical indicators, portfolio optimization, and paper/live broker execution"
 readme = "README.md"
-license = { text = "FSL-1.1-MIT" }
+license = { text = "MIT" }
 authors = [
     { name = "Zain Dana Harper" },
 ]

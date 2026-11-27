@@ -26,7 +26,8 @@
         "wellKnown": "https://raw.githubusercontent.com/HarperZ9/buildlang/main/.well-known/funding-manifest-urls"
       },
       "licenses": [
-        "spdx:AGPL-3.0-only"
+        "spdx:AGPL-3.0-only",
+        "spdx:MIT"
       ],
       "tags": [
         "programming",

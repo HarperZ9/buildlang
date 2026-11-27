@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: FSL-1.1-MIT
+/* SPDX-License-Identifier: MIT
  * Part of bl_audio.c (included from it, not compiled alone): the Windows device, WASAPI. */
 /* Initialise shared mode at the requested period through IAudioClient3 (Windows 10 and later), rounded up to
  * the engine's fundamental period and kept within its range; returns the period in frames, or 0 to fall back. */

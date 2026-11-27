@@ -5,7 +5,7 @@ Usage: python -I reference.py PATH/TO/canonical_record.py dumps FILE.json
        python -I reference.py PATH/TO/canonical_record.py array FILE.json
 
 PATH/TO/canonical_record.py is Flywheel's harness/canonical_record.py
-(FSL-1.1-MIT). The module's own CLI writes refusals to stderr; this driver and
+(MIT). The module's own CLI writes refusals to stderr; this driver and
 the BuildLang program write the same line to stdout so the goldens capture it.
 `array` reads {"dtype": str, "shape": [int, ...], "values": [...]} and calls
 array_sha256(dtype, shape, values). The golden files in this folder were

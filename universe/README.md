@@ -17,7 +17,7 @@ bash universe/check.sh compiler/target/release/buildc
 
 The `organism` job runs every component in [tools/components.toml](tools/components.toml) on Windows and skips none. The 16 library modules registered for a C build all fail it today; each is marked `xfail` and the job fails when one starts to pass. Issue #290 tracks both lists.
 
-Licence: this folder keeps the licence it was published under, FSL-1.1-MIT ([LICENSE](LICENSE)). The rest of the repository is AGPL-3.0-only.
+Licence: this folder is licensed under the MIT License ([LICENSE](LICENSE)). The compiler and toolchain in this repository are AGPL-3.0-only.
 
 An alpha compiler ecosystem, mixed-language by design. The pieces are not "all written in BuildLang":
 
@@ -91,7 +91,7 @@ Build Universe is the canonical successor to the earlier `quanta-universe` repo 
 
 ## License
 
-Fair-source, not open source. The source is published so you can read it, run it, and build on it; commercial use that competes with the project is reserved to the Licensor. See [LICENSE](LICENSE) (FSL-1.1-MIT).
+OSI-approved MIT License (relicensed from FSL-1.1-MIT on 2026-11-26). See [LICENSE](LICENSE).
 
 ---
 

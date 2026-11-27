@@ -88,7 +88,7 @@ forecast = model.predict(horizon=30)
 
 ## License
 
-Build Oracle is released under the FSL-1.1-MIT
+Build Oracle is released under the MIT License
 (see [LICENSE](LICENSE)). The source is available: you may read, run, modify,
 and build on it for any purpose other than a competing commercial use.
 Commercial use that competes with the project is reserved to the Licensor and

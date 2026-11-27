@@ -1675,7 +1675,7 @@ impl Universe {
              ║  BUILD-UNIVERSE v{}                                      ║\n\
              ║  \"The Complete Physics-Inspired Software Universe\"          ║\n\
              ╠═══════════════════════════════════════════════════════════════╣\n\
-             ║  Modules: {}  │  FSL-1.1-MIT                                 ║\n\
+             ║  Modules: {}  │  MIT                                         ║\n\
              ║  Health: {:?} ({}/{} healthy)                            ║\n\
              ║  Uptime: {}ms                                               ║\n\
              ╚═══════════════════════════════════════════════════════════════╝",

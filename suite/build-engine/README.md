@@ -195,7 +195,7 @@ systems, and local-first safety boundaries.
 
 Copyright (c) 2022-2026 Zain Dana Harper. All rights reserved.
 
-Build Engine is released under the FSL-1.1-MIT.
+Build Engine is released under the MIT License.
 The source is available: you may read, run, copy, modify, and redistribute it for
 any purpose other than a Competing Use. Commercial use that competes with the
 project is reserved to the Licensor and requires a separate commercial license.

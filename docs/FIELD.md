@@ -56,4 +56,4 @@ Both are valid programs and they give different answers on some inputs, so a fie
 
 ## Licence
 
-The superframe package is FSL-1.1-MIT and this repo is AGPL-3.0-only. BuildLang takes this contract and writes its own code, with no code copied across that line.
+The superframe package is MIT and this repo's compiler is AGPL-3.0-only. BuildLang takes this contract and writes its own code, with no code copied across that line.
