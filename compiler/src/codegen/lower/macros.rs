@@ -2866,6 +2866,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 _ => None,
             };
+        let expected_collect_string = matches!(
+            (&chain.terminal, &self.expected_type),
+            (IterTerminal::Collect, Some(MirType::Struct(n))) if n.as_ref() == "BuildString"
+        );
         // 1. Lower the source: a vector, or a range `a..b` / `a..=b`.
         let (elem_ty, source, mut len_local) = match Self::range_source_bounds(chain.source) {
             Some((start, end, inclusive)) => self.lower_range_source(start, end, inclusive)?,
@@ -2989,7 +2993,9 @@ impl<'ctx> MirLowerer<'ctx> {
         };
         let collect_as_string = matches!(&chain.terminal, IterTerminal::Collect)
             && matches!(output_elem_ty, MirType::Int(IntSize::I32, false))
-            && (matches!(&self.expected_type, Some(MirType::Struct(n)) if n.as_ref() == "BuildString")
+            && expected_collect.is_none()
+            && collect_as_map.is_none()
+            && (expected_collect_string
                 || self.current_fn.as_ref().is_some_and(
                     |b| matches!(b.return_type(), MirType::Struct(n) if n.as_ref() == "BuildString"),
                 ));

@@ -445,6 +445,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut backend = backend::wgsl::WgslBackend::new();
                 backend.generate(mir)?
             }
+            Target::Verilog => {
+                let mut backend = backend::verilog::VerilogBackend::new();
+                backend.generate(mir)?
+            }
             Target::Rust => {
                 let mut backend = backend::rust::RustBackend::new();
                 backend.generate(mir)?
@@ -545,6 +549,7 @@ impl GeneratedCode {
             | OutputFormat::Glsl
             | OutputFormat::Msl
             | OutputFormat::Wgsl
+            | OutputFormat::Verilog
             | OutputFormat::RustSource => String::from_utf8(self.data.clone()).ok(),
             _ => None,
         }
@@ -578,6 +583,8 @@ pub enum OutputFormat {
     Msl,
     /// WebGPU Shading Language (WGSL) source code.
     Wgsl,
+    /// Synthesizable Verilog-2001 RTL source code.
+    Verilog,
     /// Rust source code.
     RustSource,
 }

@@ -6699,8 +6699,24 @@ impl<'ctx> TypeInfer<'ctx> {
             // =================================================================
             // ITERATOR METHODS
             // =================================================================
+            "as_bytes" if args.is_empty() => {
+                let inner = match &receiver_ty.kind {
+                    TyKind::Ref(_, _, inner) => self.apply(inner),
+                    _ => receiver_ty.clone(),
+                };
+                let is_str_like = matches!(&inner.kind, TyKind::Str)
+                    || matches!(&inner.kind, TyKind::Adt(def_id, _) if self.ctx.lookup_type(*def_id).is_some_and(|td| td.name.as_ref() == "String"));
+                if is_str_like {
+                    return Ty::reference(
+                        None,
+                        Mutability::Immutable,
+                        Ty::slice(Ty::int(IntTy::U8)),
+                    );
+                }
+                return Ty::fresh_var();
+            }
             "iter" | "iter_mut" | "into_iter" | "values" | "values_mut" | "keys" | "into_keys"
-            | "into_values" | "chars" | "bytes" | "as_bytes" => {
+            | "into_values" | "chars" | "bytes" => {
                 return Ty::fresh_var();
             }
             "map" | "filter" | "filter_map" | "flat_map" | "and_then" | "or_else" | "map_err"
