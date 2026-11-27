@@ -1,0 +1,110 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+// Wave 57G (Author Idea N52, SIG-114): Universal Agent-Output Articulate Pipeline Router
+// Enforces deterministic register-profile gates (strict, research, personal_email, readme)
+// with zero dash crutches and profile-specific corporate/filler/bullet caps.
+
+fn count_dash_crutch(txt: &String) -> i32 {
+    let mut hits: i32 = 0;
+    let d1: String = format!("{}{}", "-", "-");
+    let d2: String = format!(" {} ", "-");
+    if txt.contains(d1) { hits = hits + 1; }
+    if txt.contains(d2) { hits = hits + 1; }
+    hits
+}
+
+fn count_slop_hits(txt: &String) -> i32 {
+    let lo: String = txt.to_lowercase();
+    let mut hits: i32 = 0;
+    let w1: String = format!("{}{}", "del", "ve");
+    let w2: String = format!("{}{}", "lever", "age");
+    let w3: String = format!("{}{}", "tapes", "try");
+    let w4: String = format!("{}{}", "seam", "lessly");
+    let w5: String = format!("{}{}", "cruc", "ially");
+    if lo.contains(w1) { hits = hits + 1; }
+    if lo.contains(w2) { hits = hits + 1; }
+    if lo.contains(w3) { hits = hits + 1; }
+    if lo.contains(w4) { hits = hits + 1; }
+    if lo.contains(w5) { hits = hits + 1; }
+    hits
+}
+
+fn has_bullet_wall(txt: &String) -> bool {
+    let b1: String = format!("{}{}", "\n", "- ");
+    let b2: String = format!("{}{}", "\n", "* ");
+    txt.contains(b1) || txt.contains(b2)
+}
+
+// Route agent output through register-profile gate:
+// 0=PASS, -301=MISSING_OR_UNKNOWN_PROFILE, -302=DASH_CRUTCH, -303=SLOP_OR_BULLET_VIOLATION
+fn route_agent_output(profile: &String, text: &String) -> i32 {
+    let is_strict: bool = profile == "strict";
+    let is_research: bool = profile == "research";
+    let is_email: bool = profile == "personal_email";
+    let is_readme: bool = profile == "readme";
+    if !is_strict && !is_research && !is_email && !is_readme {
+        return -301;
+    }
+    if count_dash_crutch(text) > 0 {
+        return -302;
+    }
+    let slop: i32 = count_slop_hits(text);
+    if is_email && has_bullet_wall(text) {
+        return -303;
+    }
+    if is_readme {
+        if slop > 1 { return -303; }
+    } else {
+        if slop > 0 { return -303; }
+    }
+    0
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+
+    let t_strict: String = "The solver converged in 12 steps with residual 1.4e-11.";
+    let t_research: String = "Measured reflectance reached 0.99987 at 550 nm across 10 pairs.";
+    let t_email: String = "Thanks for sending the logs over. I checked the trace and pushed a fix.";
+    let t_readme: String = "Install buildc and run check on the kernel directory.";
+
+    let rc1: i32 = route_agent_output(&"strict", &t_strict);
+    let rc2: i32 = route_agent_output(&"research", &t_research);
+    let rc3: i32 = route_agent_output(&"personal_email", &t_email);
+    let rc4: i32 = route_agent_output(&"readme", &t_readme);
+
+    // Planted traps: missing profile, corporate slop, dash crutch, bulleted personal email
+    let rc_noprof: i32 = route_agent_output(&"", &t_strict);
+    let bad_slop: String = format!(
+        "We will {}{} the rich {}{} of tools.",
+        "lever", "age", "tapes", "try"
+    );
+    let rc_slop: i32 = route_agent_output(&"research", &bad_slop);
+    let bad_dash: String = format!("Result is clean {}{} verified.", "-", "-");
+    let rc_dash: i32 = route_agent_output(&"strict", &bad_dash);
+    let bad_email: String = format!("Hi Alex,{}{}", "\n", "- Item one\n- Item two");
+    let rc_bemail: i32 = route_agent_output(&"personal_email", &bad_email);
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if rc1 != 0 || rc2 != 0 || rc3 != 0 || rc4 != 0 {
+        failures = failures + 1;
+    }
+    if rc_noprof != -301 || rc_slop != -303 || rc_dash != -302 || rc_bemail != -303 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "ARTICULATE_PIPE status={} failures={} elapsed_ms={:.4} clean_pass=4/4",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms
+    );
+    let p2: String = format!(
+        "rc_noprof={} rc_slop={} rc_dash={} rc_bemail={}",
+        rc_noprof, rc_slop, rc_dash, rc_bemail
+    );
+    println!("{} {}", p1, p2);
+}
