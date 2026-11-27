@@ -1,5 +1,5 @@
 // improve-kernel: the promotion loop for one kernel package, as a state machine.
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: FSL-1.1-MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // Run from the package folder:

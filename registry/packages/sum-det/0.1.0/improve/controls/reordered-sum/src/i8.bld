@@ -1,5 +1,5 @@
 // sum-det slot `i8`, variant `reordered-sum`.
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: FSL-1.1-MIT
 // Copyright (c) 2026 Zain Dana Harper.
 //
 // PLANTED WRONG: the lane totals are added left to right.

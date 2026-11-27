@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2026"
 description = "Promotion loop for one kernel package: frozen-set check, admission rule, step judges, paired-benchmark interval and an append-only ledger"
 author = "Zain Dana Harper"
-license = "MIT"
+license = "FSL-1.1-MIT"
 
 [dependencies]
