@@ -1,0 +1,174 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53F (E1): Tunable Fundamental-Constants (G, c, h, kB) Symplectic Orbital
+// & Stability Oracle. Sweeps G by 2x verifying T(2G)/T(G) == 2^(-1/2) to < 1e-6,
+// verifies v > v_esc unbound escape vs bound elliptic stability, and catches
+// planted non-physical G <= 0 / c <= 0 fail-closed.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+// Fail-closed fundamental constants guard: 0 OK, -201 bad G, -202 bad c, -203 bad h, -204 bad kB.
+fn validate_constants(g_const: f64, c_const: f64, h_const: f64, kb_const: f64) -> i32 {
+    if g_const <= 0.0 { return -201; }
+    if c_const <= 0.0 { return -202; }
+    if h_const <= 0.0 { return -203; }
+    if kb_const <= 0.0 { return -204; }
+    0
+}
+
+struct OrbitResult {
+    period: f64,
+    max_energy_rel_err: f64,
+    spec_energy: f64,
+    r_final: f64,
+    escaped: i32,
+}
+
+// Symplectic Velocity-Verlet central-force orbital integrator.
+fn integrate_orbit(g_const: f64, mass: f64, r0: f64, v_init: f64, dt: f64, steps: i32) -> OrbitResult {
+    let mu: f64 = g_const * mass;
+    let mut x: f64 = r0;
+    let mut y: f64 = 0.0;
+    let mut vx: f64 = 0.0;
+    let mut vy: f64 = v_init;
+
+    let e0: f64 = 0.5 * (vx * vx + vy * vy) - mu / r0;
+    let r_inv3_0: f64 = 1.0 / (r0 * r0 * r0);
+    let mut ax: f64 = -mu * x * r_inv3_0;
+    let mut ay: f64 = -mu * y * r_inv3_0;
+
+    let mut max_e_err: f64 = 0.0;
+    let mut period: f64 = 0.0;
+    let mut found_period: i32 = 0;
+
+    let mut s: i32 = 0;
+    while s < steps {
+        let y_prev: f64 = y;
+        let t_prev: f64 = (s as f64) * dt;
+
+        // Position update
+        x = x + vx * dt + 0.5 * ax * dt * dt;
+        y = y + vy * dt + 0.5 * ay * dt * dt;
+
+        // Acceleration at new position
+        let r2: f64 = x * x + y * y;
+        let r: f64 = sqrt(r2);
+        let r_inv3: f64 = 1.0 / (r2 * r);
+        let ax_new: f64 = -mu * x * r_inv3;
+        let ay_new: f64 = -mu * y * r_inv3;
+
+        // Velocity update
+        vx = vx + 0.5 * (ax + ax_new) * dt;
+        vy = vy + 0.5 * (ay + ay_new) * dt;
+        ax = ax_new;
+        ay = ay_new;
+
+        let e_now: f64 = 0.5 * (vx * vx + vy * vy) - mu / r;
+        let e_den: f64 = if abs_f64(e0) > 1.0e-12 { abs_f64(e0) } else { 1.0 };
+        let e_rel: f64 = abs_f64(e_now - e0) / e_den;
+        if e_rel > max_e_err {
+            max_e_err = e_rel;
+        }
+
+        // Detect first completed orbit crossing y: negative -> non-negative on x > 0
+        if found_period == 0 && s > 100 && x > 0.0 && y_prev < 0.0 && y >= 0.0 {
+            let frac: f64 = (-y_prev) / (y - y_prev);
+            period = t_prev + frac * dt;
+            found_period = 1;
+        }
+
+        s = s + 1;
+    }
+
+    let r_end: f64 = sqrt(x * x + y * y);
+    let escaped: i32 = if e0 > 0.0 && r_end > 5.0 * r0 { 1 } else { 0 };
+    OrbitResult {
+        period: period,
+        max_energy_rel_err: max_e_err,
+        spec_energy: e0,
+        r_final: r_end,
+        escaped: escaped,
+    }
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+    let pi: f64 = 3.14159265358979323846;
+
+    // Standard SI constants for Planck-length & Schwarzschild sanity readout
+    let g_si: f64 = 6.67430e-11;
+    let c_si: f64 = 299792458.0;
+    let h_si: f64 = 6.62607015e-34;
+    let kb_si: f64 = 1.380649e-23;
+    let hbar_si: f64 = h_si / (2.0 * pi);
+    let l_planck: f64 = sqrt((hbar_si * g_si) / (c_si * c_si * c_si));
+
+    // Normalized orbital sandbox: sweep G0=1.0 -> 2*G0=2.0
+    let g1: f64 = 1.0;
+    let g2: f64 = 2.0;
+    let mass: f64 = 1.0;
+    let r0: f64 = 1.0;
+    let dt: f64 = 0.0002;
+
+    let o1: OrbitResult = integrate_orbit(g1, mass, r0, sqrt(g1 * mass / r0), dt, 35000);
+    let o2: OrbitResult = integrate_orbit(g2, mass, r0, sqrt(g2 * mass / r0), dt, 35000);
+
+    let ratio_num: f64 = o2.period / o1.period;
+    let ratio_exact: f64 = 1.0 / sqrt(2.0);
+    let ratio_rel_err: f64 = abs_f64(ratio_num - ratio_exact) / ratio_exact;
+
+    // Escape velocity sweep: v_esc = sqrt(2*G*M/r0)
+    let v_esc: f64 = sqrt(2.0 * g1 * mass / r0);
+    let o_esc: OrbitResult = integrate_orbit(g1, mass, r0, 1.15 * v_esc, 0.001, 15000);
+    let o_bnd: OrbitResult = integrate_orbit(g1, mass, r0, 0.85 * v_esc, 0.001, 15000);
+
+    // Planted fail-closed controls
+    let rc_ok: i32 = validate_constants(g_si, c_si, h_si, kb_si);
+    let rc_bad_g: i32 = validate_constants(-g_si, c_si, h_si, kb_si);
+    let rc_bad_c: i32 = validate_constants(g_si, 0.0, h_si, kb_si);
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if ratio_rel_err >= 1.0e-6 || o1.max_energy_rel_err >= 1.0e-7 || o2.max_energy_rel_err >= 1.0e-7 {
+        failures = failures + 1;
+    }
+    if o_esc.escaped != 1 || o_esc.spec_energy <= 0.0 || o_bnd.escaped != 0 || o_bnd.spec_energy >= 0.0 {
+        failures = failures + 1;
+    }
+    if rc_ok != 0 || rc_bad_g != -201 || rc_bad_c != -202 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "CONST_SANDBOX status={} failures={} elapsed_ms={:.4} l_planck={:.9e} t_g1={:.9} t_g2={:.9}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        l_planck,
+        o1.period,
+        o2.period
+    );
+    let p2: String = format!(
+        "ratio_num={:.12} ratio_exact={:.12} ratio_rel_err={:.3e} e_err_g1={:.3e} e_err_g2={:.3e}",
+        ratio_num,
+        ratio_exact,
+        ratio_rel_err,
+        o1.max_energy_rel_err,
+        o2.max_energy_rel_err
+    );
+    let p3: String = format!(
+        "esc_flag={} esc_r_final={:.6} bnd_flag={} bnd_r_final={:.6} rc_bad_g={} rc_bad_c={}",
+        o_esc.escaped,
+        o_esc.r_final,
+        o_bnd.escaped,
+        o_bnd.r_final,
+        rc_bad_g,
+        rc_bad_c
+    );
+    println!("{} {} {}", p1, p2, p3);
+}

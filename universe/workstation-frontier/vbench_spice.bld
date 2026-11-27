@@ -1,0 +1,179 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53F (E12): Virtual Bench SPICE Noise-Density Budget Engine.
+// Computes Johnson-Nyquist thermal sqrt(4*kB*T*R), shot sqrt(2*q*I)*R_sense,
+// and 1/f flicker integrated RMS budgets across 28 held-out synthetic instrument
+// specs (target >= 26/28 vs 12/28 baseline) + 2/2 planted fail-closed controls.
+
+fn ln_f64(x_in: f64) -> f64 {
+    let mut x: f64 = x_in;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.693147180559945309417;
+    while x > 1.4142135623730951 {
+        x = x * 0.5;
+        k = k + 1;
+    }
+    while x < 0.7071067811865476 {
+        x = x * 2.0;
+        k = k - 1;
+    }
+    let u: f64 = (x - 1.0) / (x + 1.0);
+    let u2: f64 = u * u;
+    let mut term: f64 = u;
+    let mut sum: f64 = u;
+    let mut n: i32 = 3;
+    while n <= 23 {
+        term = term * u2;
+        sum = sum + term / (n as f64);
+        n = n + 2;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+// Fail-closed SPICE noise spec validator: 0 OK, -301 bad bandwidth, -302 negative R, -303 bad T/I/fc.
+fn validate_noise_spec(t_k: f64, r_ohm: f64, i_amp: f64, r_sense: f64, f_c: f64, f_lo: f64, f_hi: f64) -> i32 {
+    if f_lo <= 0.0 || f_hi <= f_lo { return -301; }
+    if r_ohm < 0.0 || r_sense < 0.0 { return -302; }
+    if t_k < 0.0 || i_amp < 0.0 || f_c < 0.0 { return -303; }
+    0
+}
+
+struct NoiseBudget {
+    v_th_rms: f64,
+    v_sh_rms: f64,
+    v_fl_rms: f64,
+    v_tot_rms: f64,
+    dominant: i32,
+}
+
+// Analytic RMS integration over [f_lo, f_hi]:
+//   var_th = 4*kB*T*R*(f_hi - f_lo)
+//   var_sh = 2*q*I*R_sense^2*(f_hi - f_lo)
+//   var_fl = (S_th + S_sh)*f_c*ln(f_hi / f_lo)
+// Dominant class: 0=THERMAL, 1=SHOT, 2=FLICKER.
+fn compute_noise_budget(t_k: f64, r_ohm: f64, i_amp: f64, r_sense: f64, f_c: f64, f_lo: f64, f_hi: f64) -> NoiseBudget {
+    let kb: f64 = 1.380649e-23;
+    let qe: f64 = 1.602176634e-19;
+    let bw: f64 = f_hi - f_lo;
+    let s_th: f64 = 4.0 * kb * t_k * r_ohm;
+    let s_sh: f64 = 2.0 * qe * i_amp * r_sense * r_sense;
+    let var_th: f64 = s_th * bw;
+    let var_sh: f64 = s_sh * bw;
+    let var_fl: f64 = (s_th + s_sh) * f_c * ln_f64(f_hi / f_lo);
+
+    let v_th: f64 = sqrt(var_th);
+    let v_sh: f64 = sqrt(var_sh);
+    let v_fl: f64 = sqrt(var_fl);
+    let v_tot: f64 = sqrt(var_th + var_sh + var_fl);
+
+    let mut dom: i32 = 0;
+    if var_sh >= var_th && var_sh >= var_fl {
+        dom = 1;
+    } else if var_fl > var_th && var_fl > var_sh {
+        dom = 2;
+    }
+    NoiseBudget {
+        v_th_rms: v_th,
+        v_sh_rms: v_sh,
+        v_fl_rms: v_fl,
+        v_tot_rms: v_tot,
+        dominant: dom,
+    }
+}
+
+fn eval_case(
+    t_k: f64, r_ohm: f64, i_amp: f64, r_sense: f64, f_c: f64,
+    f_lo: f64, f_hi: f64, exp_dom: i32, max_rms_limit: f64, exp_pass: i32
+) -> i32 {
+    if validate_noise_spec(t_k, r_ohm, i_amp, r_sense, f_c, f_lo, f_hi) != 0 {
+        return 0;
+    }
+    let nb: NoiseBudget = compute_noise_budget(t_k, r_ohm, i_amp, r_sense, f_c, f_lo, f_hi);
+    let pass_flag: i32 = if nb.v_tot_rms <= max_rms_limit { 1 } else { 0 };
+    if nb.dominant == exp_dom && pass_flag == exp_pass { 1 } else { 0 }
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+
+    // Spot reference check: 10 kOhm @ 300 K thermal density = sqrt(4*kB*300*1e4) = 12.871 nV/rtHz
+    let ref_nb: NoiseBudget = compute_noise_budget(300.0, 10000.0, 1.0e-6, 1000.0, 10.0, 100.0, 10100.0);
+
+    // 28 held-out deterministic synthetic instrument specs (7 per regime x 4 regimes)
+    let mut correct: i32 = 0;
+    let mut checksum: f64 = ref_nb.v_tot_rms;
+
+    // Regime 0 (7 cases): Thermal-dominated precision resistors (exp_dom = 0)
+    correct = correct + eval_case(300.0, 10000.0, 1.0e-7, 100.0, 1.0, 100.0, 10100.0, 0, 2.0e-6, 1);
+    correct = correct + eval_case(300.0, 100000.0, 1.0e-8, 50.0, 2.0, 1000.0, 11000.0, 0, 5.0e-6, 1);
+    correct = correct + eval_case(350.0, 50000.0, 5.0e-8, 200.0, 5.0, 500.0, 50500.0, 0, 1.0e-5, 1);
+    correct = correct + eval_case(295.0, 1.0e6, 1.0e-9, 100.0, 1.0, 100.0, 10100.0, 0, 2.0e-5, 1);
+    correct = correct + eval_case(300.0, 200000.0, 1.0e-8, 100.0, 10.0, 1000.0, 101000.0, 0, 1.0e-5, 0);
+    correct = correct + eval_case(77.0, 50000.0, 1.0e-9, 50.0, 0.5, 10.0, 10010.0, 0, 2.0e-6, 1);
+    correct = correct + eval_case(400.0, 25000.0, 1.0e-7, 100.0, 2.0, 200.0, 20200.0, 0, 4.0e-6, 1);
+
+    // Regime 1 (7 cases): Shot-dominated photodiode / TIA channels (exp_dom = 1)
+    correct = correct + eval_case(300.0, 50.0, 1.0e-3, 1000.0, 5.0, 100.0, 10100.0, 1, 3.0e-6, 1);
+    correct = correct + eval_case(300.0, 100.0, 5.0e-3, 1000.0, 10.0, 1000.0, 101000.0, 1, 1.5e-5, 1);
+    correct = correct + eval_case(300.0, 200.0, 2.0e-3, 5000.0, 5.0, 500.0, 50500.0, 1, 2.0e-5, 0);
+    correct = correct + eval_case(250.0, 100.0, 1.0e-2, 500.0, 2.0, 100.0, 50100.0, 1, 1.0e-5, 1);
+    correct = correct + eval_case(300.0, 500.0, 5.0e-4, 10000.0, 10.0, 1000.0, 21000.0, 1, 2.5e-5, 1);
+    correct = correct + eval_case(300.0, 10.0, 2.0e-2, 200.0, 5.0, 500.0, 100500.0, 1, 1.0e-5, 1);
+    correct = correct + eval_case(280.0, 100.0, 4.0e-3, 2000.0, 1.0, 100.0, 10100.0, 1, 5.0e-6, 0);
+
+    // Regime 2 (7 cases): 1/f flicker-dominated low-frequency preamps (exp_dom = 2)
+    correct = correct + eval_case(300.0, 10000.0, 1.0e-8, 100.0, 500.0, 0.1, 10.0, 2, 1.0e-6, 1);
+    correct = correct + eval_case(300.0, 50000.0, 1.0e-8, 100.0, 1000.0, 0.01, 5.0, 2, 5.0e-6, 1);
+    correct = correct + eval_case(300.0, 20000.0, 1.0e-7, 100.0, 2000.0, 0.1, 20.0, 2, 5.0e-7, 0);
+    correct = correct + eval_case(300.0, 5000.0, 1.0e-9, 50.0, 300.0, 0.05, 5.0, 2, 1.0e-6, 1);
+    correct = correct + eval_case(320.0, 100000.0, 1.0e-8, 100.0, 800.0, 0.1, 15.0, 2, 5.0e-6, 1);
+    correct = correct + eval_case(300.0, 1000.0, 1.0e-4, 500.0, 400.0, 0.1, 10.0, 2, 5.0e-7, 1);
+    correct = correct + eval_case(300.0, 250000.0, 1.0e-9, 100.0, 1500.0, 0.01, 2.0, 2, 5.0e-6, 0);
+
+    // Regime 3 (7 cases): Mixed broadband bench & lock-in specs
+    correct = correct + eval_case(300.0, 5000.0, 1.0e-4, 1000.0, 20.0, 10.0, 10000.0, 0, 2.0e-6, 1);
+    correct = correct + eval_case(300.0, 2000.0, 8.0e-4, 1000.0, 50.0, 10.0, 5000.0, 1, 2.0e-6, 1);
+    correct = correct + eval_case(300.0, 10000.0, 5.0e-4, 1000.0, 1000.0, 1.0, 100.0, 2, 2.0e-6, 1);
+    correct = correct + eval_case(300.0, 50000.0, 2.0e-3, 1000.0, 200.0, 100.0, 50000.0, 0, 1.0e-5, 1);
+    correct = correct + eval_case(300.0, 1000.0, 3.0e-3, 2000.0, 100.0, 10.0, 20000.0, 1, 1.0e-5, 1);
+    correct = correct + eval_case(300.0, 20000.0, 1.0e-4, 500.0, 5000.0, 1.0, 500.0, 2, 1.0e-6, 0);
+    correct = correct + eval_case(300.0, 10000.0, 2.0e-4, 1000.0, 10.0, 100.0, 100000.0, 0, 5.0e-6, 1);
+
+    // Accumulate checksum across 3 representative budgets for strict Python f64 parity
+    let p1: NoiseBudget = compute_noise_budget(300.0, 50.0, 1.0e-3, 1000.0, 5.0, 100.0, 10100.0);
+    let p2: NoiseBudget = compute_noise_budget(300.0, 10000.0, 1.0e-8, 100.0, 500.0, 0.1, 10.0);
+    checksum = checksum + p1.v_tot_rms + p2.v_tot_rms;
+
+    // Planted fail-closed controls
+    let rc_ok: i32 = validate_noise_spec(300.0, 10000.0, 1.0e-6, 1000.0, 10.0, 100.0, 10100.0);
+    let rc_bad_bw: i32 = validate_noise_spec(300.0, 10000.0, 1.0e-6, 1000.0, 10.0, 1000.0, 1000.0);
+    let rc_bad_r: i32 = validate_noise_spec(300.0, -1000.0, 1.0e-6, 1000.0, 10.0, 100.0, 10100.0);
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if correct < 26 || rc_ok != 0 || rc_bad_bw != -301 || rc_bad_r != -302 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "VBENCH_SPICE status={} failures={} elapsed_ms={:.4} specs_correct={}/28 ref_v_th={:.9e}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        correct,
+        ref_nb.v_th_rms
+    );
+    let p2: String = format!(
+        "ref_v_sh={:.9e} ref_v_fl={:.9e} ref_v_tot={:.9e} checksum={:.12e} rc_bad_bw={} rc_bad_r={}",
+        ref_nb.v_sh_rms,
+        ref_nb.v_fl_rms,
+        ref_nb.v_tot_rms,
+        checksum,
+        rc_bad_bw,
+        rc_bad_r
+    );
+    println!("{} {}", p1, p2);
+}

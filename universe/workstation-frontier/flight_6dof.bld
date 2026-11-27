@@ -1,0 +1,292 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53F (N02): 6-DOF Quaternion Quadrotor + LQR Attitude/Altitude GNC +
+// ISA Standard Atmosphere + Vacuum Ballistic Trajectory Verification Kernel.
+// Safe String operations only; deterministic f64 physics + 2/2 planted fail-closed controls.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+fn ln_f64(x_in: f64) -> f64 {
+    let mut x: f64 = x_in;
+    let mut k: i32 = 0;
+    let ln2: f64 = 0.693147180559945309417;
+    while x > 1.4142135623730951 {
+        x = x * 0.5;
+        k = k + 1;
+    }
+    while x < 0.7071067811865476 {
+        x = x * 2.0;
+        k = k - 1;
+    }
+    let u: f64 = (x - 1.0) / (x + 1.0);
+    let u2: f64 = u * u;
+    let mut term: f64 = u;
+    let mut sum: f64 = u;
+    let mut n: i32 = 3;
+    while n <= 23 {
+        term = term * u2;
+        sum = sum + term / (n as f64);
+        n = n + 2;
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+fn exp_f64(x_in: f64) -> f64 {
+    let ln2: f64 = 0.693147180559945309417;
+    let mut k: i32 = 0;
+    let mut x: f64 = x_in;
+    while x > 0.5 * ln2 {
+        x = x - ln2;
+        k = k + 1;
+    }
+    while x < -0.5 * ln2 {
+        x = x + ln2;
+        k = k - 1;
+    }
+    let mut term: f64 = 1.0;
+    let mut sum: f64 = 1.0;
+    let mut n: i32 = 1;
+    while n <= 20 {
+        term = term * x / (n as f64);
+        sum = sum + term;
+        n = n + 1;
+    }
+    let mut scale: f64 = 1.0;
+    let mut i: i32 = 0;
+    if k > 0 {
+        while i < k {
+            scale = scale * 2.0;
+            i = i + 1;
+        }
+    } else {
+        while i < -k {
+            scale = scale * 0.5;
+            i = i + 1;
+        }
+    }
+    sum * scale
+}
+
+// Fail-closed physical input guard: returns 0 OK, -101 bad quaternion norm, -102 bad gravity sign.
+fn validate_flight_inputs(qw: f64, qx: f64, qy: f64, qz: f64, g: f64) -> i32 {
+    let qn: f64 = sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+    if abs_f64(qn - 1.0) > 1.0e-6 {
+        return -101;
+    }
+    if g <= 0.0 {
+        return -102;
+    }
+    0
+}
+
+// ISA troposphere (0..11,000 m) air density rho(h) in kg/m^3.
+fn isa_density(h_m: f64) -> f64 {
+    let t0: f64 = 288.15;
+    let p0: f64 = 101325.0;
+    let lapse: f64 = 0.0065;
+    let g0: f64 = 9.80665;
+    let r_air: f64 = 287.05287;
+    let temp: f64 = t0 - lapse * h_m;
+    let expo: f64 = g0 / (r_air * lapse);
+    let pres: f64 = p0 * exp_f64(expo * ln_f64(temp / t0));
+    pres / (r_air * temp)
+}
+
+struct HoverMetrics {
+    z_at_1p2s: f64,
+    pitch_at_1p2s: f64,
+    max_overshoot_m: f64,
+    max_q_norm_err: f64,
+    x_drift_m: f64,
+}
+
+// 6-DOF quaternion quadrotor hover step-disturbance + pitch perturbation + horizontal wind gust.
+fn simulate_quadrotor_hover() -> HoverMetrics {
+    let m: f64 = 1.5;
+    let i_y: f64 = 0.025;
+    let g: f64 = 9.80665;
+    let dt: f64 = 0.001;
+
+    // LQR critically-damped altitude (wn=7.0, zeta=0.90) and pitch (wn=10.0, zeta=0.90) gains
+    let kp_z: f64 = m * 49.0;
+    let kd_z: f64 = m * 12.6;
+    let kp_th: f64 = i_y * 100.0;
+    let kd_th: f64 = i_y * 18.0;
+
+    // Initial state: -0.25 m altitude drop + 0.15 rad pitch gust
+    let mut x: f64 = 0.0;
+    let mut vx: f64 = 0.0;
+    let mut z: f64 = -0.25;
+    let mut vz: f64 = 0.0;
+    let half_th: f64 = 0.075;
+    let mut qw: f64 = cos(half_th);
+    let mut qx: f64 = 0.0;
+    let mut qy: f64 = sin(half_th);
+    let mut qz: f64 = 0.0;
+    let mut wy: f64 = 0.0;
+
+    let mut max_overshoot: f64 = 0.0;
+    let mut max_q_err: f64 = 0.0;
+    let mut z_1p2: f64 = 0.0;
+    let mut pitch_1p2: f64 = 0.0;
+
+    let mut step: i32 = 0;
+    while step <= 1500 {
+        let t: f64 = (step as f64) * dt;
+        // Exact pitch angle from unit quaternion (rotation around body Y): sin(theta) = 2*(qw*qy - qz*qx)
+        let sin_th: f64 = 2.0 * (qw * qy - qz * qx);
+        let cos_th: f64 = 1.0 - 2.0 * (qx * qx + qy * qy);
+        // Small-angle exact recovery via atan proxy using sin_th / cos_th for |theta| < 0.25 rad
+        let pitch_approx: f64 = sin_th * (1.0 + (sin_th * sin_th) / 6.0);
+
+        if step == 1200 {
+            z_1p2 = z;
+            pitch_1p2 = pitch_approx;
+        }
+        if z > max_overshoot {
+            max_overshoot = z;
+        }
+        let qn: f64 = sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+        let qerr: f64 = abs_f64(qn - 1.0);
+        if qerr > max_q_err {
+            max_q_err = qerr;
+        }
+
+        // LQR thrust & pitch torque (tilt-compensated vertical thrust)
+        let f_z_des: f64 = m * g - kp_z * z - kd_z * vz;
+        let thrust: f64 = if cos_th > 0.5 { f_z_des / cos_th } else { f_z_des };
+        let tau_y: f64 = -kp_th * pitch_approx - kd_th * wy;
+        let f_gust_x: f64 = if t < 0.15 { 0.8 } else { 0.0 };
+
+        // Body-Z thrust projected to world X and Z: fx = thrust * sin(theta), fz = thrust * cos(theta)
+        let ax: f64 = (thrust * sin_th + f_gust_x) / m;
+        let az: f64 = (thrust * cos_th) / m - g;
+        let alpha_y: f64 = tau_y / i_y;
+
+        // Symplectic semi-implicit update + exact exponential-map quaternion integration
+        vx = vx + ax * dt;
+        vz = vz + az * dt;
+        x = x + vx * dt;
+        z = z + vz * dt;
+        wy = wy + alpha_y * dt;
+
+        let d_half: f64 = 0.5 * wy * dt;
+        let cd: f64 = cos(d_half);
+        let sd: f64 = sin(d_half);
+        // q_new = q (*) (cd, 0, sd, 0)
+        let nqw: f64 = qw * cd - qy * sd;
+        let nqx: f64 = qx * cd - qz * sd;
+        let nqy: f64 = qw * sd + qy * cd;
+        let nqz: f64 = qz * cd + qx * sd;
+        let inv_n: f64 = 1.0 / sqrt(nqw * nqw + nqx * nqx + nqy * nqy + nqz * nqz);
+        qw = nqw * inv_n;
+        qx = nqx * inv_n;
+        qy = nqy * inv_n;
+        qz = nqz * inv_n;
+
+        step = step + 1;
+    }
+
+    HoverMetrics {
+        z_at_1p2s: z_1p2,
+        pitch_at_1p2s: pitch_1p2,
+        max_overshoot_m: max_overshoot,
+        max_q_norm_err: max_q_err,
+        x_drift_m: x,
+    }
+}
+
+// Vacuum ballistic trajectory RK4 with exact quadratic landing root.
+fn simulate_vacuum_ballistic_range(v0: f64, theta_rad: f64, g: f64) -> f64 {
+    let dt: f64 = 0.01;
+    let mut x: f64 = 0.0;
+    let mut z: f64 = 0.0;
+    let vx: f64 = v0 * cos(theta_rad);
+    let mut vz: f64 = v0 * sin(theta_rad);
+
+    let mut step: i32 = 0;
+    while step < 10000 {
+        // Exact RK4 on constant acceleration (vx const, dz/dt = vz, dvz/dt = -g)
+        let z_next: f64 = z + vz * dt - 0.5 * g * dt * dt;
+        let vz_next: f64 = vz - g * dt;
+        let x_next: f64 = x + vx * dt;
+        if step > 0 && z_next <= 0.0 {
+            // Exact quadratic landing time inside [0, dt]: z + vz*tau - 0.5*g*tau^2 = 0
+            let disc: f64 = vz * vz + 2.0 * g * z;
+            let tau: f64 = (vz + sqrt(disc)) / g;
+            return x + vx * tau;
+        }
+        x = x_next;
+        z = z_next;
+        vz = vz_next;
+        step = step + 1;
+    }
+    x
+}
+
+fn main() ~ Console + Clock {
+    let t0: i64 = clock_ns();
+    let pi: f64 = 3.14159265358979323846;
+    let g: f64 = 9.80665;
+
+    let rho0: f64 = isa_density(0.0);
+    let rho5k: f64 = isa_density(5000.0);
+    let rho10k: f64 = isa_density(10000.0);
+
+    let hm: HoverMetrics = simulate_quadrotor_hover();
+
+    let v0: f64 = 250.0;
+    let theta: f64 = 35.0 * pi / 180.0;
+    let r_num: f64 = simulate_vacuum_ballistic_range(v0, theta, g);
+    let r_exact: f64 = (v0 * v0 * sin(2.0 * theta)) / g;
+    let r_rel_err: f64 = abs_f64(r_num - r_exact) / r_exact;
+
+    // Planted fail-closed controls
+    let rc_ok: i32 = validate_flight_inputs(1.0, 0.0, 0.0, 0.0, g);
+    let rc_bad_q: i32 = validate_flight_inputs(1.2, 0.9, 0.0, 0.0, g);
+    let rc_bad_g: i32 = validate_flight_inputs(1.0, 0.0, 0.0, 0.0, -g);
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    let mut failures: i32 = 0;
+    if abs_f64(hm.z_at_1p2s) >= 0.005 || hm.max_overshoot_m >= 0.05 || hm.max_q_norm_err >= 1.0e-12 {
+        failures = failures + 1;
+    }
+    if r_rel_err >= 1.0e-7 {
+        failures = failures + 1;
+    }
+    if rc_ok != 0 || rc_bad_q != -101 || rc_bad_g != -102 {
+        failures = failures + 1;
+    }
+
+    let p1: String = format!(
+        "FLIGHT_6DOF status={} failures={} elapsed_ms={:.4} rho0={:.9} rho5k={:.9} rho10k={:.9}",
+        if failures == 0 { "PASS" } else { "FAIL" },
+        failures,
+        elapsed_ms,
+        rho0,
+        rho5k,
+        rho10k
+    );
+    let p2: String = format!(
+        "z_1p2s={:.9} pitch_1p2s={:.9} max_overshoot={:.9} max_q_err={:.3e} x_drift={:.9}",
+        hm.z_at_1p2s,
+        hm.pitch_at_1p2s,
+        hm.max_overshoot_m,
+        hm.max_q_norm_err,
+        hm.x_drift_m
+    );
+    let p3: String = format!(
+        "r_num={:.9} r_exact={:.9} r_rel_err={:.3e} rc_bad_q={} rc_bad_g={}",
+        r_num,
+        r_exact,
+        r_rel_err,
+        rc_bad_q,
+        rc_bad_g
+    );
+    println!("{} {} {}", p1, p2, p3);
+}
