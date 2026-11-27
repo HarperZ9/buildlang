@@ -1,0 +1,924 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 107B (Slice 20: F1/AC1/N11/N49/N53): Pure-BuildLang Zero-C Unified BuildOS-Core
+// End-to-End Microkernel Triad (buildos_e2e_triad_zeroc.bld).
+// Fuses Signed Boot (SHA-256 + Anti-Rollback + RFC 6962) -> W^X Cap Scheduler ->
+// Zero-Copy Linear IPC Ring -> Content-Addressed Merkle VFS Commit in ONE zero-C binary
+// across ALL FIVE targets (x64-pe, x64-elf, rv64-elf, aarch64-elf, wasm).
+//
+// Modes:
+//   0 = Clean end-to-end Boot -> Schedule -> IPC -> VFS commit (status=1, slot=2)
+//   1 = Planted attack (a): Boot epoch rollback downgrade (20 -> 19 <= 19 -> -101)
+//   2 = Planted attack (b): Post-boot W^X escalation (Task 1 code PTE = RWX=7 -> -201)
+//   3 = Planted attack (c): IPC double-send use-after-transfer ownership fault -> -301
+//   4 = Planted attack (d): VFS 1-bit silent block corruption on SHA-256 read -> -401
+
+fn rotr32(x: i64, n: i64) -> i64 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn sha256_iv(i: i64) -> i64 {
+    if i == 0 { return 1779033703; }
+    else if i == 1 { return 3144134277; }
+    else if i == 2 { return 1013904242; }
+    else if i == 3 { return 2773480762; }
+    else if i == 4 { return 1359893119; }
+    else if i == 5 { return 2600822924; }
+    else if i == 6 { return 528734635; }
+    else if i == 7 { return 1541459225; }
+    return 0;
+}
+
+fn sha256_k(r: i64) -> i64 {
+    if r == 0 { return 1116352408; }
+    else if r == 1 { return 1899447441; }
+    else if r == 2 { return 3049323471; }
+    else if r == 3 { return 3921009573; }
+    else if r == 4 { return 961987163; }
+    else if r == 5 { return 1508970993; }
+    else if r == 6 { return 2453635748; }
+    else if r == 7 { return 2870763221; }
+    else if r == 8 { return 3624381080; }
+    else if r == 9 { return 310598401; }
+    else if r == 10 { return 607225278; }
+    else if r == 11 { return 1426881987; }
+    else if r == 12 { return 1925078388; }
+    else if r == 13 { return 2162078206; }
+    else if r == 14 { return 2614888103; }
+    else if r == 15 { return 3248222580; }
+    else if r == 16 { return 3835390401; }
+    else if r == 17 { return 4022224774; }
+    else if r == 18 { return 264347078; }
+    else if r == 19 { return 604807628; }
+    else if r == 20 { return 770255983; }
+    else if r == 21 { return 1249150122; }
+    else if r == 22 { return 1555081692; }
+    else if r == 23 { return 1996064986; }
+    else if r == 24 { return 2554220882; }
+    else if r == 25 { return 2821834349; }
+    else if r == 26 { return 2952996808; }
+    else if r == 27 { return 3210313671; }
+    else if r == 28 { return 3336571891; }
+    else if r == 29 { return 3584528711; }
+    else if r == 30 { return 113926993; }
+    else if r == 31 { return 338241895; }
+    else if r == 32 { return 666307205; }
+    else if r == 33 { return 773529912; }
+    else if r == 34 { return 1294757372; }
+    else if r == 35 { return 1396182291; }
+    else if r == 36 { return 1695183700; }
+    else if r == 37 { return 1986661051; }
+    else if r == 38 { return 2177026350; }
+    else if r == 39 { return 2456956037; }
+    else if r == 40 { return 2730485921; }
+    else if r == 41 { return 2820302411; }
+    else if r == 42 { return 3259730800; }
+    else if r == 43 { return 3345764771; }
+    else if r == 44 { return 3516065817; }
+    else if r == 45 { return 3600352804; }
+    else if r == 46 { return 4094571909; }
+    else if r == 47 { return 275423344; }
+    else if r == 48 { return 430227734; }
+    else if r == 49 { return 506948616; }
+    else if r == 50 { return 659060556; }
+    else if r == 51 { return 883997877; }
+    else if r == 52 { return 958139571; }
+    else if r == 53 { return 1322822218; }
+    else if r == 54 { return 1537002063; }
+    else if r == 55 { return 1747873779; }
+    else if r == 56 { return 1955562222; }
+    else if r == 57 { return 2024104815; }
+    else if r == 58 { return 2227730452; }
+    else if r == 59 { return 2361852424; }
+    else if r == 60 { return 2428436474; }
+    else if r == 61 { return 2756734187; }
+    else if r == 62 { return 3204031479; }
+    else if r == 63 { return 3329325298; }
+    return 0;
+}
+
+fn boot_w(idx: i64) -> i64 {
+    if idx == 0 { return 1112885580; }
+    else if idx == 1 { return 1146049325; }
+    else if idx == 2 { return 1129271877; }
+    else if idx == 3 { return 760433737; }
+    else if idx == 4 { return 1128608304; }
+    else if idx == 5 { return 760565321; }
+    else if idx == 6 { return 1179206980; }
+    else if idx == 7 { return 760500809; }
+    else if idx == 8 { return 1094987091; }
+    else if idx == 9 { return 1280267330; }
+    else if idx == 10 { return 759907666; }
+    else if idx == 11 { return 1313164333; }
+    else if idx == 12 { return 842019382; }
+    else if idx == 13 { return 758198573; }
+    else if idx == 14 { return 842476879; }
+    else if idx == 15 { return 1260453888; }
+    else if idx == 16 { return 3033186163; }
+    else if idx == 17 { return 1211152426; }
+    else if idx == 18 { return 2770856163; }
+    else if idx == 19 { return 682147000; }
+    else if idx == 20 { return 3624453952; }
+    else if idx == 21 { return 2091143624; }
+    else if idx == 22 { return 1217855069; }
+    else if idx == 23 { return 3293699727; }
+    else if idx == 24 { return 668370030; }
+    else if idx == 25 { return 2568381201; }
+    else if idx == 26 { return 1962440626; }
+    else if idx == 27 { return 2983842714; }
+    else if idx == 28 { return 416604294; }
+    else if idx == 29 { return 1843712203; }
+    else if idx == 30 { return 1527508877; }
+    else if idx == 31 { return 1010823111; }
+    else if idx == 32 { return 4284906114; }
+    else if idx == 33 { return 3261768125; }
+    else if idx == 34 { return 1135822941; }
+    else if idx == 35 { return 234492601; }
+    else if idx == 36 { return 1965390372; }
+    else if idx == 37 { return 3708792849; }
+    else if idx == 38 { return 4284054329; }
+    else if idx == 39 { return 1715613594; }
+    else if idx == 40 { return 1761701476; }
+    else if idx == 41 { return 49017736; }
+    else if idx == 42 { return 962786148; }
+    else if idx == 43 { return 3041345202; }
+    else if idx == 44 { return 3618952503; }
+    else if idx == 45 { return 3864228263; }
+    else if idx == 46 { return 2633042396; }
+    else if idx == 47 { return 3517417882; }
+    return 0;
+}
+
+fn ksecret_w(i: i64) -> i64 {
+    if i == 0 { return 2702402901; }
+    else if i == 1 { return 3954170526; }
+    else if i == 2 { return 3705170367; }
+    else if i == 3 { return 484654050; }
+    else if i == 4 { return 1132672980; }
+    else if i == 5 { return 2463779562; }
+    else if i == 6 { return 3652350711; }
+    else if i == 7 { return 3021067654; }
+    return 0;
+}
+
+fn task_meta(idx: i64) -> i64 {
+    if idx == 0 { return 3; }
+    else if idx == 1 { return 2; }
+    else if idx == 2 { return 5; }
+    else if idx == 3 { return 15; }
+    else if idx == 4 { return 0; }
+    else if idx == 5 { return 5; }
+    else if idx == 6 { return 1; }
+    else if idx == 7 { return 3; }
+    else if idx == 8 { return 3; }
+    else if idx == 9 { return 2; }
+    else if idx == 10 { return 3; }
+    else if idx == 11 { return 15; }
+    else if idx == 12 { return 2; }
+    else if idx == 13 { return 5; }
+    else if idx == 14 { return 3; }
+    else if idx == 15 { return 3; }
+    else if idx == 16 { return 2; }
+    else if idx == 17 { return 3; }
+    else if idx == 18 { return 1; }
+    else if idx == 19 { return 5; }
+    else if idx == 20 { return 4; }
+    else if idx == 21 { return 5; }
+    else if idx == 22 { return 5; }
+    else if idx == 23 { return 3; }
+    else if idx == 24 { return 1; }
+    else if idx == 25 { return 2; }
+    else if idx == 26 { return 9; }
+    else if idx == 27 { return 15; }
+    else if idx == 28 { return 6; }
+    else if idx == 29 { return 5; }
+    else if idx == 30 { return 7; }
+    else if idx == 31 { return 3; }
+    return 0;
+}
+
+fn code_page_w(idx: i64) -> i64 {
+    if idx == 0 { return 1414678849; }
+    else if idx == 1 { return 1143821377; }
+    else if idx == 2 { return 1397436461; }
+    else if idx == 3 { return 1347571524; }
+    else if idx == 4 { return 1430472018; }
+    else if idx == 5 { return 759385924; }
+    else if idx == 6 { return 1160598348; }
+    else if idx == 7 { return 1229145394; }
+    else if idx == 8 { return 808277848; }
+    else if idx == 9 { return 759382352; }
+    else if idx == 10 { return 759780175; }
+    else if idx == 11 { return 1279349829; }
+    else if idx == 12 { return 1143821893; }
+    else if idx == 13 { return 1380533833; }
+    else if idx == 14 { return 1162092833; }
+    else if idx == 15 { return 0; }
+    else if idx == 16 { return 1414678849; }
+    else if idx == 17 { return 1143821377; }
+    else if idx == 18 { return 1397436717; }
+    else if idx == 19 { return 1447383625; }
+    else if idx == 20 { return 1179206994; }
+    else if idx == 21 { return 759385924; }
+    else if idx == 22 { return 1160598348; }
+    else if idx == 23 { return 1229145394; }
+    else if idx == 24 { return 808277848; }
+    else if idx == 25 { return 759382352; }
+    else if idx == 26 { return 759780175; }
+    else if idx == 27 { return 1279349829; }
+    else if idx == 28 { return 1143821893; }
+    else if idx == 29 { return 1380533833; }
+    else if idx == 30 { return 1162092833; }
+    else if idx == 31 { return 0; }
+    else if idx == 32 { return 1414678849; }
+    else if idx == 33 { return 1143821377; }
+    else if idx == 34 { return 1397436973; }
+    else if idx == 35 { return 1464816203; }
+    else if idx == 36 { return 1163013421; }
+    else if idx == 37 { return 759385924; }
+    else if idx == 38 { return 1160598348; }
+    else if idx == 39 { return 1229145394; }
+    else if idx == 40 { return 808277848; }
+    else if idx == 41 { return 759382352; }
+    else if idx == 42 { return 759780175; }
+    else if idx == 43 { return 1279349829; }
+    else if idx == 44 { return 1143821893; }
+    else if idx == 45 { return 1380533833; }
+    else if idx == 46 { return 1162092833; }
+    else if idx == 47 { return 0; }
+    else if idx == 48 { return 1414678849; }
+    else if idx == 49 { return 1143821377; }
+    else if idx == 50 { return 1397437229; }
+    else if idx == 51 { return 1447449389; }
+    else if idx == 52 { return 1397904978; }
+    else if idx == 53 { return 759385924; }
+    else if idx == 54 { return 1160598348; }
+    else if idx == 55 { return 1229145394; }
+    else if idx == 56 { return 808277848; }
+    else if idx == 57 { return 759382352; }
+    else if idx == 58 { return 759780175; }
+    else if idx == 59 { return 1279349829; }
+    else if idx == 60 { return 1143821893; }
+    else if idx == 61 { return 1380533833; }
+    else if idx == 62 { return 1162092833; }
+    else if idx == 63 { return 0; }
+    return 0;
+}
+
+fn exp_code_sha(idx: i64) -> i64 {
+    if idx == 0 { return 3333033619; }
+    else if idx == 1 { return 3752250617; }
+    else if idx == 2 { return 3097760947; }
+    else if idx == 3 { return 1869486908; }
+    else if idx == 4 { return 1562231794; }
+    else if idx == 5 { return 1546509656; }
+    else if idx == 6 { return 4137450253; }
+    else if idx == 7 { return 1242990739; }
+    else if idx == 8 { return 4037605372; }
+    else if idx == 9 { return 1498950112; }
+    else if idx == 10 { return 2064376667; }
+    else if idx == 11 { return 2484017106; }
+    else if idx == 12 { return 1911757163; }
+    else if idx == 13 { return 3306176721; }
+    else if idx == 14 { return 3431044289; }
+    else if idx == 15 { return 2300206479; }
+    else if idx == 16 { return 1628611919; }
+    else if idx == 17 { return 3162867318; }
+    else if idx == 18 { return 784033177; }
+    else if idx == 19 { return 1066877914; }
+    else if idx == 20 { return 1463735451; }
+    else if idx == 21 { return 4054507382; }
+    else if idx == 22 { return 1567651142; }
+    else if idx == 23 { return 2515689221; }
+    else if idx == 24 { return 2998556703; }
+    else if idx == 25 { return 2088212206; }
+    else if idx == 26 { return 3544750372; }
+    else if idx == 27 { return 385035297; }
+    else if idx == 28 { return 1179550827; }
+    else if idx == 29 { return 836669577; }
+    else if idx == 30 { return 1090546432; }
+    else if idx == 31 { return 301338405; }
+    return 0;
+}
+
+fn exp_cap_mac(idx: i64) -> i64 {
+    if idx == 0 { return 3938995789; }
+    else if idx == 1 { return 3944309834; }
+    else if idx == 2 { return 3247464805; }
+    else if idx == 3 { return 16487128; }
+    else if idx == 4 { return 1649958736; }
+    else if idx == 5 { return 3902378307; }
+    else if idx == 6 { return 430696685; }
+    else if idx == 7 { return 4060347541; }
+    else if idx == 8 { return 194745700; }
+    else if idx == 9 { return 671796882; }
+    else if idx == 10 { return 79755533; }
+    else if idx == 11 { return 489431136; }
+    else if idx == 12 { return 2315419357; }
+    else if idx == 13 { return 3749207796; }
+    else if idx == 14 { return 603372121; }
+    else if idx == 15 { return 2442263263; }
+    else if idx == 16 { return 1549189528; }
+    else if idx == 17 { return 769181439; }
+    else if idx == 18 { return 406960547; }
+    else if idx == 19 { return 653798665; }
+    else if idx == 20 { return 53284031; }
+    else if idx == 21 { return 3727383827; }
+    else if idx == 22 { return 883318589; }
+    else if idx == 23 { return 2719437367; }
+    else if idx == 24 { return 4212027433; }
+    else if idx == 25 { return 169584970; }
+    else if idx == 26 { return 1178163682; }
+    else if idx == 27 { return 2633299949; }
+    else if idx == 28 { return 4287945346; }
+    else if idx == 29 { return 3512244549; }
+    else if idx == 30 { return 3114291754; }
+    else if idx == 31 { return 1683608090; }
+    return 0;
+}
+
+fn exp_sched_sha(i: i64) -> i64 {
+    if i == 0 { return 1006149315; }
+    else if i == 1 { return 1430986285; }
+    else if i == 2 { return 1369826343; }
+    else if i == 3 { return 718420662; }
+    else if i == 4 { return 80255388; }
+    else if i == 5 { return 1988287139; }
+    else if i == 6 { return 3229418633; }
+    else if i == 7 { return 1926779467; }
+    return 0;
+}
+
+fn vfs_blk_w(idx: i64) -> i64 {
+    if idx == 0 { return 1414678849; }
+    else if idx == 1 { return 1143821894; }
+    else if idx == 2 { return 1395475020; }
+    else if idx == 3 { return 1261448531; }
+    else if idx == 4 { return 1431323986; }
+    else if idx == 5 { return 1112297283; }
+    else if idx == 6 { return 1261261644; }
+    else if idx == 7 { return 1229145394; }
+    else if idx == 8 { return 808272719; }
+    else if idx == 9 { return 1314145614; }
+    else if idx == 10 { return 1412251972; }
+    else if idx == 11 { return 1146242387; }
+    else if idx == 12 { return 1397048365; }
+    else if idx == 13 { return 1330323745; }
+    else if idx == 14 { return 555819297; }
+    else if idx == 15 { return 0; }
+    else if idx == 16 { return 1414678849; }
+    else if idx == 17 { return 1143821894; }
+    else if idx == 18 { return 1395475020; }
+    else if idx == 19 { return 1261514057; }
+    else if idx == 20 { return 1313817669; }
+    else if idx == 21 { return 760038740; }
+    else if idx == 22 { return 1093489484; }
+    else if idx == 23 { return 1229145394; }
+    else if idx == 24 { return 808275017; }
+    else if idx == 25 { return 1313161554; }
+    else if idx == 26 { return 760174414; }
+    else if idx == 27 { return 1163023176; }
+    else if idx == 28 { return 1229991241; }
+    else if idx == 29 { return 1346579791; }
+    else if idx == 30 { return 1260462369; }
+    else if idx == 31 { return 0; }
+    else if idx == 32 { return 1414678849; }
+    else if idx == 33 { return 1143821894; }
+    else if idx == 34 { return 1395475020; }
+    else if idx == 35 { return 1261579603; }
+    else if idx == 36 { return 1128809796; }
+    else if idx == 37 { return 759975751; }
+    else if idx == 38 { return 757945164; }
+    else if idx == 39 { return 1229145394; }
+    else if idx == 40 { return 808272965; }
+    else if idx == 41 { return 1413829197; }
+    else if idx == 42 { return 1229867347; }
+    else if idx == 43 { return 1414087469; }
+    else if idx == 44 { return 1414676803; }
+    else if idx == 45 { return 1160597323; }
+    else if idx == 46 { return 555819297; }
+    else if idx == 47 { return 0; }
+    else if idx == 48 { return 1414678849; }
+    else if idx == 49 { return 1143821894; }
+    else if idx == 50 { return 1395475020; }
+    else if idx == 51 { return 1261645138; }
+    else if idx == 52 { return 1162036553; }
+    else if idx == 53 { return 1347693892; }
+    else if idx == 54 { return 1110266700; }
+    else if idx == 55 { return 1229145394; }
+    else if idx == 56 { return 808278597; }
+    else if idx == 57 { return 1380920643; }
+    else if idx == 58 { return 759581014; }
+    else if idx == 59 { return 1160595795; }
+    else if idx == 60 { return 1093489746; }
+    else if idx == 61 { return 1229014061; }
+    else if idx == 62 { return 1330323745; }
+    else if idx == 63 { return 0; }
+    return 0;
+}
+
+fn exp_cid_w(idx: i64) -> i64 {
+    if idx == 0 { return 344050946; }
+    else if idx == 1 { return 3009964749; }
+    else if idx == 2 { return 3024195994; }
+    else if idx == 3 { return 630591083; }
+    else if idx == 4 { return 3360438555; }
+    else if idx == 5 { return 88169365; }
+    else if idx == 6 { return 4012679674; }
+    else if idx == 7 { return 2232735648; }
+    else if idx == 8 { return 3829663732; }
+    else if idx == 9 { return 350685913; }
+    else if idx == 10 { return 1534560520; }
+    else if idx == 11 { return 4060360926; }
+    else if idx == 12 { return 66298914; }
+    else if idx == 13 { return 3477346367; }
+    else if idx == 14 { return 3544270013; }
+    else if idx == 15 { return 2697935499; }
+    else if idx == 16 { return 3370618469; }
+    else if idx == 17 { return 4264995538; }
+    else if idx == 18 { return 2687424245; }
+    else if idx == 19 { return 1033150535; }
+    else if idx == 20 { return 3934187020; }
+    else if idx == 21 { return 1351535720; }
+    else if idx == 22 { return 1030180750; }
+    else if idx == 23 { return 2148913349; }
+    else if idx == 24 { return 1786768968; }
+    else if idx == 25 { return 3146226661; }
+    else if idx == 26 { return 1600762160; }
+    else if idx == 27 { return 2895998496; }
+    else if idx == 28 { return 589444574; }
+    else if idx == 29 { return 2021177061; }
+    else if idx == 30 { return 2178383590; }
+    else if idx == 31 { return 379439144; }
+    return 0;
+}
+
+fn exp_vfs_root(i: i64) -> i64 {
+    if i == 0 { return 398795605; }
+    else if i == 1 { return 4061630177; }
+    else if i == 2 { return 3651488521; }
+    else if i == 3 { return 2668660914; }
+    else if i == 4 { return 470787988; }
+    else if i == 5 { return 1661005969; }
+    else if i == 6 { return 4197720239; }
+    else if i == 7 { return 3558511702; }
+    return 0;
+}
+// STAGE 1: Verified Signed Boot (SHA-256 Image + Monotonic Anti-Rollback + RFC 6962 Log Root)
+fn triad_stage1_boot(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut dig: [i64; 8] = [0; 8];
+    let mut cur: [i64; 8] = [0; 8];
+    let mut sib: [i64; 8] = [0; 8];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut p0: i64 = 0; let mut p1: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+
+    p0 = 0;
+    while p0 < 5 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        let mut nblk: i64 = 1;
+        if p0 == 0 || p0 == 3 || p0 == 4 { nblk = 2; }
+        p1 = 0;
+        while p1 < nblk {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p0 == 0 {
+                if p1 == 0 {
+                    i = 0; while i < 16 { w[i] = boot_w(i); i = i + 1; }
+                } else { w[0] = 2147483648; w[15] = 512; }
+            } else if p0 == 1 {
+                i = 0; while i < 8 { w[i] = boot_w(16 + i); i = i + 1; }
+                w[8] = 20; w[9] = 2; w[10] = 64; w[11] = 1112297299;
+                w[12] = 2147483648; w[15] = 384;
+            } else if p0 == 2 {
+                w[0] = dig[0] >> 8;
+                i = 1; while i < 8 { w[i] = (((dig[i - 1] & 255) << 24) | (dig[i] >> 8)) & m32; i = i + 1; }
+                w[8] = (((dig[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+            } else if p0 == 3 {
+                if p1 == 0 {
+                    i = 0; while i < 8 { sib[i] = boot_w(24 + i); i = i + 1; }
+                    w[0] = (16777216 | (sib[0] >> 8)) & m32;
+                    i = 1; while i < 8 { w[i] = (((sib[i - 1] & 255) << 24) | (sib[i] >> 8)) & m32; i = i + 1; }
+                    w[8] = (((sib[7] & 255) << 24) | (cur[0] >> 8)) & m32;
+                    i = 1; while i < 8 { w[8 + i] = (((cur[i - 1] & 255) << 24) | (cur[i] >> 8)) & m32; i = i + 1; }
+                } else { w[0] = (((cur[7] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+            } else {
+                if p1 == 0 {
+                    i = 0; while i < 8 { sib[i] = boot_w(32 + i); i = i + 1; }
+                    w[0] = (16777216 | (cur[0] >> 8)) & m32;
+                    i = 1; while i < 8 { w[i] = (((cur[i - 1] & 255) << 24) | (cur[i] >> 8)) & m32; i = i + 1; }
+                    w[8] = (((cur[7] & 255) << 24) | (sib[0] >> 8)) & m32;
+                    i = 1; while i < 8 { w[8 + i] = (((sib[i - 1] & 255) << 24) | (sib[i] >> 8)) & m32; i = i + 1; }
+                } else { w[0] = (((sib[7] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+            }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+                i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32;
+                i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p1 = p1 + 1;
+        }
+        if p0 == 0 {
+            j = 1; i = 0; while i < 8 { if hv[i] != boot_w(16 + i) { j = 0; } i = i + 1; }
+            if j == 0 { println("{}", -102); println("{}", 0); println("{}", 1); return -102; }
+            // Monotonic anti-rollback epoch check (NV=19, candidate=20)
+            a = 19; b = 20;
+            if mode == 1 { b = 19; } // Planted attack (a): boot epoch rollback downgrade
+            if b <= a { println("{}", -101); println("{}", 0); println("{}", 1); return -101; }
+        } else if p0 == 1 {
+            i = 0; while i < 8 { dig[i] = hv[i]; i = i + 1; }
+        } else if p0 == 2 || p0 == 3 {
+            i = 0; while i < 8 { cur[i] = hv[i]; i = i + 1; }
+        } else {
+            j = 1; i = 0; while i < 8 { if hv[i] != boot_w(40 + i) { j = 0; } i = i + 1; }
+            if j == 0 { println("{}", -103); println("{}", 0); println("{}", 1); return -103; }
+        }
+        p0 = p0 + 1;
+    }
+    return 1;
+}
+
+// STAGE 2: W^X Page Tables + Keyed Cap Tokens + Code-Page SHA-256 + 9-Tick Cap Scheduler
+fn triad_stage2_sched(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut pfn_used: [i64; 8] = [0; 8];
+    let mut rem_bud: [i64; 4] = [0; 4];
+    let mut prios: [i64; 4] = [0; 4];
+    let mut trace: [i64; 12] = [0; 12];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut tid: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+    let mut p0: i64 = 0; let mut p1: i64 = 0; let mut p2: i64 = 0; let mut p3: i64 = 0;
+
+    // 1. W^X + Disjoint PFN enforcement
+    tid = 0;
+    while tid < 4 {
+        p0 = task_meta(tid * 8 + 4); p1 = task_meta(tid * 8 + 5);
+        p2 = task_meta(tid * 8 + 6); p3 = task_meta(tid * 8 + 7);
+        if mode == 2 && tid == 1 { p1 = 7; } // Planted attack (b): post-boot W^X escalation (RWX)
+        if (p1 & 6) == 6 || (p3 & 6) == 6 { println("{}", -201); println("{}", 0); println("{}", 1); return -201; }
+        if p0 < 0 || p0 >= 8 || p2 < 0 || p2 >= 8 || p0 == p2 || pfn_used[p0] != 0 || pfn_used[p2] != 0 {
+            println("{}", -202); println("{}", 0); println("{}", 1); return -202;
+        }
+        pfn_used[p0] = 1; pfn_used[p2] = 1;
+        tid = tid + 1;
+    }
+
+    // 2. Keyed SHA-256 Capability Tokens + Attenuation + Epoch=20
+    tid = 0;
+    while tid < 4 {
+        p0 = task_meta(tid * 8 + 2); p1 = task_meta(tid * 8 + 3);
+        if (p0 & (p1 ^ m32)) != 0 || (p1 & (15 ^ m32)) != 0 {
+            println("{}", -203); println("{}", 0); println("{}", 1); return -203;
+        }
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        i = 0; while i < 8 { w[i] = ksecret_w(i); i = i + 1; }
+        w[8] = tid; w[9] = p0; w[10] = 20; w[11] = p1;
+        w[12] = 2147483648; w[15] = 384;
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+            i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+        e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32;
+            i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+        hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+        hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        j = 1; i = 0; while i < 8 { if hv[i] != exp_cap_mac(tid * 8 + i) { j = 0; } i = i + 1; }
+        if j == 0 { println("{}", -203); println("{}", 0); println("{}", 1); return -203; }
+        tid = tid + 1;
+    }
+
+    // 3. Pre-dispatch SHA-256 Code-Page Attestation
+    tid = 0;
+    while tid < 4 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p0 = 0;
+        while p0 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p0 == 0 { i = 0; while i < 16 { w[i] = code_page_w(tid * 16 + i); i = i + 1; } }
+            else { w[0] = 2147483648; w[15] = 512; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+                i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32;
+                i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p0 = p0 + 1;
+        }
+        j = 1; i = 0; while i < 8 { if hv[i] != exp_code_sha(tid * 8 + i) { j = 0; } i = i + 1; }
+        if j == 0 { println("{}", -204); println("{}", 0); println("{}", 1); return -204; }
+        tid = tid + 1;
+    }
+
+    // 4. Deterministic 9-tick Priority + Budget-Capped Round-Robin Dispatch
+    tid = 0;
+    while tid < 4 { prios[tid] = task_meta(tid * 8); rem_bud[tid] = task_meta(tid * 8 + 1); tid = tid + 1; }
+    p0 = 0; p1 = 0;
+    while p1 < 9 {
+        p2 = -1; p3 = -1; i = 0;
+        while i < 4 {
+            j = (p0 + i) & 3;
+            if rem_bud[j] > 0 && prios[j] > p3 { p2 = j; p3 = prios[j]; }
+            i = i + 1;
+        }
+        if p2 < 0 || 1 > rem_bud[p2] { println("{}", -205); println("{}", 0); println("{}", 1); return -205; }
+        rem_bud[p2] = rem_bud[p2] - 1;
+        trace[p1] = p2;
+        p0 = (p2 + 1) & 3;
+        p1 = p1 + 1;
+    }
+    trace[9] = 9; trace[10] = 4; trace[11] = 20;
+
+    i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+    i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+    i = 0; while i < 12 { w[i] = trace[i]; i = i + 1; }
+    w[12] = 2147483648; w[15] = 384;
+    i = 16;
+    while i < 64 {
+        s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+        i = i + 1;
+    }
+    a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+    e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+    i = 0;
+    while i < 64 {
+        s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+        t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+        s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+        t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+        h = g; g = f; f = e; e = (d + t1) & m32;
+        d = c; c = b; b = a; a = (t1 + t2) & m32;
+        i = i + 1;
+    }
+    hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+    hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+    hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+    hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_sched_sha(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -206); println("{}", 0); println("{}", 1); return -206; }
+    return 1;
+}
+
+// STAGE 3: Zero-Copy Linear IPC Ring -> Content-Addressed RFC 6962 Merkle VFS Commit
+fn triad_stage3_ipc_vfs(mode: i64) -> i64 ~ Console {
+    let m32: i64 = 4294967295;
+    let mut w: [i64; 64] = [0; 64];
+    let mut hv: [i64; 8] = [0; 8];
+    let mut owner: [i64; 4] = [0; 4];
+    let mut ring_blk: [i64; 4] = [0; 4];
+    let mut ring_seq: [i64; 4] = [0; 4];
+    let mut leaves: [i64; 32] = [0; 32];
+    let mut nodes: [i64; 16] = [0; 16];
+
+    let mut i: i64 = 0; let mut j: i64 = 0; let mut step: i64 = 0;
+    let mut a: i64 = 0; let mut b: i64 = 0; let mut c: i64 = 0; let mut d: i64 = 0;
+    let mut e: i64 = 0; let mut f: i64 = 0; let mut g: i64 = 0; let mut h: i64 = 0;
+    let mut t1: i64 = 0; let mut t2: i64 = 0; let mut s0: i64 = 0; let mut s1: i64 = 0;
+    let mut p0: i64 = 0; let mut p1: i64 = 0; let mut p2: i64 = 0; let mut p3: i64 = 0;
+
+    let sender_cap: i64 = task_meta(2);       // Task 0 rights = 5 (CAP_IPC_SEND=4)
+    let recv_cap: i64 = task_meta(3 * 8 + 2); // Task 3 rights = 9 (CAP_IPC_RECV=8)
+    let mut head: i64 = 0; let mut tail: i64 = 0; let mut exp_seq: i64 = 1;
+
+    step = 0;
+    while step < 4 {
+        if (sender_cap & 4) == 0 || (recv_cap & 8) == 0 {
+            println("{}", -301); println("{}", 0); println("{}", 1); return -301;
+        }
+        p0 = step;
+        if mode == 3 && step == 2 { p0 = 0; } // Planted attack (c): IPC double-send use-after-transfer
+        if owner[p0] != 0 { println("{}", -301); println("{}", 0); println("{}", 1); return -301; }
+        owner[p0] = -1;
+        p1 = tail & 3;
+        ring_blk[p1] = p0;
+        ring_seq[p1] = step + 1;
+        tail = tail + 1;
+
+        p1 = head & 3; p0 = ring_blk[p1]; p2 = ring_seq[p1]; head = head + 1;
+        if p2 != exp_seq { println("{}", -302); println("{}", 0); println("{}", 1); return -302; }
+        exp_seq = exp_seq + 1;
+        owner[p0] = 3;
+
+        // SHA-256 content-addressed block check
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p3 = 0;
+        while p3 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if p3 == 0 {
+                i = 0; while i < 16 { w[i] = vfs_blk_w(p0 * 16 + i); i = i + 1; }
+                if mode == 4 && p0 == 2 { w[0] = w[0] ^ 1; } // Planted attack (d): VFS silent 1-bit corruption
+            } else { w[0] = 2147483648; w[15] = 512; }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+                i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32;
+                i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p3 = p3 + 1;
+        }
+        j = 1; i = 0; while i < 8 { if hv[i] != exp_cid_w(p0 * 8 + i) { j = 0; } i = i + 1; }
+        if j == 0 { println("{}", -401); println("{}", 0); println("{}", 1); return -401; }
+
+        // RFC 6962 Leaf: SHA256(0x00 || cid)
+        i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+        w[0] = hv[0] >> 8;
+        i = 1; while i < 8 { w[i] = (((hv[i - 1] & 255) << 24) | (hv[i] >> 8)) & m32; i = i + 1; }
+        w[8] = (((hv[7] & 255) << 24) | 8388608) & m32; w[15] = 264;
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        i = 16;
+        while i < 64 {
+            s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+            i = i + 1;
+        }
+        a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+        e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+        i = 0;
+        while i < 64 {
+            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+            h = g; g = f; f = e; e = (d + t1) & m32;
+            d = c; c = b; b = a; a = (t1 + t2) & m32;
+            i = i + 1;
+        }
+        hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+        hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+        hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+        hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+        i = 0; while i < 8 { leaves[p0 * 8 + i] = hv[i]; i = i + 1; }
+        step = step + 1;
+    }
+
+    // RFC 6962 VFS Inode Merkle Root
+    step = 0;
+    while step < 3 {
+        i = 0; while i < 8 { hv[i] = sha256_iv(i); i = i + 1; }
+        p3 = 0;
+        while p3 < 2 {
+            i = 0; while i < 16 { w[i] = 0; i = i + 1; }
+            if step < 2 {
+                p0 = step * 16; p1 = step * 16 + 8;
+                if p3 == 0 {
+                    w[0] = (16777216 | (leaves[p0] >> 8)) & m32;
+                    i = 1;
+                    while i < 8 {
+                        w[i] = (((leaves[p0 + i - 1] & 255) << 24) | (leaves[p0 + i] >> 8)) & m32;
+                        i = i + 1;
+                    }
+                    w[8] = (((leaves[p0 + 7] & 255) << 24) | (leaves[p1] >> 8)) & m32;
+                    i = 1;
+                    while i < 8 {
+                        w[8 + i] = (((leaves[p1 + i - 1] & 255) << 24) | (leaves[p1 + i] >> 8)) & m32;
+                        i = i + 1;
+                    }
+                } else { w[0] = (((leaves[p1 + 7] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+            } else {
+                if p3 == 0 {
+                    w[0] = (16777216 | (nodes[0] >> 8)) & m32;
+                    i = 1; while i < 8 { w[i] = (((nodes[i - 1] & 255) << 24) | (nodes[i] >> 8)) & m32; i = i + 1; }
+                    w[8] = (((nodes[7] & 255) << 24) | (nodes[8] >> 8)) & m32;
+                    i = 1;
+                    while i < 8 {
+                        w[8 + i] = (((nodes[8 + i - 1] & 255) << 24) | (nodes[8 + i] >> 8)) & m32;
+                        i = i + 1;
+                    }
+                } else { w[0] = (((nodes[15] & 255) << 24) | 8388608) & m32; w[15] = 520; }
+            }
+            i = 16;
+            while i < 64 {
+                s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+                s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+                w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m32;
+                i = i + 1;
+            }
+            a = hv[0]; b = hv[1]; c = hv[2]; d = hv[3];
+            e = hv[4]; f = hv[5]; g = hv[6]; h = hv[7];
+            i = 0;
+            while i < 64 {
+                s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+                t1 = (h + s1 + ((e & f) ^ ((e ^ m32) & g)) + sha256_k(i) + w[i]) & m32;
+                s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+                t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) & m32;
+                h = g; g = f; f = e; e = (d + t1) & m32;
+                d = c; c = b; b = a; a = (t1 + t2) & m32;
+                i = i + 1;
+            }
+            hv[0] = (hv[0] + a) & m32; hv[1] = (hv[1] + b) & m32;
+            hv[2] = (hv[2] + c) & m32; hv[3] = (hv[3] + d) & m32;
+            hv[4] = (hv[4] + e) & m32; hv[5] = (hv[5] + f) & m32;
+            hv[6] = (hv[6] + g) & m32; hv[7] = (hv[7] + h) & m32;
+            p3 = p3 + 1;
+        }
+        if step < 2 { i = 0; while i < 8 { nodes[step * 8 + i] = hv[i]; i = i + 1; } }
+        step = step + 1;
+    }
+
+    j = 1; i = 0; while i < 8 { if hv[i] != exp_vfs_root(i) { j = 0; } i = i + 1; }
+    if j == 0 { println("{}", -402); println("{}", 0); println("{}", 1); return -402; }
+
+    // All 3 Triad Pillars Passed! Emit verified summary + all 3 root digests
+    println("{}", 1);
+    println("{}", 1);
+    println("{}", 2);
+    println("{}", 20);
+    println("{}", 9);
+    println("{}", 4);
+    i = 0; while i < 8 { println("{}", boot_w(40 + i)); i = i + 1; }
+    i = 0; while i < 8 { println("{}", exp_sched_sha(i)); i = i + 1; }
+    i = 0; while i < 8 { println("{}", hv[i]); i = i + 1; }
+    return 1;
+}
+
+fn buildos_triad_run(mode: i64) -> i64 ~ Console {
+    let r1: i64 = triad_stage1_boot(mode);
+    if r1 != 1 { return r1; }
+    let r2: i64 = triad_stage2_sched(mode);
+    if r2 != 1 { return r2; }
+    return triad_stage3_ipc_vfs(mode);
+}
+
+fn main() ~ Console {
+    let _ = buildos_triad_run(0);
+}
