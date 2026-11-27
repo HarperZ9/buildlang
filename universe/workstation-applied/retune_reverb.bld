@@ -1,0 +1,231 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53M (Author Idea B7): Fine-Pitch Detune Tracker & Schroeder RT60 Alignment (retune_reverb.bld)
+// - Hann-windowed Goertzel DTFT golden-section fine-pitch tracker recovering 3.5-cent detune (<= 0.05 cent err)
+// - Schroeder backward-integrated impulse RT60 estimator recovering 120 ms room RT60 (<= 2 ms err)
+// - Planted failing control: flat-noise non-decaying impulse response caught fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn log10_f64(x: f64) -> f64 {
+    log(x) / 2.302585092994046
+}
+
+fn log2_f64(x: f64) -> f64 {
+    log(x) / 0.6931471805599453
+}
+
+fn pow2_f64(x: f64) -> f64 {
+    exp(x * 0.6931471805599453)
+}
+
+// Windowed Goertzel continuous-frequency power P(freq_hz)
+fn goertzel_power(sig: &Vec<f64>, fs: f64, freq_hz: f64) -> f64 {
+    let n: usize = sig.len();
+    let twopi: f64 = 6.283185307179586476925286766559;
+    let w: f64 = twopi * freq_hz / fs;
+    let coeff: f64 = 2.0 * cos(w);
+    let mut s1: f64 = 0.0;
+    let mut s2: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        let s0: f64 = sig[i] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+        i = i + 1;
+    }
+    s1 * s1 + s2 * s2 - coeff * s1 * s2
+}
+
+// Coarse scan + 44-iteration golden-section refinement around reference f_ref
+fn estimate_pitch_hz(sig: &Vec<f64>, fs: f64, f_ref: f64) -> f64 {
+    let mut best_f: f64 = f_ref;
+    let mut best_p: f64 = -1.0;
+    // Coarse scan +/- 25 cents in 0.5-cent increments
+    let mut k: i32 = -50;
+    while k <= 50 {
+        let cents: f64 = (k as f64) * 0.5;
+        let f: f64 = f_ref * pow2_f64(cents / 1200.0);
+        let p: f64 = goertzel_power(sig, fs, f);
+        if p > best_p {
+            best_p = p;
+            best_f = f;
+        }
+        k = k + 1;
+    }
+    let mut lo: f64 = best_f * pow2_f64(-1.0 / 1200.0);
+    let mut hi: f64 = best_f * pow2_f64(1.0 / 1200.0);
+    let inv_phi: f64 = 0.6180339887498949;
+    let mut iter: i32 = 0;
+    while iter < 44 {
+        let m1: f64 = hi - inv_phi * (hi - lo);
+        let m2: f64 = lo + inv_phi * (hi - lo);
+        if goertzel_power(sig, fs, m1) < goertzel_power(sig, fs, m2) {
+            lo = m1;
+        } else {
+            hi = m2;
+        }
+        iter = iter + 1;
+    }
+    0.5 * (lo + hi)
+}
+
+struct Rt60Out {
+    rt60_ms: f64,
+    r2: f64,
+    tail_head_ratio: f64,
+    valid: i32,
+}
+
+// Schroeder backward-integrated energy decay curve + ISO-3382 T30 (-5 dB to -35 dB) linear regression
+fn estimate_rt60_schroeder(ir: &Vec<f64>, fs: f64) -> Rt60Out {
+    let n: usize = ir.len();
+    let mut e_rev: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        e_rev.push(0.0);
+        i = i + 1;
+    }
+    let mut acc: f64 = 0.0;
+    let mut idx: usize = n;
+    while idx > 0 {
+        idx = idx - 1;
+        acc = acc + ir[idx] * ir[idx];
+        e_rev[idx] = acc;
+    }
+    let e0: f64 = e_rev[0];
+    if e0 <= 1.0e-18 {
+        return Rt60Out { rt60_ms: -1.0, r2: 0.0, tail_head_ratio: 1.0, valid: 0 };
+    }
+
+    // Compare energy in final 25% of IR vs initial 25% of IR
+    let q: usize = n / 4;
+    let mut head_e: f64 = 0.0;
+    let mut tail_e: f64 = 0.0;
+    i = 0;
+    while i < q {
+        head_e = head_e + ir[i] * ir[i];
+        tail_e = tail_e + ir[n - q + i] * ir[n - q + i];
+        i = i + 1;
+    }
+    let tail_head: f64 = tail_e / (head_e + 1.0e-18);
+
+    // OLS fit of L_dB(t) = a + m*t over [-5 dB, -35 dB]
+    let mut sum_t: f64 = 0.0;
+    let mut sum_y: f64 = 0.0;
+    let mut sum_tt: f64 = 0.0;
+    let mut sum_ty: f64 = 0.0;
+    let mut sum_yy: f64 = 0.0;
+    let mut cnt: f64 = 0.0;
+
+    i = 0;
+    while i < n {
+        let ratio: f64 = e_rev[i] / e0;
+        if ratio > 1.0e-6 {
+            let db: f64 = 10.0 * log10_f64(ratio);
+            if db <= -5.0 && db >= -35.0 {
+                let t: f64 = (i as f64) / fs;
+                sum_t = sum_t + t;
+                sum_y = sum_y + db;
+                sum_tt = sum_tt + t * t;
+                sum_ty = sum_ty + t * db;
+                sum_yy = sum_yy + db * db;
+                cnt = cnt + 1.0;
+            }
+        }
+        i = i + 1;
+    }
+
+    if cnt < 20.0 {
+        return Rt60Out { rt60_ms: -1.0, r2: 0.0, tail_head_ratio: tail_head, valid: 0 };
+    }
+    let denom: f64 = cnt * sum_tt - sum_t * sum_t;
+    let num: f64 = cnt * sum_ty - sum_t * sum_y;
+    let slope: f64 = num / denom;
+    let y_var: f64 = cnt * sum_yy - sum_y * sum_y;
+    let r2: f64 = if y_var > 1.0e-15 { (num * num) / (denom * y_var) } else { 0.0 };
+    let rt60_ms: f64 = if slope < -1.0e-6 { (-60.0 / slope) * 1000.0 } else { -1.0 };
+
+    // Valid exponential room decay requires tight linearity (R^2 >= 0.995) and real energy decay (tail/head < 0.05)
+    let valid: i32 = if rt60_ms > 0.0 && r2 >= 0.995 && tail_head < 0.05 { 1 } else { 0 };
+    Rt60Out { rt60_ms: rt60_ms, r2: r2, tail_head_ratio: tail_head, valid: valid }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    let fs: f64 = 48000.0;
+    let twopi: f64 = 6.283185307179586476925286766559;
+    let f_ref: f64 = 440.0;
+    let true_detune_cents: f64 = 3.5;
+    let f_true: f64 = f_ref * pow2_f64(true_detune_cents / 1200.0);
+
+    // Hann-windowed 4096-sample test tone with exact +3.5 cent detune
+    let n_sig: usize = 4096;
+    let mut sig: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n_sig {
+        let win: f64 = 0.5 * (1.0 - cos(twopi * (i as f64) / ((n_sig - 1) as f64)));
+        let t: f64 = (i as f64) / fs;
+        sig.push(win * sin(twopi * f_true * t + 0.42));
+        i = i + 1;
+    }
+
+    let f_est: f64 = estimate_pitch_hz(&sig, fs, f_ref);
+    let est_detune_cents: f64 = 1200.0 * log2_f64(f_est / f_ref);
+    let detune_err_cents: f64 = abs_f64(est_detune_cents - true_detune_cents);
+
+    // Synthetic room IR with exact 120.0 ms RT60 (240 ms buffer so truncation < 1e-6)
+    let n_ir: usize = 11520;
+    let true_rt60_s: f64 = 0.120;
+    let decay_rate: f64 = 6.907755278982137 / true_rt60_s; // 3 * ln(10) / RT60 -> -60 dB energy at RT60
+    let mut clean_ir: Vec<f64> = Vec::new();
+    let mut flat_ir: Vec<f64> = Vec::new();
+    let mut seed: i64 = 987654321;
+    i = 0;
+    while i < n_ir {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let sign: f64 = if seed % 2 == 0 { 1.0 } else { -1.0 };
+        let t: f64 = (i as f64) / fs;
+        clean_ir.push(sign * exp(-decay_rate * t));
+        flat_ir.push(sign);
+        i = i + 1;
+    }
+
+    let clean_rt: Rt60Out = estimate_rt60_schroeder(&clean_ir, fs);
+    let rt60_err_ms: f64 = abs_f64(clean_rt.rt60_ms - 120.0);
+
+    // Planted failing control: flat non-decaying noise IR must be flagged invalid fail-closed
+    let flat_rt: Rt60Out = estimate_rt60_schroeder(&flat_ir, fs);
+    let flat_caught: i32 = if flat_rt.valid == 0 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("B7_EST_FREQ_HZ={:.10}", f_est);
+    println!("B7_EST_DETUNE_CENTS={:.10}", est_detune_cents);
+    println!("B7_DETUNE_ERR_CENTS={:.10}", detune_err_cents);
+    println!("B7_EST_RT60_MS={:.8}", clean_rt.rt60_ms);
+    println!("B7_RT60_ERR_MS={:.8}", rt60_err_ms);
+    println!("B7_CLEAN_R2={:.10}", clean_rt.r2);
+    println!("B7_FLAT_R2={:.10}", flat_rt.r2);
+    println!("B7_FLAT_TAIL_HEAD={:.8}", flat_rt.tail_head_ratio);
+    println!("B7_FLAT_CAUGHT={}", flat_caught);
+    println!("B7_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if detune_err_cents <= 0.05 && rt60_err_ms <= 2.0 && clean_rt.valid == 1 && flat_caught == 1 {
+        println!(
+            "[PASS] B7_RETUNE_REVERB detune={:.4}c (err={:.2e}c) rt60={:.3}ms (err={:.3}ms) flat_caught=1",
+            est_detune_cents, detune_err_cents, clean_rt.rt60_ms, rt60_err_ms
+        );
+    } else {
+        println!(
+            "[FAIL] B7_RETUNE_REVERB detune_err={:.4}c rt60_err={:.4}ms flat_caught={}",
+            detune_err_cents, rt60_err_ms, flat_caught
+        );
+    }
+}

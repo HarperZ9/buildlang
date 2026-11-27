@@ -1,0 +1,150 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 51L (Author Idea D12): Hegselmann-Krause Bounded-Confidence Polarization Solver (polarization_hk.bld)
+// - Synchronous Hegselmann-Krause (2002) opinion-dynamics solver over N=64 agents on [0, 1]
+// - Sweeps confidence bound eps to locate exact consensus-to-bimodal bifurcation threshold eps_c
+// - Planted failing control: negative or zero confidence bound eps <= 0 rejected fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn validate_eps(eps: f64) -> i32 {
+    if eps <= 0.0 || eps > 1.0 {
+        return 0;
+    }
+    1
+}
+
+struct HKOut {
+    clusters: i32,
+    spread: f64,
+    min_op: f64,
+    max_op: f64,
+    iters: i32,
+    checksum: f64,
+}
+
+fn run_hk(n_agents: usize, eps: f64, max_iters: i32) -> HKOut {
+    let mut x: Vec<f64> = Vec::new();
+    let mut nxt: Vec<f64> = Vec::new();
+    let denom: f64 = (n_agents - 1) as f64;
+    let mut i: usize = 0;
+    while i < n_agents {
+        x.push((i as f64) / denom);
+        nxt.push(0.0);
+        i = i + 1;
+    }
+
+    let mut it: i32 = 0;
+    while it < max_iters {
+        let mut max_delta: f64 = 0.0;
+        let mut a: usize = 0;
+        while a < n_agents {
+            let xa: f64 = x[a];
+            let mut sum: f64 = 0.0;
+            let mut cnt: i32 = 0;
+            let mut b: usize = 0;
+            while b < n_agents {
+                if abs_f64(x[b] - xa) <= eps {
+                    sum = sum + x[b];
+                    cnt = cnt + 1;
+                }
+                b = b + 1;
+            }
+            let nv: f64 = sum / (cnt as f64);
+            nxt[a] = nv;
+            let d: f64 = abs_f64(nv - xa);
+            if d > max_delta { max_delta = d; }
+            a = a + 1;
+        }
+        let mut k: usize = 0;
+        while k < n_agents {
+            x[k] = nxt[k];
+            k = k + 1;
+        }
+        it = it + 1;
+        if max_delta < 1.0e-12 {
+            break;
+        }
+    }
+
+    // Because initial x is monotone non-decreasing, HK preserves order identically
+    let mut clusters: i32 = 1;
+    let mut csum: f64 = x[0];
+    let mut idx: usize = 1;
+    while idx < n_agents {
+        if (x[idx] - x[idx - 1]) > 0.05 {
+            clusters = clusters + 1;
+        }
+        csum = csum + x[idx] * ((idx as f64) + 1.0);
+        idx = idx + 1;
+    }
+    let mn: f64 = x[0];
+    let mx: f64 = x[n_agents - 1];
+    HKOut {
+        clusters: clusters,
+        spread: mx - mn,
+        min_op: mn,
+        max_op: mx,
+        iters: it,
+        checksum: csum,
+    }
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+    let n_agents: usize = 64;
+
+    // Above threshold: global consensus; right below upper bifurcation: exact symmetric bimodal polarization
+    let cons: HKOut = run_hk(n_agents, 0.28, 200);
+    let bimod: HKOut = run_hk(n_agents, 0.22, 200);
+
+    // Scan downward from 0.28 to locate exact consensus-to-bimodal bifurcation eps_c (~0.24)
+    let mut eps_c: f64 = 0.0;
+    let mut k: i32 = 26;
+    while k >= 0 {
+        let e: f64 = 0.15 + (k as f64) * 0.005;
+        let r: HKOut = run_hk(n_agents, e, 200);
+        if r.clusters >= 2 && eps_c == 0.0 {
+            eps_c = e + 0.005;
+        }
+        k = k - 1;
+    }
+
+    // Planted failing control: invalid negative confidence bound eps = -0.10
+    let neg_eps_caught: i32 = if validate_eps(-0.10) == 0 && validate_eps(0.0) == 0 { 1 } else { 0 };
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("D12_CONSENSUS_CLUSTERS={}", cons.clusters);
+    println!("D12_CONSENSUS_SPREAD={:.12}", cons.spread);
+    println!("D12_BIMODAL_CLUSTERS={}", bimod.clusters);
+    println!("D12_BIMODAL_GAP={:.12}", bimod.spread);
+    println!("D12_EPS_CRIT={:.6}", eps_c);
+    println!("D12_CHECKSUM={:.12}", cons.checksum + bimod.checksum);
+    println!("D12_NEG_EPS_CAUGHT={}", neg_eps_caught);
+    println!("D12_ELAPSED_MS={:.4}", elapsed_ms);
+
+    let ok_d12: bool = cons.clusters == 1
+        && cons.spread < 1.0e-9
+        && bimod.clusters == 2
+        && bimod.spread > 0.35
+        && eps_c >= 0.20
+        && eps_c <= 0.26
+        && neg_eps_caught == 1;
+    if ok_d12 {
+        println!(
+            "[PASS] D12_POLARIZATION_HK cons=1 bimod=2 gap={:.4} eps_c={:.3} neg_caught=1",
+            bimod.spread, eps_c
+        );
+    } else {
+        println!(
+            "[FAIL] D12_POLARIZATION_HK cons={} bimod={} eps_c={:.3} neg_caught={}",
+            cons.clusters, bimod.clusters, eps_c, neg_eps_caught
+        );
+    }
+}

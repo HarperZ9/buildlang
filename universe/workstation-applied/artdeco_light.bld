@@ -1,0 +1,177 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// Wave 53M (Author Idea G13): Art Deco Solar Setback Street-Canyon SVF & Insolation (artdeco_light.bld)
+// - Analytical Sky View Factor (SVF = cos(alpha)) verified against 720-point hemisphere quadrature (< 1% err)
+// - Full-year NYC (40.7128 N) solar-ephemeris insolation comparing 1916 stepped Art Deco setback vs sheer slab
+// - Planted failing control: zero-width street canyon (W <= 0) rejected fail-closed
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return -x; }
+    x
+}
+
+fn asin_f64(x: f64) -> f64 {
+    let mut c: f64 = x;
+    if c > 1.0 { c = 1.0; }
+    if c < -1.0 { c = -1.0; }
+    let d: f64 = sqrt(1.0 - c * c);
+    if d < 1.0e-15 {
+        if c >= 0.0 { return 1.5707963267948966; }
+        return -1.5707963267948966;
+    }
+    atan(c / d)
+}
+
+// Compute effective street-centerline canyon horizon slope tan(alpha) = max_k(h_k / d_k).
+// Returns -1.0 fail-closed if canyon width <= 0 or any tier setback <= 0.
+fn canyon_tan_alpha(street_width: f64, heights: &Vec<f64>, setbacks: &Vec<f64>) -> f64 {
+    if street_width <= 0.0 { return -1.0; }
+    let half_w: f64 = 0.5 * street_width;
+    let n: usize = heights.len();
+    if n == 0 || n != setbacks.len() { return -1.0; }
+    let mut max_slope: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        let dist: f64 = half_w + setbacks[i];
+        if dist <= 0.0 || heights[i] < 0.0 { return -1.0; }
+        let slope: f64 = heights[i] / dist;
+        if slope > max_slope { max_slope = slope; }
+        i = i + 1;
+    }
+    max_slope
+}
+
+// Exact analytical SVF for infinite symmetric canyon: SVF = cos(alpha) = 1 / sqrt(1 + tan^2(alpha))
+fn svf_analytical(tan_alpha: f64) -> f64 {
+    if tan_alpha < 0.0 { return -1.0; }
+    1.0 / sqrt(1.0 + tan_alpha * tan_alpha)
+}
+
+// Direct 720-point azimuthal hemisphere quadrature:
+// SVF = (1 / (2*pi)) * integral_0^{2*pi} dphi / (1 + tan^2(alpha) * cos^2(phi))
+fn svf_quadrature(tan_alpha: f64, n_phi: i32) -> f64 {
+    if tan_alpha < 0.0 || n_phi <= 0 { return -1.0; }
+    let twopi: f64 = 6.283185307179586476925286766559;
+    let t2: f64 = tan_alpha * tan_alpha;
+    let mut acc: f64 = 0.0;
+    let mut k: i32 = 0;
+    while k < n_phi {
+        let phi: f64 = twopi * ((k as f64) + 0.5) / (n_phi as f64);
+        let c: f64 = cos(phi);
+        acc = acc + 1.0 / (1.0 + t2 * c * c);
+        k = k + 1;
+    }
+    acc / (n_phi as f64)
+}
+
+// Full-year (365 days x 96 quarter-hour steps) direct insolation hours on E-W street centerline at lat_deg
+fn annual_insolation_hours(lat_deg: f64, tan_alpha: f64) -> f64 {
+    if tan_alpha < 0.0 { return -1.0; }
+    let pi: f64 = 3.1415926535897932384626433832795;
+    let deg2rad: f64 = pi / 180.0;
+    let lat: f64 = lat_deg * deg2rad;
+    let sin_lat: f64 = sin(lat);
+    let cos_lat: f64 = cos(lat);
+    let dt_hr: f64 = 0.25;
+    let mut hours: f64 = 0.0;
+
+    let mut day: i32 = 1;
+    while day <= 365 {
+        let decl: f64 = 23.44 * deg2rad * sin(2.0 * pi * ((284 + day) as f64) / 365.0);
+        let sin_d: f64 = sin(decl);
+        let cos_d: f64 = cos(decl);
+        let mut step: i32 = 0;
+        while step < 96 {
+            let t_hr: f64 = ((step as f64) + 0.5) * dt_hr;
+            let ha: f64 = (t_hr - 12.0) * (pi / 12.0);
+            let sin_el: f64 = sin_lat * sin_d + cos_lat * cos_d * cos(ha);
+            if sin_el > 1.0e-6 {
+                let cos_el: f64 = sqrt(1.0 - sin_el * sin_el);
+                let mut cos_az: f64 = (sin_d - sin_lat * sin_el) / (cos_lat * cos_el);
+                if cos_az > 1.0 { cos_az = 1.0; }
+                if cos_az < -1.0 { cos_az = -1.0; }
+                // E-W canyon: walls lie N/S, sun clears wall iff sin(el) > tan(alpha)*|cos(az)|*cos(el)
+                if sin_el > tan_alpha * abs_f64(cos_az) * cos_el {
+                    hours = hours + dt_hr;
+                }
+            }
+            step = step + 1;
+        }
+        day = day + 1;
+    }
+    hours
+}
+
+fn main() ~ Clock + Console {
+    let t0: i64 = clock_ns();
+
+    // 24 m NYC street width (half-width = 12 m), 120 m roof height
+    let street_w: f64 = 24.0;
+    let nyc_lat: f64 = 40.7128;
+
+    // Sheer slab: single 120 m vertical facade at 0 m setback (tan alpha = 120 / 12 = 10.0)
+    let mut slab_h: Vec<f64> = Vec::new();
+    let mut slab_s: Vec<f64> = Vec::new();
+    slab_h.push(120.0);
+    slab_s.push(0.0);
+
+    // 1916 NYC stepped Art Deco setback tower (4 tiers up to 120 m following sky-exposure plane)
+    let mut deco_h: Vec<f64> = Vec::new();
+    let mut deco_s: Vec<f64> = Vec::new();
+    deco_h.push(30.0);  deco_s.push(0.0);   // 30 / 12 = 2.500
+    deco_h.push(56.0);  deco_s.push(10.0);  // 56 / 22 = 2.545
+    deco_h.push(84.0);  deco_s.push(22.0);  // 84 / 34 = 2.471
+    deco_h.push(120.0); deco_s.push(36.0);  // 120 / 48 = 2.500
+
+    let tan_slab: f64 = canyon_tan_alpha(street_w, &slab_h, &slab_s);
+    let tan_deco: f64 = canyon_tan_alpha(street_w, &deco_h, &deco_s);
+
+    let svf_slab_an: f64 = svf_analytical(tan_slab);
+    let svf_slab_qd: f64 = svf_quadrature(tan_slab, 720);
+    let svf_deco_an: f64 = svf_analytical(tan_deco);
+    let svf_deco_qd: f64 = svf_quadrature(tan_deco, 720);
+
+    let slab_rel_err: f64 = abs_f64(svf_slab_an - svf_slab_qd) / svf_slab_an;
+    let deco_rel_err: f64 = abs_f64(svf_deco_an - svf_deco_qd) / svf_deco_an;
+    let max_quad_err: f64 = if slab_rel_err > deco_rel_err { slab_rel_err } else { deco_rel_err };
+
+    let hrs_slab: f64 = annual_insolation_hours(nyc_lat, tan_slab);
+    let hrs_deco: f64 = annual_insolation_hours(nyc_lat, tan_deco);
+    let svf_ratio: f64 = svf_deco_an / svf_slab_an;
+    let hrs_ratio: f64 = hrs_deco / hrs_slab;
+
+    // Planted failing control: zero-width street canyon (W = 0.0) must return -1.0 fail-closed
+    let zero_w_tan: f64 = canyon_tan_alpha(0.0, &slab_h, &slab_s);
+    let zero_w_svf: f64 = svf_analytical(zero_w_tan);
+    let zero_w_caught: i32 = if zero_w_tan < 0.0 && zero_w_svf < 0.0 { 1 } else { 0 };
+
+    // Use asin_f64 once so no unused warning and report horizon angles in degrees
+    let rad2deg: f64 = 180.0 / 3.1415926535897932384626433832795;
+    let alpha_slab_deg: f64 = asin_f64(tan_slab / sqrt(1.0 + tan_slab * tan_slab)) * rad2deg;
+    let alpha_deco_deg: f64 = asin_f64(tan_deco / sqrt(1.0 + tan_deco * tan_deco)) * rad2deg;
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: f64 = ((t1 - t0) as f64) / 1.0e6;
+
+    println!("G13_SVF_SLAB={:.12}", svf_slab_an);
+    println!("G13_SVF_DECO={:.12}", svf_deco_an);
+    println!("G13_SVF_RATIO={:.8}", svf_ratio);
+    println!("G13_MAX_QUAD_ERR={:.15}", max_quad_err);
+    println!("G13_HRS_SLAB={:.4}", hrs_slab);
+    println!("G13_HRS_DECO={:.4}", hrs_deco);
+    println!("G13_HRS_RATIO={:.8}", hrs_ratio);
+    println!("G13_ALPHA_SLAB_DEG={:.6}", alpha_slab_deg);
+    println!("G13_ALPHA_DECO_DEG={:.6}", alpha_deco_deg);
+    println!("G13_ZERO_W_CAUGHT={}", zero_w_caught);
+    println!("G13_ELAPSED_MS={:.4}", elapsed_ms);
+
+    if max_quad_err < 0.01 && svf_deco_an > 3.0 * svf_slab_an && hrs_deco > 2.0 * hrs_slab && zero_w_caught == 1 {
+        println!(
+            "[PASS] G13_ARTDECO_LIGHT svf_deco={:.4} svf_slab={:.4} hrs_deco={:.1} hrs_slab={:.1} err={:.2e}",
+            svf_deco_an, svf_slab_an, hrs_deco, hrs_slab, max_quad_err
+        );
+    } else {
+        println!("[FAIL] G13_ARTDECO_LIGHT err={:.2e} caught={}", max_quad_err, zero_w_caught);
+    }
+}
