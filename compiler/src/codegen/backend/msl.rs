@@ -473,42 +473,71 @@ impl MslBackend {
                 let r_expected = l_ty.as_ref().filter(|t| matches!(t, MirType::Int(_, _)));
                 let l = self.value_to_msl_typed(left, l_expected, &func.locals)?;
                 let r = self.value_to_msl_typed(right, r_expected, &func.locals)?;
-                if matches!(
-                    op,
-                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping
-                ) {
-                    let sym = match op {
-                        BinOp::AddWrapping => "+",
-                        BinOp::SubWrapping => "-",
-                        BinOp::MulWrapping => "*",
-                        _ => unreachable!(),
-                    };
-                    let is_signed_int = match left {
-                        MirValue::Local(id) => func
-                            .locals
-                            .get(id.0 as usize)
-                            .is_some_and(|loc| matches!(loc.ty, MirType::Int(_, true))),
-                        MirValue::Const(MirConst::Int(_, _)) => true,
-                        _ => false,
-                    };
-                    return Ok(if is_signed_int {
-                        format!(
-                            "static_cast<int>((static_cast<uint>({l}) {sym} static_cast<uint>({r})))"
-                        )
-                    } else {
-                        format!("({l} {sym} {r})")
-                    });
+                let left_ty = Self::infer_value_type(left, &func.locals);
+                let right_ty = Self::infer_value_type(right, &func.locals);
+                let op_ty = left_ty.as_ref().or(right_ty.as_ref());
+                let is_float = op_ty.is_some_and(MirType::is_float);
+                let is_int = op_ty.is_some_and(MirType::is_integer);
+                match op {
+                    BinOp::AddChecked
+                    | BinOp::SubChecked
+                    | BinOp::MulChecked
+                    | BinOp::AddSaturating
+                    | BinOp::SubSaturating
+                    | BinOp::MulSaturating => {
+                        return Err(CodegenError::Unsupported(format!(
+                            "MIR operator `{op:?}` is not supported in MSL shaders"
+                        )));
+                    }
+                    BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping => {
+                        if !is_int {
+                            return Err(CodegenError::Unsupported(format!(
+                                "wrapping operator `{op:?}` requires integer operands in MSL"
+                            )));
+                        }
+                        let sym = match op {
+                            BinOp::AddWrapping => "+",
+                            BinOp::SubWrapping => "-",
+                            BinOp::MulWrapping => "*",
+                            _ => unreachable!(),
+                        };
+                        if op_ty.is_some_and(MirType::is_signed) {
+                            let (s_ty, u_ty) = match op_ty {
+                                Some(MirType::Int(IntSize::I64 | IntSize::ISize, _)) => {
+                                    ("long", "ulong")
+                                }
+                                Some(MirType::Int(IntSize::I16, _)) => ("short", "ushort"),
+                                Some(MirType::Int(IntSize::I8, _)) => ("char", "uchar"),
+                                _ => ("int", "uint"),
+                            };
+                            return Ok(format!(
+                                "static_cast<{s_ty}>((static_cast<{u_ty}>({l}) {sym} static_cast<{u_ty}>({r})))"
+                            ));
+                        }
+                        return Ok(format!("({l} {sym} {r})"));
+                    }
+                    BinOp::Rem if is_float => {
+                        return Ok(format!("fmod({l}, {r})"));
+                    }
+                    BinOp::Pow => {
+                        if is_int {
+                            return Err(CodegenError::Unsupported(
+                                "integer `Pow` is not supported in MSL shaders".to_string(),
+                            ));
+                        }
+                        return Ok(format!("pow({l}, {r})"));
+                    }
+                    BinOp::Shl | BinOp::Shr => {
+                        let mask = Self::shift_mask(left_ty.as_ref());
+                        let sym = if matches!(op, BinOp::Shl) { "<<" } else { ">>" };
+                        return Ok(format!("({l} {sym} (static_cast<uint>({r}) & {mask}u))"));
+                    }
+                    _ => {}
                 }
                 let sym = match op {
-                    BinOp::Add | BinOp::AddChecked | BinOp::AddWrapping | BinOp::AddSaturating => {
-                        "+"
-                    }
-                    BinOp::Sub | BinOp::SubChecked | BinOp::SubWrapping | BinOp::SubSaturating => {
-                        "-"
-                    }
-                    BinOp::Mul | BinOp::MulChecked | BinOp::MulWrapping | BinOp::MulSaturating => {
-                        "*"
-                    }
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
                     BinOp::Div => "/",
                     BinOp::Rem => "%",
                     BinOp::Eq => "==",
@@ -520,9 +549,18 @@ impl MslBackend {
                     BinOp::BitAnd => "&",
                     BinOp::BitOr => "|",
                     BinOp::BitXor => "^",
-                    BinOp::Shl => "<<",
-                    BinOp::Shr => ">>",
-                    BinOp::Pow => return Ok(format!("pow({l}, {r})")),
+                    BinOp::Shl
+                    | BinOp::Shr
+                    | BinOp::Pow
+                    | BinOp::AddChecked
+                    | BinOp::SubChecked
+                    | BinOp::MulChecked
+                    | BinOp::AddWrapping
+                    | BinOp::SubWrapping
+                    | BinOp::MulWrapping
+                    | BinOp::AddSaturating
+                    | BinOp::SubSaturating
+                    | BinOp::MulSaturating => unreachable!(),
                 };
                 Ok(format!("({l} {sym} {r})"))
             }
@@ -534,9 +572,20 @@ impl MslBackend {
                     UnaryOp::BitNot => format!("(~{v})"),
                 })
             }
-            MirRValue::Cast { value, ty, .. } => {
+            MirRValue::Cast { kind, value, ty } => {
                 let v = self.value_to_msl(value, &func.locals)?;
                 let t = self.type_to_msl(ty)?;
+                if matches!(kind, CastKind::Transmute) {
+                    let from_ty = Self::infer_value_type(value, &func.locals);
+                    let is_float_int_reinterp = matches!(
+                        (from_ty.as_ref(), ty),
+                        (Some(MirType::Float(_)), MirType::Int(..))
+                            | (Some(MirType::Int(..)), MirType::Float(_))
+                    );
+                    if is_float_int_reinterp {
+                        return Ok(format!("as_type<{t}>({v})"));
+                    }
+                }
                 Ok(format!("static_cast<{t}>({v})"))
             }
             MirRValue::FieldAccess {
@@ -642,10 +691,14 @@ impl MslBackend {
             "cosf" => "cos",
             "tanf" => "tan",
             "expf" => "exp",
+            "exp2f" => "exp2",
             "logf" => "log",
+            "log2f" => "log2",
             "powf" => "pow",
             "floorf" => "floor",
             "ceilf" => "ceil",
+            "roundf" => "round",
+            "truncf" => "trunc",
             "fmaf" => "fma",
             "build_dot2" | "build_dot3" | "build_dot4" => "dot",
             "build_normalize2" | "build_normalize3" | "build_normalize4" => "normalize",
@@ -653,12 +706,16 @@ impl MslBackend {
             "build_cross" => "cross",
             "build_reflect3" => "reflect",
             "build_mix" | "lerp" | "build_lerp2" | "build_lerp3" | "build_lerp4" => "mix",
-            "build_clampf" | "build_clamp3" => "clamp",
+            "build_clampf" | "build_clamp3" | "build_clamp_i32" | "build_clamp_u32" => "clamp",
             "build_smoothstep" => "smoothstep",
             "build_fract" => "fract",
             "build_step" => "step",
-            "build_min_f32" | "build_min_i32" => "min",
-            "build_max_f32" | "build_max_i32" => "max",
+            "fmin" | "fminf" | "build_min_f32" | "build_min_f64" | "build_min_i32"
+            | "build_min_i64" | "build_min_u32" => "min",
+            "fmax" | "fmaxf" | "build_max_f32" | "build_max_f64" | "build_max_i32"
+            | "build_max_i64" | "build_max_u32" => "max",
+            "build_f32_to_bits" => "as_type<uint>",
+            "build_f32_from_bits" => "as_type<float>",
             "build_vec2_new" => "float2",
             "build_vec3_new" => "float3",
             "build_vec4_new" => "float4",
@@ -670,6 +727,29 @@ impl MslBackend {
             arg_strs.push(self.value_to_msl(a, locals)?);
         }
         Ok(format!("{mapped}({})", arg_strs.join(", ")))
+    }
+
+    fn infer_value_type(value: &MirValue, locals: &[MirLocal]) -> Option<MirType> {
+        match value {
+            MirValue::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()),
+            MirValue::Const(c) => match c {
+                MirConst::Bool(_) => Some(MirType::Bool),
+                MirConst::Int(_, ty) | MirConst::Uint(_, ty) | MirConst::Float(_, ty) => {
+                    Some(ty.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn shift_mask(ty: Option<&MirType>) -> u32 {
+        match ty {
+            Some(MirType::Int(IntSize::I8, _)) => 7,
+            Some(MirType::Int(IntSize::I16, _)) => 15,
+            Some(MirType::Int(IntSize::I64 | IntSize::ISize, _)) => 63,
+            _ => 31,
+        }
     }
 
     fn value_to_msl(&self, value: &MirValue, locals: &[MirLocal]) -> CodegenResult<String> {

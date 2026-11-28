@@ -7036,6 +7036,40 @@ impl<'ctx> MirLowerer<'ctx> {
                     func_val = MirValue::Function(Arc::from(format!("{stem}{suffix}")));
                     ret_ty = ty;
                 }
+            } else if ret_ty == MirType::f64()
+                && !arg_vals.is_empty()
+                && matches!(
+                    name.as_ref(),
+                    "fabs"
+                        | "sqrt"
+                        | "sin"
+                        | "cos"
+                        | "tan"
+                        | "exp"
+                        | "exp2"
+                        | "log"
+                        | "log2"
+                        | "pow"
+                        | "floor"
+                        | "ceil"
+                        | "round"
+                        | "trunc"
+                        | "fma"
+                        | "atan2"
+                        | "build_clampf"
+                        | "build_mix"
+                        | "build_smoothstep"
+                        | "build_fract"
+                        | "build_step"
+                )
+                && arg_vals
+                    .iter()
+                    .all(|v| matches!(self.type_of_value(v), MirType::Float(FloatSize::F32)))
+            {
+                // Preserve f32 precision when every argument to a free math builtin
+                // is f32 so pure-f32 GPU shaders do not introduce spurious f64 locals
+                // rejected by WGSL and MSL.
+                ret_ty = MirType::Float(FloatSize::F32);
             }
         }
 

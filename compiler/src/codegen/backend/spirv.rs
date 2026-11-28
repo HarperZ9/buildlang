@@ -1556,33 +1556,84 @@ impl SpirvBackend {
         self.emit_glsl_ext(result_type, 71, &[i, n]) // GLSLstd450Reflect = 71
     }
 
-    /// Map a C runtime function name to GLSL.std.450 opcode, if applicable.
-    /// This allows builtins like sqrt, sin, clamp to be emitted as OpExtInst
-    /// instead of OpFunctionCall in SPIR-V shaders.
-    fn glsl_builtin_opcode(name: &str) -> Option<u32> {
+    /// Map a C runtime function name and return type to a GLSL.std.450 opcode.
+    /// Type-dispatched ops (`abs`, `min`, `max`, `clamp`) select the exact float,
+    /// signed integer, or unsigned integer extended instruction so SPIR-V never
+    /// applies float-only `FMin`/`FMax`/`FAbs`/`FClamp` to integer operands.
+    fn glsl_builtin_opcode(name: &str, ret_ty: &MirType) -> Option<u32> {
+        let scalar_ty = match ret_ty {
+            MirType::Vector(elem, _) => elem.as_ref(),
+            other => other,
+        };
+        let is_float = scalar_ty.is_float();
+        let is_signed = scalar_ty.is_signed();
         match name {
             // Standard math (1-arg)
-            "sqrt" => Some(31),        // GLSLstd450Sqrt
-            "sin" => Some(13),         // GLSLstd450Sin
-            "cos" => Some(14),         // GLSLstd450Cos
-            "tan" => Some(15),         // GLSLstd450Tan
-            "fabs" | "abs" => Some(4), // GLSLstd450FAbs
-            "floor" => Some(8),        // GLSLstd450Floor
-            "ceil" => Some(9),         // GLSLstd450Ceil
-            "round" => Some(1),        // GLSLstd450Round
-            "exp" => Some(27),         // GLSLstd450Exp
-            "log" => Some(28),         // GLSLstd450Log
-            "exp2" => Some(29),        // GLSLstd450Exp2
-            "log2" => Some(30),        // GLSLstd450Log2
+            "sqrt" | "sqrtf" => Some(31), // GLSLstd450Sqrt
+            "sin" | "sinf" => Some(13),   // GLSLstd450Sin
+            "cos" | "cosf" => Some(14),   // GLSLstd450Cos
+            "tan" | "tanf" => Some(15),   // GLSLstd450Tan
+            "asin" | "asinf" => Some(16), // GLSLstd450Asin
+            "acos" | "acosf" => Some(17), // GLSLstd450Acos
+            "atan" | "atanf" => Some(18), // GLSLstd450Atan
+            "sinh" | "sinhf" => Some(19), // GLSLstd450Sinh
+            "cosh" | "coshf" => Some(20), // GLSLstd450Cosh
+            "tanh" | "tanhf" => Some(21), // GLSLstd450Tanh
+            "fabs" | "fabsf" => Some(4),  // GLSLstd450FAbs
+            "abs" => {
+                if is_float {
+                    Some(4) // GLSLstd450FAbs
+                } else if is_signed {
+                    Some(5) // GLSLstd450SAbs
+                } else {
+                    None
+                }
+            }
+            "trunc" | "truncf" => Some(3), // GLSLstd450Trunc
+            "floor" | "floorf" => Some(8), // GLSLstd450Floor
+            "ceil" | "ceilf" => Some(9),   // GLSLstd450Ceil
+            "round" | "roundf" => Some(1), // GLSLstd450Round
+            "exp" | "expf" => Some(27),    // GLSLstd450Exp
+            "log" | "logf" => Some(28),    // GLSLstd450Log
+            "exp2" | "exp2f" => Some(29),  // GLSLstd450Exp2
+            "log2" | "log2f" => Some(30),  // GLSLstd450Log2
 
             // Standard math (2-arg / 3-arg)
-            "pow" => Some(26), // GLSLstd450Pow
-            "build_min_i32" | "build_min_f32" | "build_min_f64" | "fmin" => Some(37), // GLSLstd450FMin
-            "build_max_i32" | "build_max_f32" | "build_max_f64" | "fmax" => Some(40), // GLSLstd450FMax
+            "atan2" | "atan2f" => Some(25), // GLSLstd450Atan2
+            "pow" | "powf" => Some(26),     // GLSLstd450Pow
+            "build_min_f32" | "build_min_f64" | "fmin" | "fminf" => Some(37), // GLSLstd450FMin
+            "build_min_u32" => Some(38),    // GLSLstd450UMin
+            "build_min_i32" | "build_min_i64" => Some(39), // GLSLstd450SMin
+            "min" => Some(if is_float {
+                37 // GLSLstd450FMin
+            } else if is_signed {
+                39 // GLSLstd450SMin
+            } else {
+                38 // GLSLstd450UMin
+            }),
+            "build_max_f32" | "build_max_f64" | "fmax" | "fmaxf" => Some(40), // GLSLstd450FMax
+            "build_max_u32" => Some(41),                                      // GLSLstd450UMax
+            "build_max_i32" | "build_max_i64" => Some(42),                    // GLSLstd450SMax
+            "max" => Some(if is_float {
+                40 // GLSLstd450FMax
+            } else if is_signed {
+                42 // GLSLstd450SMax
+            } else {
+                41 // GLSLstd450UMax
+            }),
             "fma" | "fmaf" => Some(50), // GLSLstd450Fma
 
             // Shader math (2-arg or 3-arg)
-            "build_clampf" => Some(43),     // GLSLstd450FClamp
+            "build_clampf" | "build_clamp3" => Some(43), // GLSLstd450FClamp
+            "build_clamp_u32" => Some(44),               // GLSLstd450UClamp
+            "build_clamp_i32" => Some(45),               // GLSLstd450SClamp
+            "clamp" => Some(if is_float {
+                43 // GLSLstd450FClamp
+            } else if is_signed {
+                45 // GLSLstd450SClamp
+            } else {
+                44 // GLSLstd450UClamp
+            }),
             "build_smoothstep" => Some(49), // GLSLstd450SmoothStep
             "build_mix" => Some(46),        // GLSLstd450FMix
             "build_step" => Some(48),       // GLSLstd450Step
@@ -2843,8 +2894,7 @@ impl SpirvBackend {
                 let left = self.coerce_operand_signedness(left, &ty);
                 let right = self.coerce_operand_signedness(right, &ty);
                 let left_id = self.gen_value(&left, func)?;
-                let right_id = self.gen_value(&right, func)?;
-                let result_id = self.alloc_id();
+                let mut right_id = self.gen_value(&right, func)?;
 
                 // Comparison ops return bool, not the operand type
                 let is_comparison = matches!(
@@ -2857,10 +2907,49 @@ impl SpirvBackend {
                     self.get_type_id(&ty)
                 };
 
-                let opcode = match &ty {
-                    MirType::Vector(elem, _) => self.spirv_binop(*op, elem),
-                    _ => self.spirv_binop(*op, &ty),
+                let scalar_ty = match &ty {
+                    MirType::Vector(elem, _) => elem.as_ref(),
+                    other => other,
                 };
+
+                // Pow lowers via GLSL.std.450 extended instruction `Pow` (26) for floats
+                // and fails closed on integers (matching HLSL/GLSL/WGSL/MSL).
+                if *op == BinOp::Pow {
+                    if scalar_ty.is_float() {
+                        return Ok(self.emit_glsl_ext(result_ty_id, 26, &[left_id, right_id]));
+                    }
+                    return Err(CodegenError::Unsupported(
+                        "integer `Pow` is not supported in SPIR-V shaders".to_string(),
+                    ));
+                }
+
+                // Mask shift counts modulo the left operand's bit width (`bits - 1`)
+                // to eliminate SPIR-V shift-count UB and match CPU C shift semantics.
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    let mask: u64 = match scalar_ty {
+                        MirType::Int(IntSize::I8, _) => 7,
+                        MirType::Int(IntSize::I16, _) => 15,
+                        MirType::Int(IntSize::I64 | IntSize::ISize, _) => 63,
+                        _ => 31,
+                    };
+                    let right_ty = self.infer_value_type(&right, func)?;
+                    let right_ty_id = self.get_type_id(&right_ty);
+                    let mask_const = match &right_ty {
+                        MirType::Int(_, false) => {
+                            self.get_const_id(&MirConst::Uint(mask as u128, right_ty.clone()))
+                        }
+                        _ => self.get_const_id(&MirConst::Int(mask as i128, right_ty.clone())),
+                    };
+                    let masked_id = self.alloc_id();
+                    self.emit(
+                        SpvOp::OpBitwiseAnd,
+                        &[right_ty_id, masked_id, right_id, mask_const],
+                    );
+                    right_id = masked_id;
+                }
+
+                let result_id = self.alloc_id();
+                let opcode = self.spirv_binop(*op, scalar_ty)?;
                 self.emit(opcode, &[result_ty_id, result_id, left_id, right_id]);
                 Ok(result_id)
             }
@@ -2870,19 +2959,25 @@ impl SpirvBackend {
                 let ty_id = self.get_type_id(&ty);
                 let result_id = self.alloc_id();
 
-                let is_float = match &ty {
-                    MirType::Vector(elem, _) => elem.is_float(),
-                    _ => ty.is_float(),
+                let scalar_ty = match &ty {
+                    MirType::Vector(elem, _) => elem.as_ref(),
+                    other => other,
                 };
                 let opcode = match op {
                     UnaryOp::Neg => {
-                        if is_float {
+                        if scalar_ty.is_float() {
                             SpvOp::OpFNegate
                         } else {
                             SpvOp::OpSNegate
                         }
                     }
-                    UnaryOp::Not => SpvOp::OpNot,
+                    UnaryOp::Not => {
+                        if matches!(scalar_ty, MirType::Bool) {
+                            SpvOp::OpLogicalNot
+                        } else {
+                            SpvOp::OpNot
+                        }
+                    }
                     UnaryOp::BitNot => SpvOp::OpNot,
                 };
                 self.emit(opcode, &[ty_id, result_id, operand_id]);
@@ -2891,8 +2986,50 @@ impl SpirvBackend {
             MirRValue::Cast { kind, value, ty } => {
                 let val_id = self.gen_value(value, func)?;
                 let from_ty = self.infer_value_type(value, func)?;
+                if from_ty == *ty {
+                    return Ok(val_id);
+                }
                 let to_ty_id = self.get_type_id(ty);
                 let result_id = self.alloc_id();
+
+                // SPIR-V forbids OpBitcast/OpSConvert involving OpTypeBool:
+                // emit OpSelect for bool -> numeric and OpINotEqual for int -> bool.
+                if matches!(from_ty, MirType::Bool) {
+                    match ty {
+                        MirType::Int(_, signed) => {
+                            let one = if *signed {
+                                self.get_const_id(&MirConst::Int(1, ty.clone()))
+                            } else {
+                                self.get_const_id(&MirConst::Uint(1, ty.clone()))
+                            };
+                            let zero = if *signed {
+                                self.get_const_id(&MirConst::Int(0, ty.clone()))
+                            } else {
+                                self.get_const_id(&MirConst::Uint(0, ty.clone()))
+                            };
+                            self.emit(SpvOp::OpSelect, &[to_ty_id, result_id, val_id, one, zero]);
+                            return Ok(result_id);
+                        }
+                        MirType::Float(_) => {
+                            let one = self.get_const_id(&MirConst::Float(1.0, ty.clone()));
+                            let zero = self.get_const_id(&MirConst::Float(0.0, ty.clone()));
+                            self.emit(SpvOp::OpSelect, &[to_ty_id, result_id, val_id, one, zero]);
+                            return Ok(result_id);
+                        }
+                        _ => {}
+                    }
+                }
+                if matches!(ty, MirType::Bool) {
+                    if let MirType::Int(_, signed) = &from_ty {
+                        let zero = if *signed {
+                            self.get_const_id(&MirConst::Int(0, from_ty.clone()))
+                        } else {
+                            self.get_const_id(&MirConst::Uint(0, from_ty.clone()))
+                        };
+                        self.emit(SpvOp::OpINotEqual, &[to_ty_id, result_id, val_id, zero]);
+                        return Ok(result_id);
+                    }
+                }
 
                 let opcode = self.spirv_cast(*kind, &from_ty, ty);
                 self.emit(opcode, &[to_ty_id, result_id, val_id]);
@@ -3097,10 +3234,10 @@ impl SpirvBackend {
                 self.emit(SpvOp::OpLoad, &[ty_id, result_id, ptr_id]);
                 Ok(result_id)
             }
-            _ => {
-                // Truly unknown operations - return zero as safe fallback
-                let zero = self.get_const_id(&MirConst::Int(0, MirType::i32()));
-                Ok(zero)
+            MirRValue::AddressOfGlobal { .. } | MirRValue::Discriminant(_) | MirRValue::Len(_) => {
+                Err(CodegenError::Unsupported(format!(
+                    "MIR rvalue `{rvalue:?}` is not supported in SPIR-V shaders"
+                )))
             }
         }
     }
@@ -3412,14 +3549,28 @@ impl SpirvBackend {
                 };
                 let ret_ty_id = self.get_type_id(&ret_ty);
 
-                // Check if callee is a GLSL.std.450 builtin - emit OpExtInst instead of OpFunctionCall
+                // Check if callee is a bitcast or GLSL.std.450 builtin
                 let callee_name = match callee {
                     MirValue::Function(name) | MirValue::Global(name) => Some(name.as_ref()),
                     _ => None,
                 };
-                let glsl_opcode = callee_name.and_then(|name| Self::glsl_builtin_opcode(name));
+                let is_bitcast_builtin = matches!(
+                    callee_name,
+                    Some(
+                        "build_f32_to_bits"
+                            | "build_f32_from_bits"
+                            | "build_f64_to_bits"
+                            | "build_f64_from_bits"
+                    )
+                ) && arg_ids.len() == 1;
+                let glsl_opcode =
+                    callee_name.and_then(|name| Self::glsl_builtin_opcode(name, &ret_ty));
 
-                let result_id = if let Some(opcode) = glsl_opcode {
+                let result_id = if is_bitcast_builtin {
+                    let result_id = self.alloc_id();
+                    self.emit(SpvOp::OpBitcast, &[ret_ty_id, result_id, arg_ids[0]]);
+                    result_id
+                } else if let Some(opcode) = glsl_opcode {
                     // GLSL.std.450 extended instruction
                     self.emit_glsl_ext(ret_ty_id, opcode, &arg_ids)
                 } else {
@@ -3523,113 +3674,117 @@ impl SpirvBackend {
     // HELPERS
     // =========================================================================
 
-    /// Get the SPIR-V binary operation opcode.
-    fn spirv_binop(&self, op: BinOp, ty: &MirType) -> SpvOp {
+    /// Get the SPIR-V binary operation opcode (exhaustive, zero silent fallback).
+    fn spirv_binop(&self, op: BinOp, ty: &MirType) -> CodegenResult<SpvOp> {
         let is_float = ty.is_float();
         let is_signed = ty.is_signed();
+        let is_bool = matches!(ty, MirType::Bool);
 
         match op {
-            BinOp::Add | BinOp::AddWrapping => {
-                if is_float {
-                    SpvOp::OpFAdd
-                } else {
-                    SpvOp::OpIAdd
+            BinOp::Add => Ok(if is_float {
+                SpvOp::OpFAdd
+            } else {
+                SpvOp::OpIAdd
+            }),
+            BinOp::Sub => Ok(if is_float {
+                SpvOp::OpFSub
+            } else {
+                SpvOp::OpISub
+            }),
+            BinOp::Mul => Ok(if is_float {
+                SpvOp::OpFMul
+            } else {
+                SpvOp::OpIMul
+            }),
+            BinOp::AddWrapping | BinOp::SubWrapping | BinOp::MulWrapping => {
+                if !ty.is_integer() {
+                    return Err(CodegenError::Unsupported(format!(
+                        "wrapping operator `{op:?}` requires integer operands in SPIR-V"
+                    )));
                 }
+                Ok(match op {
+                    BinOp::AddWrapping => SpvOp::OpIAdd,
+                    BinOp::SubWrapping => SpvOp::OpISub,
+                    BinOp::MulWrapping => SpvOp::OpIMul,
+                    _ => unreachable!(),
+                })
             }
-            BinOp::Sub | BinOp::SubWrapping => {
-                if is_float {
-                    SpvOp::OpFSub
-                } else {
-                    SpvOp::OpISub
-                }
-            }
-            BinOp::Mul | BinOp::MulWrapping => {
-                if is_float {
-                    SpvOp::OpFMul
-                } else {
-                    SpvOp::OpIMul
-                }
-            }
-            BinOp::Div => {
-                if is_float {
-                    SpvOp::OpFDiv
-                } else if is_signed {
-                    SpvOp::OpSDiv
-                } else {
-                    SpvOp::OpUDiv
-                }
-            }
-            BinOp::Rem => {
-                if is_float {
-                    SpvOp::OpFRem
-                } else if is_signed {
-                    SpvOp::OpSRem
-                } else {
-                    SpvOp::OpUMod
-                }
-            }
-            BinOp::BitAnd => SpvOp::OpBitwiseAnd,
-            BinOp::BitOr => SpvOp::OpBitwiseOr,
-            BinOp::BitXor => SpvOp::OpBitwiseXor,
-            BinOp::Shl => SpvOp::OpShiftLeftLogical,
-            BinOp::Shr => {
-                if is_signed {
-                    SpvOp::OpShiftRightArithmetic
-                } else {
-                    SpvOp::OpShiftRightLogical
-                }
-            }
-            BinOp::Eq => {
-                if is_float {
-                    SpvOp::OpFOrdEqual
-                } else {
-                    SpvOp::OpIEqual
-                }
-            }
-            BinOp::Ne => {
-                if is_float {
-                    SpvOp::OpFOrdNotEqual
-                } else {
-                    SpvOp::OpINotEqual
-                }
-            }
-            BinOp::Lt => {
-                if is_float {
-                    SpvOp::OpFOrdLessThan
-                } else if is_signed {
-                    SpvOp::OpSLessThan
-                } else {
-                    SpvOp::OpULessThan
-                }
-            }
-            BinOp::Le => {
-                if is_float {
-                    SpvOp::OpFOrdLessThanEqual
-                } else if is_signed {
-                    SpvOp::OpSLessThanEqual
-                } else {
-                    SpvOp::OpULessThanEqual
-                }
-            }
-            BinOp::Gt => {
-                if is_float {
-                    SpvOp::OpFOrdGreaterThan
-                } else if is_signed {
-                    SpvOp::OpSGreaterThan
-                } else {
-                    SpvOp::OpUGreaterThan
-                }
-            }
-            BinOp::Ge => {
-                if is_float {
-                    SpvOp::OpFOrdGreaterThanEqual
-                } else if is_signed {
-                    SpvOp::OpSGreaterThanEqual
-                } else {
-                    SpvOp::OpUGreaterThanEqual
-                }
-            }
-            _ => SpvOp::OpIAdd, // Fallback
+            BinOp::Div => Ok(if is_float {
+                SpvOp::OpFDiv
+            } else if is_signed {
+                SpvOp::OpSDiv
+            } else {
+                SpvOp::OpUDiv
+            }),
+            BinOp::Rem => Ok(if is_float {
+                SpvOp::OpFRem
+            } else if is_signed {
+                SpvOp::OpSRem
+            } else {
+                SpvOp::OpUMod
+            }),
+            BinOp::BitAnd => Ok(SpvOp::OpBitwiseAnd),
+            BinOp::BitOr => Ok(SpvOp::OpBitwiseOr),
+            BinOp::BitXor => Ok(SpvOp::OpBitwiseXor),
+            BinOp::Shl => Ok(SpvOp::OpShiftLeftLogical),
+            BinOp::Shr => Ok(if is_signed {
+                SpvOp::OpShiftRightArithmetic
+            } else {
+                SpvOp::OpShiftRightLogical
+            }),
+            BinOp::Eq => Ok(if is_bool {
+                SpvOp::OpLogicalEqual
+            } else if is_float {
+                SpvOp::OpFOrdEqual
+            } else {
+                SpvOp::OpIEqual
+            }),
+            BinOp::Ne => Ok(if is_bool {
+                SpvOp::OpLogicalNotEqual
+            } else if is_float {
+                // IEEE-754 `!=` is unordered (`NaN != NaN` is true), matching
+                // C, HLSL, GLSL, WGSL, and MSL.
+                SpvOp::OpFUnordNotEqual
+            } else {
+                SpvOp::OpINotEqual
+            }),
+            BinOp::Lt => Ok(if is_float {
+                SpvOp::OpFOrdLessThan
+            } else if is_signed {
+                SpvOp::OpSLessThan
+            } else {
+                SpvOp::OpULessThan
+            }),
+            BinOp::Le => Ok(if is_float {
+                SpvOp::OpFOrdLessThanEqual
+            } else if is_signed {
+                SpvOp::OpSLessThanEqual
+            } else {
+                SpvOp::OpULessThanEqual
+            }),
+            BinOp::Gt => Ok(if is_float {
+                SpvOp::OpFOrdGreaterThan
+            } else if is_signed {
+                SpvOp::OpSGreaterThan
+            } else {
+                SpvOp::OpUGreaterThan
+            }),
+            BinOp::Ge => Ok(if is_float {
+                SpvOp::OpFOrdGreaterThanEqual
+            } else if is_signed {
+                SpvOp::OpSGreaterThanEqual
+            } else {
+                SpvOp::OpUGreaterThanEqual
+            }),
+            BinOp::Pow
+            | BinOp::AddChecked
+            | BinOp::SubChecked
+            | BinOp::MulChecked
+            | BinOp::AddSaturating
+            | BinOp::SubSaturating
+            | BinOp::MulSaturating => Err(CodegenError::Unsupported(format!(
+                "MIR operator `{op:?}` is not supported in SPIR-V shaders"
+            ))),
         }
     }
 
@@ -3637,6 +3792,13 @@ impl SpirvBackend {
     fn spirv_cast(&self, kind: CastKind, from: &MirType, to: &MirType) -> SpvOp {
         match kind {
             CastKind::IntToInt => {
+                // SPIR-V forbids OpSConvert/OpUConvert when source and destination
+                // have the same bit width (e.g. i32 <-> u32); emit OpBitcast instead.
+                if let (MirType::Int(s_from, _), MirType::Int(s_to, _)) = (from, to) {
+                    if s_from == s_to {
+                        return SpvOp::OpBitcast;
+                    }
+                }
                 if from.is_signed() {
                     SpvOp::OpSConvert
                 } else {
@@ -5909,41 +6071,70 @@ mod tests {
 
         assert!(matches!(
             backend.spirv_binop(BinOp::Add, &MirType::i32()),
-            SpvOp::OpIAdd
+            Ok(SpvOp::OpIAdd)
         ));
         assert!(matches!(
             backend.spirv_binop(BinOp::Add, &MirType::f32()),
-            SpvOp::OpFAdd
+            Ok(SpvOp::OpFAdd)
         ));
         assert!(matches!(
             backend.spirv_binop(BinOp::Div, &MirType::i32()),
-            SpvOp::OpSDiv
+            Ok(SpvOp::OpSDiv)
         ));
         assert!(matches!(
             backend.spirv_binop(BinOp::Div, &MirType::u32()),
-            SpvOp::OpUDiv
+            Ok(SpvOp::OpUDiv)
         ));
-        // Wave 111C: wrapping ops must emit exact two's-complement SPIR-V opcodes
-        // (never fall through to OpIAdd for SubWrapping/MulWrapping).
         assert!(matches!(
             backend.spirv_binop(BinOp::AddWrapping, &MirType::u32()),
-            SpvOp::OpIAdd
+            Ok(SpvOp::OpIAdd)
         ));
         assert!(matches!(
             backend.spirv_binop(BinOp::SubWrapping, &MirType::u32()),
-            SpvOp::OpISub
+            Ok(SpvOp::OpISub)
         ));
         assert!(matches!(
             backend.spirv_binop(BinOp::MulWrapping, &MirType::u32()),
-            SpvOp::OpIMul
+            Ok(SpvOp::OpIMul)
         ));
         assert!(matches!(
-            backend.spirv_binop(BinOp::SubWrapping, &MirType::i32()),
-            SpvOp::OpISub
+            backend.spirv_binop(BinOp::Ne, &MirType::f32()),
+            Ok(SpvOp::OpFUnordNotEqual)
         ));
         assert!(matches!(
-            backend.spirv_binop(BinOp::MulWrapping, &MirType::i32()),
-            SpvOp::OpIMul
+            backend.spirv_binop(BinOp::Eq, &MirType::Bool),
+            Ok(SpvOp::OpLogicalEqual)
+        ));
+        assert!(matches!(
+            backend.spirv_binop(BinOp::Ne, &MirType::Bool),
+            Ok(SpvOp::OpLogicalNotEqual)
+        ));
+        assert!(backend
+            .spirv_binop(BinOp::AddChecked, &MirType::i32())
+            .is_err());
+        assert!(backend
+            .spirv_binop(BinOp::AddSaturating, &MirType::u32())
+            .is_err());
+        assert!(backend.spirv_binop(BinOp::Pow, &MirType::i32()).is_err());
+        assert_eq!(
+            SpirvBackend::glsl_builtin_opcode("build_min_i32", &MirType::i32()),
+            Some(39)
+        );
+        assert_eq!(
+            SpirvBackend::glsl_builtin_opcode("build_max_i32", &MirType::i32()),
+            Some(42)
+        );
+        assert_eq!(
+            SpirvBackend::glsl_builtin_opcode("abs", &MirType::i32()),
+            Some(5)
+        );
+        assert_eq!(
+            SpirvBackend::glsl_builtin_opcode("abs", &MirType::f32()),
+            Some(4)
+        );
+        assert!(matches!(
+            backend.spirv_cast(CastKind::IntToInt, &MirType::i32(), &MirType::u32()),
+            SpvOp::OpBitcast
         ));
     }
 
