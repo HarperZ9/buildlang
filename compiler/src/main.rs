@@ -7607,7 +7607,7 @@ fn invoke_c_compiler(
         cmd.args(c_fp_flags(false));
         if release {
             cmd.arg("-O2");
-            cmd.args(c_vector_flags());
+            cmd.args(c_vector_flags(compiler));
         } else {
             cmd.arg("-g");
         }
@@ -7659,11 +7659,26 @@ pub(crate) fn c_fp_flags(is_msvc: bool) -> &'static [&'static str] {
 
 /// Release builds also let gcc and clang vectorize loops that need a runtime alias
 /// check: at plain `-O2` gcc uses its "very cheap" cost model, which refuses to
-/// version a loop for aliasing, so a loop over several slices stayed scalar. This
-/// changes no result: with `-ffp-contract=off -fno-fast-math` (DETMATH) the
+/// version a loop for aliasing, so a loop over several slices stayed scalar.
+/// Clang accepts `-ftree-vectorize` but rejects gcc-only `-fvect-cost-model=dynamic`,
+/// so only pass `-fvect-cost-model=dynamic` when invoking gcc.
+/// This changes no result: with `-ffp-contract=off -fno-fast-math` (DETMATH) the
 /// vectorizer never reassociates or fuses floating-point operations.
-pub(crate) fn c_vector_flags() -> &'static [&'static str] {
-    &["-ftree-vectorize", "-fvect-cost-model=dynamic"]
+pub(crate) fn c_vector_flags(compiler: &str) -> &'static [&'static str] {
+    c_vector_flags_for(compiler, std::env::consts::OS)
+}
+
+fn c_vector_flags_for(compiler: &str, target_os: &str) -> &'static [&'static str] {
+    let lower = std::path::Path::new(compiler)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(compiler)
+        .to_ascii_lowercase();
+    if lower.contains("clang") || (target_os == "macos" && !lower.contains("gcc")) {
+        &["-ftree-vectorize"]
+    } else {
+        &["-ftree-vectorize", "-fvect-cost-model=dynamic"]
+    }
 }
 
 fn host_c_link_libraries(is_msvc: bool) -> &'static [&'static str] {
@@ -12408,9 +12423,11 @@ mod tests {
     #[test]
     fn release_c_builds_vectorize_without_changing_floating_point() {
         assert_eq!(
-            c_vector_flags(),
+            c_vector_flags_for("gcc", "linux"),
             &["-ftree-vectorize", "-fvect-cost-model=dynamic"]
         );
+        assert_eq!(c_vector_flags_for("clang", "linux"), &["-ftree-vectorize"]);
+        assert_eq!(c_vector_flags_for("cc", "macos"), &["-ftree-vectorize"]);
         // DETMATH stays: no contraction, no fast maths, so vectorising reorders nothing.
         assert_eq!(c_fp_flags(false), &["-ffp-contract=off", "-fno-fast-math"]);
     }
