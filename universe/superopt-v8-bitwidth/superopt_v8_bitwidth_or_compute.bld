@@ -1,0 +1,46 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// BuildLang Superopt V8 Bit-Width OR-Reduction GPU Compute Kernel.
+// Replaces an 8-lane unsigned block-max reduction with a branchless bitwise OR
+// before computing exact integer bit-width (32 - clz), targeting all 5 GPU
+// backends (WGSL, HLSL SM6.6, MSL 3.1, SPIR-V 1.6, GLSL 4.60).
+
+#[compute(workgroup_size = [64, 1, 1])]
+fn superopt_v8_bitwidth_or_compute(
+    x0_buf: &[u32],
+    x1_buf: &[u32],
+    x2_buf: &[u32],
+    x3_buf: &[u32],
+    x4_buf: &[u32],
+    x5_buf: &[u32],
+    x6_buf: &[u32],
+    x7_buf: &[u32],
+    or_mask_out: &mut [u32],
+    bit_width_out: &mut [u32],
+) ~ Gpu {
+    let i = gl_GlobalInvocationID.x;
+    let x0: u32 = x0_buf[i];
+    let x1: u32 = x1_buf[i];
+    let x2: u32 = x2_buf[i];
+    let x3: u32 = x3_buf[i];
+    let x4: u32 = x4_buf[i];
+    let x5: u32 = x5_buf[i];
+    let x6: u32 = x6_buf[i];
+    let x7: u32 = x7_buf[i];
+
+    let acc: u32 = (x0 | x1) | (x2 | x3) | (x4 | x5) | (x6 | x7);
+    or_mask_out[i] = acc;
+
+    let mut v: u32 = acc;
+    let mut w: u32 = 0;
+    if v != 0 {
+        if (v >> 16) != 0 { v = v >> 16; w = w | 16; }
+        if (v >> 8) != 0 { v = v >> 8; w = w | 8; }
+        if (v >> 4) != 0 { v = v >> 4; w = w | 4; }
+        if (v >> 2) != 0 { v = v >> 2; w = w | 2; }
+        if (v >> 1) != 0 { v = v >> 1; w = w | 1; }
+        w = w.wrapping_add(1);
+    }
+    bit_width_out[i] = w;
+}

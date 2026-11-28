@@ -1,0 +1,134 @@
+// SPDX-FileCopyrightText: 2026 Zain Dana Harper
+// SPDX-License-Identifier: MIT
+//
+// BuildLang Superopt V8 Bit-Width OR-Reduction Rule Verification & Benchmark.
+// Verifies the unsigned bit-width identity:
+//   bit_width(max_i x_i) == bit_width(or_i x_i)
+// across 100,000 deterministic random 8-lane unsigned blocks (800,000 lanes),
+// plus two fail-closed planted controls (signed negative input rejection and
+// mutated bitmask divergence detection).
+
+pub fn bit_width_u32(v0: u32) -> u32 {
+    if v0 == 0 {
+        return 0;
+    }
+    let mut v: u32 = v0;
+    let mut w: u32 = 0;
+    if (v >> 16) != 0 { v = v >> 16; w = w + 16; }
+    if (v >> 8) != 0 { v = v >> 8; w = w + 8; }
+    if (v >> 4) != 0 { v = v >> 4; w = w + 4; }
+    if (v >> 2) != 0 { v = v >> 2; w = w + 2; }
+    if (v >> 1) != 0 { v = v >> 1; w = w + 1; }
+    w + 1
+}
+
+pub fn max_u32(a: u32, b: u32) -> u32 {
+    if a > b { return a; }
+    b
+}
+
+pub fn block_bit_width_max(
+    x0: u32, x1: u32, x2: u32, x3: u32,
+    x4: u32, x5: u32, x6: u32, x7: u32
+) -> u32 {
+    let m01: u32 = max_u32(x0, x1);
+    let m23: u32 = max_u32(x2, x3);
+    let m45: u32 = max_u32(x4, x5);
+    let m67: u32 = max_u32(x6, x7);
+    let m03: u32 = max_u32(m01, m23);
+    let m47: u32 = max_u32(m45, m67);
+    bit_width_u32(max_u32(m03, m47))
+}
+
+pub fn block_bit_width_or(
+    x0: u32, x1: u32, x2: u32, x3: u32,
+    x4: u32, x5: u32, x6: u32, x7: u32
+) -> u32 {
+    let acc: u32 = (x0 | x1) | (x2 | x3) | (x4 | x5) | (x6 | x7);
+    bit_width_u32(acc)
+}
+
+// Planted Control 1: identity holds strictly for unsigned non-negative lanes;
+// negative two's-complement values set the sign bit (width 32) and must be rejected.
+pub fn validate_signed_block_guard(s0: i32, s1: i32) -> i32 {
+    if s0 < 0 || s1 < 0 {
+        return -101;
+    }
+    let u0: u32 = s0 as u32;
+    let u1: u32 = s1 as u32;
+    let w_max: u32 = bit_width_u32(max_u32(u0, u1));
+    let w_or: u32 = bit_width_u32(u0 | u1);
+    if w_max == w_or {
+        return 0;
+    }
+    -102
+}
+
+// Planted Control 2: mutating the OR-reduction accumulator with flip_mask must
+// trigger a bit-width mismatch against the reference block-max reduction.
+pub fn verify_mutated_mask_control(
+    x0: u32, x1: u32, x2: u32, x3: u32,
+    x4: u32, x5: u32, x6: u32, x7: u32,
+    flip_mask: u32
+) -> i32 {
+    let ref_w: u32 = block_bit_width_max(x0, x1, x2, x3, x4, x5, x6, x7);
+    let acc: u32 = ((x0 | x1) | (x2 | x3) | (x4 | x5) | (x6 | x7)) ^ flip_mask;
+    let mut_w: u32 = bit_width_u32(acc);
+    if ref_w != mut_w {
+        return -201;
+    }
+    0
+}
+
+pub fn xorshift32(s0: u32) -> u32 {
+    let mut x: u32 = s0;
+    if x == 0 { x = 2463534242; }
+    x = x ^ (x << 13);
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    x
+}
+
+// Verifies 100,000 deterministic random 8-lane unsigned blocks (800,000 lanes).
+// Returns FNV-1a digest of all 100,000 bit-widths, or 0 if any block mismatches.
+pub fn verify_100k_blocks(seed: u32) -> u32 {
+    let mut s: u32 = seed;
+    let mut digest: u32 = 2166136261;
+    let mut i: i32 = 0;
+    while i < 100000 {
+        // Vary bit-width distribution across [0, 32] by shifting each block
+        let shift: u32 = (s & 31);
+        s = xorshift32(s); let x0: u32 = s >> shift;
+        s = xorshift32(s); let x1: u32 = s >> shift;
+        s = xorshift32(s); let x2: u32 = s >> shift;
+        s = xorshift32(s); let x3: u32 = s >> shift;
+        s = xorshift32(s); let x4: u32 = s >> shift;
+        s = xorshift32(s); let x5: u32 = s >> shift;
+        s = xorshift32(s); let x6: u32 = s >> shift;
+        s = xorshift32(s); let x7: u32 = s >> shift;
+
+        let w_max: u32 = block_bit_width_max(x0, x1, x2, x3, x4, x5, x6, x7);
+        let w_or: u32 = block_bit_width_or(x0, x1, x2, x3, x4, x5, x6, x7);
+        if w_max != w_or {
+            return 0;
+        }
+        digest = ((digest << 5) | (digest >> 27)) ^ w_or ^ 2654435769;
+        i = i + 1;
+    }
+    if digest == 0 { return 1; }
+    digest
+}
+
+fn main() -> i32 {
+    let zero_w: u32 = block_bit_width_or(0, 0, 0, 0, 0, 0, 0, 0);
+    let max_w: u32 = block_bit_width_or(0, 0, 0, 4294967295, 0, 0, 0, 0);
+    let digest: u32 = verify_100k_blocks(539365671);
+    let ctrl_signed: i32 = validate_signed_block_guard(-1, 42);
+    let ctrl_ok_signed: i32 = validate_signed_block_guard(17, 42);
+    let ctrl_mask: i32 = verify_mutated_mask_control(0, 1, 2, 3, 4, 5, 6, 7, 2147483648);
+
+    if zero_w == 0 && max_w == 32 && digest != 0 && ctrl_signed == -101 && ctrl_ok_signed == 0 && ctrl_mask == -201 {
+        return 0;
+    }
+    1
+}
