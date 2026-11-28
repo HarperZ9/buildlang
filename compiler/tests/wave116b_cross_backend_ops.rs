@@ -78,11 +78,16 @@ fn validate_spirv(path: &Path) {
 }
 
 fn validate_wgsl(path: &Path) {
+    // CI (`BUILDLANG_SHADER_TOOLS_REQUIRE=1`) installs spirv-val, glslangValidator,
+    // and dxc, not naga (matching `tests/wave83c_msl_wgsl_compute.rs`). Run naga
+    // whenever available on PATH, and only fail-closed on missing naga if
+    // `BUILDLANG_NAGA_REQUIRE=1` is explicitly set.
     let Some(tool) = find_tool("NAGA", "naga", "--version") else {
         assert!(
-            !shader_tools_required(),
-            "naga not on PATH and BUILDLANG_SHADER_TOOLS_REQUIRE=1"
+            std::env::var("BUILDLANG_NAGA_REQUIRE").as_deref() != Ok("1"),
+            "naga not on PATH and BUILDLANG_NAGA_REQUIRE=1"
         );
+        eprintln!("skipping naga for {}: naga not on PATH", path.display());
         return;
     };
     let out = Command::new(tool).arg(path).output().expect("run naga");
