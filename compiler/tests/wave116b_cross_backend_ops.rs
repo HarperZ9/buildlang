@@ -167,26 +167,11 @@ fn compile_gpu_target(src: &Path, target: &str, out: &Path) -> Output {
 
 fn compile_and_run_cpu(dir: &Path, name: &str, src: &str) -> Output {
     let bld = write_file(dir, name, src);
-    let exe_name = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        format!("{name}.bin")
-    };
-    let exe = dir.join(exe_name);
-    let build = buildc()
+    buildc()
+        .arg("run")
         .arg(&bld)
-        .args(["-o"])
-        .arg(&exe)
         .output()
-        .expect("run buildc cpu");
-    assert!(
-        build.status.success(),
-        "CPU build failed:\n{}",
-        diag(&build)
-    );
-    Command::new(&exe)
-        .output()
-        .expect("run compiled cpu binary")
+        .expect("run buildc cpu")
 }
 
 #[test]
